@@ -18,6 +18,11 @@ const apiKindToggle = document.getElementById('apiKindToggle');
 const inputThumbsRow = document.getElementById('inputThumbsRow');
 const SMART_UPLOAD_MAX = 20;
 const SMART_REFERENCE_IMAGE_MAX = 20;
+const PROMPT_TEXT_MAX_LENGTH = 20000;
+let promptEditorNodeId = '';
+let promptEditorModal = null;
+let promptEditorTextarea = null;
+let promptEditorCount = null;
 // Keep these limits aligned with ComfyUI's MiniMaxH3ReferenceToVideo schema.
 const SMART_MINIMAX_REF_IMAGE_MAX = 9;
 const SMART_MINIMAX_REF_VIDEO_MAX = 3;
@@ -7233,6 +7238,142 @@ function openSmartCanvasShortcuts(){
 function closeSmartCanvasShortcuts(){
     smartShortcutModal?.classList.remove('open');
 }
+function normalizedPromptNodeText(value){
+    return String(value == null ? '' : value).slice(0, PROMPT_TEXT_MAX_LENGTH);
+}
+function promptEditorCountLabel(value){
+    return `${String(value || '').length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
+}
+function updatePromptEditorCount(value){
+    if(promptEditorCount) promptEditorCount.textContent = promptEditorCountLabel(value);
+}
+function syncPromptNodeText(node, value, source=null){
+    if(!node || node.type !== 'smart-prompt') return '';
+    const next = normalizedPromptNodeText(value);
+    const prevExtra = promptNodeSplitExtraHeight(node);
+    node.text = next;
+    if(source && source.value !== next) source.value = next;
+    const nodeEl = world.querySelector(`.image-node[data-id="${CSS.escape(node.id)}"]`);
+    const inlineText = nodeEl?.querySelector('.prompt-node-text');
+    if(inlineText && inlineText !== source && inlineText.value !== next) inlineText.value = next;
+    if(nodeEl){
+        refreshPromptNodeSegmentsUi(nodeEl, node);
+        if(node.promptSplitEnabled === true){
+            syncPromptNodeHeightForSplit(node, prevExtra);
+            updateNodeElementDuringResize(node);
+        }
+    }
+    if(promptEditorNodeId === node.id){
+        if(promptEditorTextarea && promptEditorTextarea !== source && promptEditorTextarea.value !== next){
+            promptEditorTextarea.value = next;
+        }
+        updatePromptEditorCount(next);
+    }
+    scheduleSave();
+    return next;
+}
+function closePromptEditor(){
+    if(!promptEditorNodeId || !promptEditorModal) return;
+    const node = nodes.find(item => item.id === promptEditorNodeId && item.type === 'smart-prompt');
+    if(node && promptEditorTextarea) syncPromptNodeText(node, promptEditorTextarea.value, promptEditorTextarea);
+    promptEditorNodeId = '';
+    promptEditorModal.hidden = true;
+    promptEditorModal.classList.remove('open');
+    document.body.classList.remove('prompt-editor-open');
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    void saveCanvas();
+}
+function ensurePromptEditor(){
+    if(promptEditorModal) return promptEditorModal;
+    const modal = document.createElement('div');
+    modal.className = 'prompt-editor-modal';
+    modal.hidden = true;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'promptEditorTitle');
+    modal.innerHTML = `
+        <div class="prompt-editor-dialog">
+            <header class="prompt-editor-head">
+                <h2 id="promptEditorTitle">Prompt 编辑器</h2>
+                <div class="prompt-editor-head-actions">
+                    <button class="prompt-editor-copy" type="button"><i data-lucide="copy"></i><span>复制全文</span></button>
+                    <button class="prompt-editor-close" type="button" title="关闭" aria-label="关闭 Prompt 编辑器"><i data-lucide="x"></i></button>
+                </div>
+            </header>
+            <div class="prompt-editor-main">
+                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+            </div>
+            <footer class="prompt-editor-footer">
+                <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
+                <span class="prompt-editor-hint">自动保存 · Esc 关闭</span>
+            </footer>
+        </div>`;
+    document.body.appendChild(modal);
+    promptEditorModal = modal;
+    promptEditorTextarea = modal.querySelector('.prompt-editor-textarea');
+    promptEditorCount = modal.querySelector('.prompt-editor-count');
+    const stopCanvasEvent = event => event.stopPropagation();
+    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','wheel'].forEach(type => {
+        modal.querySelector('.prompt-editor-dialog')?.addEventListener(type, stopCanvasEvent);
+    });
+    modal.addEventListener('mousedown', event => {
+        if(event.target !== modal) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closePromptEditor();
+    });
+    promptEditorTextarea.addEventListener('input', event => {
+        const node = nodes.find(item => item.id === promptEditorNodeId && item.type === 'smart-prompt');
+        if(node) syncPromptNodeText(node, event.target.value, event.target);
+    });
+    modal.querySelector('.prompt-editor-close')?.addEventListener('click', event => {
+        event.preventDefault();
+        closePromptEditor();
+    });
+    modal.querySelector('.prompt-editor-copy')?.addEventListener('click', async event => {
+        event.preventDefault();
+        const text = promptEditorTextarea?.value || '';
+        let copied = false;
+        if(text && navigator.clipboard?.writeText){
+            try {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            } catch(_) {}
+        }
+        if(!copied) copied = await copyTextToClipboard(text);
+        toast(copied ? '已复制全文' : (text ? '复制失败' : 'Prompt 为空'));
+    });
+    document.addEventListener('keydown', event => {
+        if(event.key !== 'Escape' || !promptEditorNodeId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        closePromptEditor();
+    }, true);
+    refreshIcons();
+    return modal;
+}
+function openPromptEditor(nodeId, event=null){
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
+    const node = nodes.find(item => item.id === nodeId && item.type === 'smart-prompt');
+    if(!node) return;
+    const modal = ensurePromptEditor();
+    promptEditorNodeId = node.id;
+    promptEditorTextarea.value = normalizedPromptNodeText(node.text || '');
+    updatePromptEditorCount(promptEditorTextarea.value);
+    modal.hidden = false;
+    modal.classList.add('open');
+    document.body.classList.add('prompt-editor-open');
+    refreshIcons();
+    requestAnimationFrame(() => {
+        promptEditorTextarea?.focus({preventScroll:true});
+        const end = promptEditorTextarea?.value.length || 0;
+        promptEditorTextarea?.setSelectionRange(end, end);
+    });
+}
 function promptNodeBodyHtml(node){
     node.llmProvider = resolveChatProviderId(node.llmProvider || '');
     node.llmModel = resolveChatModel(node.llmModel || '', node.llmProvider);
@@ -7266,11 +7407,12 @@ function promptNodeBodyHtml(node){
             ${node.llmSystemEnabled ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="${escapeHtml(tr('smart.promptLlmSystemPlaceholder'))}">${escapeHtml(systemPrompt || 'You are a helpful prompt assistant.')}</textarea>` : ''}
         </div>` : '';
     return `<div class="prompt-node-card">
-        <textarea class="prompt-node-text prompt-node-control" ${readonly} placeholder="${escapeHtml(tr('smart.promptPlaceholderNode'))}">${escapeHtml(node.text || '')}</textarea>
+        <textarea class="prompt-node-text prompt-node-control" ${readonly} maxlength="${PROMPT_TEXT_MAX_LENGTH}" placeholder="${escapeHtml(tr('smart.promptPlaceholderNode'))}">${escapeHtml(node.text || '')}</textarea>
         <div class="prompt-node-tools">
             <button class="prompt-node-pill prompt-node-control prompt-preset-edit ${templateActive ? 'active' : ''}" type="button"><i data-lucide="library"></i><span>模板库</span></button>
             <button class="prompt-node-pill prompt-node-control prompt-split-toggle ${node.promptSplitEnabled ? 'active' : ''}" type="button"><i data-lucide="split"></i><span>分隔符</span></button>
             <button class="prompt-node-pill prompt-llm-toggle ${node.llmEnabled ? 'active' : ''}" type="button"><i data-lucide="sparkles"></i><span>LLM</span></button>
+            <button class="prompt-node-pill prompt-node-control prompt-editor-expand" type="button" title="展开编辑" aria-label="展开编辑 Prompt"><i data-lucide="maximize-2"></i><span>展开编辑</span></button>
         </div>
         ${node.promptSplitEnabled ? `<div class="prompt-node-split-row">
             <label class="prompt-node-split-control prompt-node-control"><span>分隔符</span><input class="prompt-node-separator" type="text" value="${escapeHtml(node.promptSeparator)}" maxlength="8" placeholder=";"></label>
@@ -8627,22 +8769,16 @@ function bindPromptNodeControls(el, node){
     el.querySelectorAll('.prompt-node-control, .prompt-node-pill').forEach(control => {
         control.addEventListener('mousedown', e => e.stopPropagation());
         control.addEventListener('click', e => e.stopPropagation());
-        control.addEventListener('dblclick', e => e.stopPropagation());
+        if(!control.classList.contains('prompt-node-text')) control.addEventListener('dblclick', e => e.stopPropagation());
     });
     const textEl = el.querySelector('.prompt-node-text');
     if(textEl) {
         bindScrollableText(textEl);
-        textEl.oninput = e => {
-            const prevExtra = promptNodeSplitExtraHeight(node);
-            node.text = e.target.value;
-            refreshPromptNodeSegmentsUi(el, node);
-            if(node.promptSplitEnabled === true){
-                syncPromptNodeHeightForSplit(node, prevExtra);
-                updateNodeElementDuringResize(node);
-            }
-            scheduleSave();
-        };
+        textEl.oninput = e => syncPromptNodeText(node, e.target.value, e.target);
+        textEl.addEventListener('dblclick', e => openPromptEditor(node.id, e), true);
     }
+    const editorExpand = el.querySelector('.prompt-editor-expand');
+    if(editorExpand) editorExpand.onclick = e => openPromptEditor(node.id, e);
     const separatorEl = el.querySelector('.prompt-node-separator');
     if(separatorEl) {
         separatorEl.oninput = e => {
@@ -9642,7 +9778,15 @@ function bindNodeEvents(){
             }
             render();
         };
-        if(nodeForControls?.type !== 'smart-group') el.ondblclick = e => e.stopPropagation();
+        if(nodeForControls?.type === 'smart-prompt') {
+            el.ondblclick = e => {
+                if(e.target.closest('.node-port,.node-delete,button,input,select,textarea:not(.prompt-node-text),.prompt-node-segments,.prompt-node-llm')){
+                    e.stopPropagation();
+                    return;
+                }
+                openPromptEditor(id, e);
+            };
+        } else if(nodeForControls?.type !== 'smart-group') el.ondblclick = e => e.stopPropagation();
         const nodeDrop = el.querySelector('.node-drop');
         nodeDrop?.addEventListener('mousedown', e => {
             if(e.button !== 0) return;
@@ -9890,6 +10034,11 @@ function bindNodeEvents(){
         const beginNodeDrag = e => {
             if(e.button !== 0 || e.target.closest('.mini-x, .smart-node-floating-menu, .node-resize-handle, .thumb-item, .node-port, .prompt-node-control, select, input, textarea, button')) return;
             if(e.target.closest('.prompt-node-pill, textarea:not(.prompt-node-text)')) return;
+            if(nodeForControls?.type === 'smart-prompt' && e.detail >= 2){
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
             e.preventDefault(); e.stopPropagation();
             window.getSelection?.()?.removeAllRanges?.();
             if(document.activeElement?.blur) document.activeElement.blur();
