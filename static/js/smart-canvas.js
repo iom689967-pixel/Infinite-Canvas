@@ -1361,7 +1361,7 @@ function selectedNodeIds(){
 }
 function isEditableTarget(target){
     const el = target || document.activeElement;
-    return !!el?.closest?.('input, textarea, select, option, [contenteditable="true"], .prompt-node-control, .prompt-input');
+    return !!el?.closest?.('input, textarea, select, option, button, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .prompt-node-control, .prompt-input, .text-node-preview');
 }
 function safeScale(value){
     const n = Number(value);
@@ -8957,7 +8957,10 @@ function clearPortDragVisual(){
 }
 function bindPromptNodeControls(el, node){
     el.querySelectorAll('.prompt-node-control, .prompt-node-pill').forEach(control => {
+        control.classList.add('nodrag', 'nopan');
+        control.addEventListener('pointerdown', e => e.stopPropagation());
         control.addEventListener('mousedown', e => e.stopPropagation());
+        control.addEventListener('touchstart', e => e.stopPropagation(), {passive:true});
         control.addEventListener('click', e => e.stopPropagation());
         if(!control.classList.contains('prompt-node-text')) control.addEventListener('dblclick', e => e.stopPropagation());
     });
@@ -10032,6 +10035,13 @@ function bindNodeEvents(){
         if(nodeForControls?.type === 'smart-prompt') bindPromptNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-text'){
             el.querySelector('.text-node-expand')?.addEventListener('click', e => openPromptEditor(id, e));
+            const preview = el.querySelector('.text-node-preview');
+            if(preview){
+                preview.classList.add('nodrag', 'nopan');
+                preview.addEventListener('pointerdown', e => e.stopPropagation());
+                preview.addEventListener('mousedown', e => e.stopPropagation());
+                preview.addEventListener('touchstart', e => e.stopPropagation(), {passive:true});
+            }
         }
         if(nodeForControls?.type === 'smart-loop') bindLoopNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-minimax') bindMinimaxNodeControls(el, nodeForControls);
@@ -10316,7 +10326,7 @@ function bindNodeEvents(){
             capturePendingUndo();
         });
         const beginNodeDrag = e => {
-            if(e.button !== 0 || e.target.closest('.mini-x, .smart-node-floating-menu, .node-resize-handle, .thumb-item, .node-port, .prompt-node-control, select, input, textarea, button')) return;
+            if(e.button !== 0 || e.target.closest('.mini-x, .smart-node-floating-menu, .node-resize-handle, .thumb-item, .node-port, .prompt-node-control, .nodrag, .nopan, select, input, textarea, button, [contenteditable]:not([contenteditable="false"])')) return;
             if(e.target.closest('.prompt-node-pill, textarea:not(.prompt-node-text)')) return;
             if((nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') && e.detail >= 2){
                 e.preventDefault();
@@ -18485,6 +18495,28 @@ window.onmouseup = e => {
         scheduleConnectionLayerRefresh();
     }
 };
+function cancelSmartNodeDrag(){
+    if(!dragState) return false;
+    restoreDraggedNodePosition();
+    dragState = null;
+    document.body.classList.remove('smart-node-drag');
+    clearDropHighlight();
+    loopInsertPreview = null;
+    discardPendingUndo();
+    render();
+    scheduleConnectionLayerRefresh();
+    return true;
+}
+window.addEventListener('pointerup', event => {
+    if(dragState && typeof window.onmouseup === 'function') window.onmouseup(event);
+});
+window.addEventListener('pointercancel', () => cancelSmartNodeDrag());
+document.documentElement.addEventListener('mouseleave', event => {
+    if(event.relatedTarget == null) cancelSmartNodeDrag();
+});
+document.addEventListener('focusin', event => {
+    if(dragState && isEditableTarget(event.target)) cancelSmartNodeDrag();
+}, true);
 shell.addEventListener('wheel', e => {
     if(e.target.closest('.composer,.smart-back,.image-edit-modal,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.workflow-transfer-panel,.log-modal,.shortcut-modal,.prompt-node-segments,.prompt-node-text,.prompt-node-llm,.smart-group-list,.minimax-library-list,.minimax-ref-track,[data-thumb-scroll]')) return;
     e.preventDefault();
@@ -18554,6 +18586,11 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && dragState){
+        e.preventDefault();
+        cancelSmartNodeDrag();
+        return;
+    }
     if((e.code === 'Space' || e.key === ' ') && !e.ctrlKey && !e.metaKey && !e.altKey && !isEditableTarget(e.target)){
         const active = selectedNode();
         if(active?.type === 'smart-minimax'){
@@ -18638,6 +18675,7 @@ window.addEventListener('keyup', e => {
 });
 window.addEventListener('blur', () => {
     isRKeyDown = false;
+    cancelSmartNodeDrag();
 });
 engineSelect.onchange = () => {
     settings.engine = engineSelect.value;

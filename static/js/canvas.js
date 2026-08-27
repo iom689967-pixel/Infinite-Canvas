@@ -6114,8 +6114,22 @@ function restoreOutputScrolls(state){
         });
     });
 }
+const NODE_DRAG_BLOCK_SELECTOR = 'textarea, input, select, option, button, audio, video, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .seg, .gen-btn, .comfy-run, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .ltx-director-timeline-host, .minimax-canvas-workbench, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area';
 function isNodeControl(target){
-    return !!target.closest('textarea, input, select, option, button, audio, video, [contenteditable="true"], .seg, .gen-btn, .comfy-run, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .ltx-director-timeline-host, .minimax-canvas-workbench, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area');
+    return !!target?.closest?.(NODE_DRAG_BLOCK_SELECTOR);
+}
+function protectNodeInteractiveArea(root){
+    if(!root) return;
+    root.classList.add('nodrag', 'nopan');
+    const stop = event => event.stopPropagation();
+    root.addEventListener('pointerdown', stop);
+    root.addEventListener('mousedown', stop);
+    root.addEventListener('touchstart', stop, {passive:true});
+    root.addEventListener('focusin', event => {
+        event.stopPropagation();
+        // 如果上一次 mouseup 丢失，编辑控件获得焦点时强制结束残留的节点拖拽。
+        if(dragNode) endDrag(event);
+    });
 }
 function destroyLTXEditor(node){
     if(!node?._ltxEditor) return;
@@ -6269,6 +6283,7 @@ function renderNode(node){
             scheduleSave();
             scheduleGeneratorInputSync();
         };
+        protectNodeInteractiveArea(body.querySelector('.prompt-editor'));
     }
     if(node.type === 'loop') body.appendChild(renderLoopBody(node));
     if(node.type === 'group') {
@@ -6304,7 +6319,11 @@ function renderNode(node){
         const promptNodes = (node.items || []).map(id => nodes.find(n => n.id === id)).filter(Boolean);
         body.innerHTML = `<div class="text-[11px] text-gray-400">${promptNodes.length} ${tr('canvas.promptCount')} ${tr('canvas.grouped')}</div>`;
     }
-    if(node.type === 'llm') body.appendChild(renderLLMBody(node));
+    if(node.type === 'llm') {
+        body.appendChild(renderLLMBody(node));
+        // LLM 正文只负责编辑与选择；节点移动统一交给标题栏。
+        protectNodeInteractiveArea(body);
+    }
     if(node.type === 'generator') body.appendChild(renderGeneratorBody(node));
     if(node.type === 'midjourney') body.appendChild(renderMidjourneyBody(node));
     if(node.type === 'msgen') body.appendChild(renderMsGenBody(node));
@@ -6324,12 +6343,16 @@ function renderNode(node){
         body.querySelectorAll('.output-img-wrap').forEach(wrap => bindOutputWrap(wrap, node));
     }
     el.appendChild(body);
-    el.querySelectorAll('button, select, textarea, input').forEach(control => {
+    el.querySelectorAll('button, select, textarea, input, [contenteditable]:not([contenteditable="false"])').forEach(control => {
+        control.classList.add('nodrag', 'nopan');
+        control.addEventListener('pointerdown', e => e.stopPropagation(), true);
         control.addEventListener('mousedown', e => e.stopPropagation(), true);
+        control.addEventListener('touchstart', e => e.stopPropagation(), {capture:true, passive:true});
         control.addEventListener('click', e => e.stopPropagation());
     });
     el.onmousedown = e => {
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
+        if(node.type === 'llm' && !e.target.closest('.node-head')) return;
         startNodeDrag(e, node);
     };
     const canInput = ['generator','midjourney','comfy','ltxDirector','output','llm','msgen','video','rh','minimax'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
@@ -8162,6 +8185,7 @@ function renderLLMChatPane(container, node){
 }
 function bindScrollableText(el){
     if(!el) return;
+    el.classList.add('nodrag', 'nopan');
     const stop = e => e.stopPropagation();
     const beginSelection = e => {
         e.stopPropagation();
@@ -8174,6 +8198,8 @@ function bindScrollableText(el){
             active:true
         };
     };
+    el.addEventListener('pointerdown', stop);
+    el.addEventListener('touchstart', stop, {passive:true});
     el.addEventListener('mousedown', beginSelection);
     el.addEventListener('mousemove', e => {
         e.stopPropagation();
@@ -15317,6 +15343,7 @@ function endDrag(event=null){
     }
     dragNode = null;
     dragBoard = null;
+    minimapDrag = false;
     resizeNode = null;
     llmPaneDrag = null;
     knifeActive = false;
@@ -15330,6 +15357,9 @@ function endDrag(event=null){
     document.body.classList.remove('canvas-node-drag', 'canvas-node-resize', 'canvas-selecting', 'canvas-board-pan');
     window.onmousemove = null;
     window.onmouseup = null;
+    if(event?.pointerId != null && event.target?.hasPointerCapture?.(event.pointerId)){
+        try { event.target.releasePointerCapture(event.pointerId); } catch(e) {}
+    }
     if(shouldRenderKnife) render();
     scheduleMinimapRender();
     if(hadContentDrag) scheduleSave();
@@ -15964,6 +15994,11 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     if(!canvas) return;
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && (dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive)){
+        e.preventDefault();
+        endDrag(e);
+        return;
+    }
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
     if(e.key === 'Shift' && !e.altKey && !isEditableTarget(document.activeElement)) setKnifeMode(true);
     if(e.key === 'Escape' && document.getElementById('imageEditModal').classList.contains('open')) { closeImageEditor(); return; }
@@ -16039,6 +16074,18 @@ window.addEventListener('blur', () => {
     }
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag();
 });
+window.addEventListener('pointerup', event => {
+    if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
+});
+window.addEventListener('pointercancel', event => {
+    if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
+});
+document.documentElement.addEventListener('mouseleave', event => {
+    if(event.relatedTarget == null && (dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive)) endDrag(event);
+});
+document.addEventListener('focusin', event => {
+    if(dragNode && isEditableTarget(event.target)) endDrag(event);
+}, true);
 function deleteSelectedNodes(){
     if(!canvas || selected.size === 0) return;
     pushUndo();
