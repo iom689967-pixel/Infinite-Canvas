@@ -376,6 +376,8 @@ let menuPoint = null;
 let linkCreateState = null;
 let internalDrag = false;
 let selected = new Set();
+// 连线选择与节点选择完全独立；这里只保存临时 UI 状态，绝不写入画布数据。
+let selectedConnections = new Set();
 let saveTimer = null;
 let creatingCanvas = false;
 let createCanvasKind = 'classic';
@@ -2081,6 +2083,7 @@ async function openCanvas(id){
         pruneMissingComfyWorkflows();
         await refreshMissingCanvasAssets();
         selected.clear();
+        selectedConnections.clear();
         setCanvasMode(true);
         renderCanvasList();
         render();
@@ -6156,7 +6159,10 @@ function renderNode(node){
         e.stopPropagation();
         if(isNodeControl(e.target)) return;
         if(e.ctrlKey || e.metaKey) selected.has(node.id) ? selected.delete(node.id) : selected.add(node.id);
-        else if(!selected.has(node.id)) { selected.clear(); selected.add(node.id); }
+        else {
+            selectedConnections.clear();
+            if(!selected.has(node.id)) { selected.clear(); selected.add(node.id); }
+        }
         refreshSelectionVisuals();
     };
     el.oncontextmenu = e => {
@@ -13294,6 +13300,7 @@ function deleteConnection(id, event){
     event?.stopPropagation();
     pushUndo();
     connections = connections.filter(c => c.id !== id);
+    selectedConnections.delete(id);
     if(hoveredConnectionId === id) hoveredConnectionId = '';
     syncGeneratorInputs();
     render();
@@ -14734,7 +14741,8 @@ function startSelection(e){
         y:e.clientY,
         moved:false,
         append:Boolean(e.shiftKey),
-        initialSelected:new Set(selected)
+        initialSelected:new Set(selected),
+        initialSelectedConnections:new Set(selectedConnections)
     };
     document.body.classList.add('canvas-selecting');
     updateSelectionBox(e.clientX, e.clientY);
@@ -14759,6 +14767,7 @@ function finishSelection(event=null){
     if(!selectDrag) return;
     const state = selectDrag;
     const nextSelection = state.append ? new Set(state.initialSelected) : new Set();
+    const nextConnectionSelection = state.append ? new Set(state.initialSelectedConnections) : new Set();
     if(state.moved){
         const rect = selectionBox.getBoundingClientRect();
         nodesEl.querySelectorAll('.node').forEach(el => {
@@ -14766,9 +14775,20 @@ function finishSelection(event=null){
             const overlaps = r.left < rect.right && r.right > rect.left && r.top < rect.bottom && r.bottom > rect.top;
             if(overlaps) nextSelection.add(el.dataset.id);
         });
+        const a = screenToWorld(state.sx, state.sy);
+        const b = screenToWorld(state.x, state.y);
+        const worldRect = {
+            x:Math.min(a.x, b.x),
+            y:Math.min(a.y, b.y),
+            w:Math.abs(b.x - a.x),
+            h:Math.abs(b.y - a.y)
+        };
+        edgeIdsIntersectingSelectionRect(worldRect).forEach(id => nextConnectionSelection.add(id));
     }
     selected.clear();
     nextSelection.forEach(id => selected.add(id));
+    selectedConnections.clear();
+    nextConnectionSelection.forEach(id => selectedConnections.add(id));
     resetSelectionGesture(event);
     render();
     if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
@@ -14826,6 +14846,7 @@ function performUndo(){
     nodes = state.nodes;
     connections = state.connections;
     selected.clear();
+    selectedConnections.clear();
     render();
     scheduleSave();
 }
@@ -15611,6 +15632,8 @@ function canResolvePort(id){
 function renderLinks(){
     linksEl.innerHTML = '';
     linkControlsEl.innerHTML = '';
+    const validConnectionIds = new Set(connections.map(connection => connection.id));
+    selectedConnections.forEach(id => { if(!validConnectionIds.has(id)) selectedConnections.delete(id); });
     // 先批量读取所有端点坐标（portPoint 里有 getBoundingClientRect），再统一写入 DOM。
     // 否则“读一条 rect → append 一条线”交错进行，每次 append 都让布局失效，下一次读 rect 就触发一次
     // 全量强制重排（layout thrashing），连线一多拖动就掉帧。读写分离后每帧只强制重排一次。
@@ -15623,7 +15646,9 @@ function renderLinks(){
     });
     segments.forEach(({c, a, b}) => {
         const relClass = isConnectionSelected(c) ? ' link-active' : '';
-        linksEl.appendChild(pathEl(a.x, a.y, b.x, b.y, `link${relClass}`));
+        const visiblePath = pathEl(a.x, a.y, b.x, b.y, `link${relClass}`);
+        visiblePath.dataset.connectionId = c.id;
+        linksEl.appendChild(visiblePath);
         linkControlsEl.appendChild(linkDeleteButton(c, a, b));
         linksEl.appendChild(linkHitEl(a.x, a.y, b.x, b.y, c.id));
     });
@@ -15703,7 +15728,7 @@ function updateConnectionHoverFromMouse(e){
     setHoveredConnection(best <= threshold ? bestId : '');
 }
 function isConnectionSelected(connection){
-    return selected.has(connection.from) || selected.has(connection.to);
+    return selectedConnections.has(connection.id);
 }
 function refreshSelectionVisuals(){
     nodesEl.querySelectorAll('.node').forEach(el => {
@@ -15744,6 +15769,63 @@ function segmentIntersectsRect(a, b, r){
     if(b.x >= r.x && b.x <= r.x + r.w && b.y >= r.y && b.y <= r.y + r.h) return true;
     const p1 = {x:r.x, y:r.y}, p2 = {x:r.x + r.w, y:r.y}, p3 = {x:r.x + r.w, y:r.y + r.h}, p4 = {x:r.x, y:r.y + r.h};
     return segmentsIntersect(a, b, p1, p2) || segmentsIntersect(a, b, p2, p3) || segmentsIntersect(a, b, p3, p4) || segmentsIntersect(a, b, p4, p1);
+}
+function cubicSvgPathData(path){
+    const values = String(path?.getAttribute?.('d') || '').match(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi)?.map(Number) || [];
+    if(values.length < 8 || values.slice(0, 8).some(value => !Number.isFinite(value))) return null;
+    return {
+        start:{x:values[0], y:values[1]},
+        control1:{x:values[2], y:values[3]},
+        control2:{x:values[4], y:values[5]},
+        end:{x:values[6], y:values[7]}
+    };
+}
+function cubicSvgPoint(data, t){
+    const u = 1 - t;
+    return {
+        x:u*u*u*data.start.x + 3*u*u*t*data.control1.x + 3*u*t*t*data.control2.x + t*t*t*data.end.x,
+        y:u*u*u*data.start.y + 3*u*u*t*data.control1.y + 3*u*t*t*data.control2.y + t*t*t*data.end.y
+    };
+}
+function svgPathIntersectsRect(path, rect, endpointPadding=0){
+    if(!path || !rect || rect.w <= 0 || rect.h <= 0) return false;
+    const fallback = cubicSvgPathData(path);
+    let totalLength = 0;
+    if(typeof path.getTotalLength === 'function'){
+        try { totalLength = path.getTotalLength(); } catch(e) { totalLength = 0; }
+    }
+    if((!Number.isFinite(totalLength) || totalLength <= 0) && fallback){
+        const distance = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+        totalLength = distance(fallback.start, fallback.control1) + distance(fallback.control1, fallback.control2) + distance(fallback.control2, fallback.end);
+    }
+    if(!Number.isFinite(totalLength) || totalLength <= 0) return false;
+    // 忽略端口旁约 8 个屏幕像素，避免框住一个节点时因共享端点误选中整束连线。
+    const trim = Math.min(Math.max(0, endpointPadding), totalLength * 0.08);
+    const startLength = trim;
+    const endLength = Math.max(startLength, totalLength - trim);
+    const testedLength = endLength - startLength;
+    const samples = Math.max(20, Math.min(50, Math.ceil(Math.max(testedLength, 1) / 24)));
+    const pointAtLength = typeof path.getPointAtLength === 'function'
+        ? length => path.getPointAtLength(length)
+        : fallback ? length => cubicSvgPoint(fallback, length / totalLength) : null;
+    if(!pointAtLength) return false;
+    let previous;
+    try { previous = pointAtLength(startLength); } catch(e) { return false; }
+    for(let i = 1; i <= samples; i++){
+        let current;
+        try { current = pointAtLength(startLength + testedLength * i / samples); } catch(e) { return false; }
+        if(segmentIntersectsRect(previous, current, rect)) return true;
+        previous = current;
+    }
+    return false;
+}
+function edgeIdsIntersectingSelectionRect(rect){
+    const hits = new Set();
+    const endpointPadding = 8 / Math.max(0.01, Number(viewport.scale) || 1);
+    linksEl.querySelectorAll('path.link[data-connection-id]').forEach(path => {
+        if(svgPathIntersectsRect(path, rect, endpointPadding)) hits.add(path.dataset.connectionId);
+    });
+    return hits;
 }
 function cubicPoint(a, b, t){
     const dx = Math.max(80, Math.abs(b.x - a.x) * .45);

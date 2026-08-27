@@ -99,6 +99,8 @@ let canvasUsesConnections = true;
 let nodes = [];
 let selectedId = '';
 let selectedIds = [];
+// 使用连接语义键保存临时 Edge 选择；不写入 canvas.connections，不参与保存或撤销。
+let selectedConnectionKeys = new Set();
 let selectedImage = {nodeId:'', index:-1};
 let dragState = null;
 let loopInsertPreview = null;
@@ -1322,6 +1324,7 @@ function clearSelection(){
     savePromptDraftForCurrent();
     selectedId = '';
     selectedIds = [];
+    selectedConnectionKeys.clear();
     selectedImage = {nodeId:'', index:-1};
 }
 function clearImageClickTimer(){
@@ -1360,6 +1363,13 @@ function isNodeSelected(id){
 }
 function selectedNodeIds(){
     return selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
+}
+function smartConnectionSelectionKey(connection){
+    return JSON.stringify([
+        String(connection?.from || ''),
+        String(connection?.to || ''),
+        String(connection?.kind || 'flow')
+    ]);
 }
 function isEditableTarget(target){
     const el = target || document.activeElement;
@@ -6517,10 +6527,11 @@ function quickConnectTemporaryConnectionSvg(){
 }
 function renderConnections(){
     const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
+    const validSelectionKeys = new Set(conns.map(smartConnectionSelectionKey));
+    selectedConnectionKeys.forEach(key => { if(!validSelectionKeys.has(key)) selectedConnectionKeys.delete(key); });
     const cascadeKeys = cascadeConnectionKeys();
     const activeCascadeCount = (smartCascadeRunPath?.states && Object.values(smartCascadeRunPath.states).filter(state => state && state !== 'done').length) || 0;
     const reduceMotion = activeCascadeCount > 24;
-    const selectedConnIds = new Set(selectedNodeIds());
     // 合并连线：同一来源连到同一分组的多个成员，合成一条到分组的连线（A→A1/A2/A3 显示为 A→分组），
     // 减少“每张图都拖一条线”的杂乱。history 连线不合并。
     const buckets = new Map();
@@ -6536,11 +6547,12 @@ function renderConnections(){
         if(isMemberTarget){
             const key = `${conn.from}|${toScope}|${kind}`;
             let b = buckets.get(key);
-            if(!b){ b = {merged:true, from:conn.from, toId:toScope, kind, indices:[], targets:[]}; buckets.set(key, b); items.push(b); }
+            if(!b){ b = {merged:true, from:conn.from, toId:toScope, kind, indices:[], targets:[], selectionKeys:[]}; buckets.set(key, b); items.push(b); }
             b.indices.push(conn.index);
             b.targets.push(conn.to);
+            b.selectionKeys.push(smartConnectionSelectionKey(conn));
         } else {
-            items.push({merged:false, from:conn.from, toId:conn.to, kind, indices:[conn.index], targets:[conn.to]});
+            items.push({merged:false, from:conn.from, toId:conn.to, kind, indices:[conn.index], targets:[conn.to], selectionKeys:[smartConnectionSelectionKey(conn)]});
         }
     });
     const paths = items.map(item => {
@@ -6560,7 +6572,7 @@ function renderConnections(){
         else if(states.length) cascadeState = 'done';
         const isCascade = !isHistory && (edgeKeys.some(k => cascadeKeys.has(k)) || Boolean(cascadeState) || isInsertPreview);
         const isPendingLine = !isCascade && item.targets.some(t => nodes.find(n => n.id === t)?.pending);
-        const isSelectedLine = selectedConnIds.size > 0 && (selectedConnIds.has(item.from) || selectedConnIds.has(item.toId) || item.targets.some(t => selectedConnIds.has(t)));
+        const isSelectedLine = item.selectionKeys.some(key => selectedConnectionKeys.has(key));
         const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
         const fy = isHistory ? fr.y + fr.height : fr.y + fr.height / 2;
         const tx = isHistory ? tr.x + tr.width / 2 : tr.x;
@@ -10065,6 +10077,7 @@ function bindNodeEvents(){
             const alreadySelected = selectedId === id && selectedIds.length === 0 && selectedImage.nodeId === '';
             selectedId = id;
             selectedIds = [];
+            selectedConnectionKeys.clear();
             selectedImage = {nodeId:'', index:-1};
             if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
             if(alreadySelected){
@@ -17685,10 +17698,94 @@ function updateSelectionBox(event){
     selectionBox.style.width = `${Math.abs(event.clientX - sx)}px`;
     selectionBox.style.height = `${Math.abs(event.clientY - sy)}px`;
 }
+function smartSegmentsIntersect(a, b, c, d){
+    const orient = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const onSegment = (p, q, r) => Math.min(p.x, r.x) <= q.x && q.x <= Math.max(p.x, r.x) && Math.min(p.y, r.y) <= q.y && q.y <= Math.max(p.y, r.y);
+    const o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
+    if(o1 === 0 && onSegment(a, c, b)) return true;
+    if(o2 === 0 && onSegment(a, d, b)) return true;
+    if(o3 === 0 && onSegment(c, a, d)) return true;
+    if(o4 === 0 && onSegment(c, b, d)) return true;
+    return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+}
+function smartSegmentIntersectsRect(a, b, rect){
+    const inside = point => point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
+    if(inside(a) || inside(b)) return true;
+    const topLeft = {x:rect.x, y:rect.y};
+    const topRight = {x:rect.x + rect.w, y:rect.y};
+    const bottomRight = {x:rect.x + rect.w, y:rect.y + rect.h};
+    const bottomLeft = {x:rect.x, y:rect.y + rect.h};
+    return smartSegmentsIntersect(a, b, topLeft, topRight)
+        || smartSegmentsIntersect(a, b, topRight, bottomRight)
+        || smartSegmentsIntersect(a, b, bottomRight, bottomLeft)
+        || smartSegmentsIntersect(a, b, bottomLeft, topLeft);
+}
+function smartCubicSvgPathData(path){
+    const values = String(path?.getAttribute?.('d') || '').match(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi)?.map(Number) || [];
+    if(values.length < 8 || values.slice(0, 8).some(value => !Number.isFinite(value))) return null;
+    return {
+        start:{x:values[0], y:values[1]},
+        control1:{x:values[2], y:values[3]},
+        control2:{x:values[4], y:values[5]},
+        end:{x:values[6], y:values[7]}
+    };
+}
+function smartCubicSvgPoint(data, t){
+    const u = 1 - t;
+    return {
+        x:u*u*u*data.start.x + 3*u*u*t*data.control1.x + 3*u*t*t*data.control2.x + t*t*t*data.end.x,
+        y:u*u*u*data.start.y + 3*u*u*t*data.control1.y + 3*u*t*t*data.control2.y + t*t*t*data.end.y
+    };
+}
+function smartSvgPathIntersectsRect(path, rect, endpointPadding=0){
+    if(!path || !rect || rect.w <= 0 || rect.h <= 0) return false;
+    const fallback = smartCubicSvgPathData(path);
+    let totalLength = 0;
+    if(typeof path.getTotalLength === 'function'){
+        try { totalLength = path.getTotalLength(); } catch(e) { totalLength = 0; }
+    }
+    if((!Number.isFinite(totalLength) || totalLength <= 0) && fallback){
+        const distance = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+        totalLength = distance(fallback.start, fallback.control1) + distance(fallback.control1, fallback.control2) + distance(fallback.control2, fallback.end);
+    }
+    if(!Number.isFinite(totalLength) || totalLength <= 0) return false;
+    const trim = Math.min(Math.max(0, endpointPadding), totalLength * 0.08);
+    const startLength = trim;
+    const endLength = Math.max(startLength, totalLength - trim);
+    const testedLength = endLength - startLength;
+    const samples = Math.max(20, Math.min(50, Math.ceil(Math.max(testedLength, 1) / 24)));
+    const pointAtLength = typeof path.getPointAtLength === 'function'
+        ? length => path.getPointAtLength(length)
+        : fallback ? length => smartCubicSvgPoint(fallback, length / totalLength) : null;
+    if(!pointAtLength) return false;
+    let previous;
+    try { previous = pointAtLength(startLength); } catch(e) { return false; }
+    for(let i = 1; i <= samples; i++){
+        let current;
+        try { current = pointAtLength(startLength + testedLength * i / samples); } catch(e) { return false; }
+        if(smartSegmentIntersectsRect(previous, current, rect)) return true;
+        previous = current;
+    }
+    return false;
+}
+function smartEdgeKeysIntersectingSelectionRect(rect){
+    const hits = new Set();
+    const endpointPadding = 8 / Math.max(0.01, Number(viewport.scale) || 1);
+    world.querySelectorAll('svg.connection-layer path.conn-line:not(.quick-connect-temp)').forEach(path => {
+        if(!smartSvgPathIntersectsRect(path, rect, endpointPadding)) return;
+        String(path.dataset.connIndex || '').split(',').forEach(rawIndex => {
+            const index = Number(rawIndex);
+            const connection = Number.isInteger(index) ? canvas?.connections?.[index] : null;
+            if(connection) hits.add(smartConnectionSelectionKey(connection));
+        });
+    });
+    return hits;
+}
 function finishSelection(event){
     if(!selectionState) return;
     const state = selectionState;
     const hits = [];
+    const edgeHits = new Set();
     if(state.moved){
         const a = state.startWorld;
         const b = screenToWorld(event);
@@ -17698,8 +17795,12 @@ function finishSelection(event){
             const r = nodeRect(node);
             if(r.x < maxX && r.x + r.width > minX && r.y < maxY && r.y + r.height > minY) hits.push(node.id);
         });
+        smartEdgeKeysIntersectingSelectionRect({x:minX, y:minY, w:maxX - minX, h:maxY - minY}).forEach(key => edgeHits.add(key));
     }
     selectedIds = state.append ? Array.from(new Set([...(state.initialIds || []), ...hits])) : hits;
+    selectedConnectionKeys = state.append
+        ? new Set([...(state.initialConnectionKeys || []), ...edgeHits])
+        : edgeHits;
     selectedId = selectedIds.length === 1 ? selectedIds[0] : '';
     selectedImage = {nodeId:'', index:-1};
     resetSmartSelectionGesture();
@@ -18030,7 +18131,8 @@ shell.onmousedown = e => {
         startWorld:screenToWorld(e),
         moved:false,
         append:Boolean(e.shiftKey),
-        initialIds:selectedNodeIds()
+        initialIds:selectedNodeIds(),
+        initialConnectionKeys:new Set(selectedConnectionKeys)
     };
     selectionState.moveHandler = e2 => updateSelectionBox(e2);
     selectionState.upHandler = e2 => finishSelection(e2);
