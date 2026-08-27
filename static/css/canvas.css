@@ -803,14 +803,15 @@ input[type=range].canvas-range::-webkit-slider-runnable-track { height:3px; bord
 .output-recover-query:disabled { opacity:.55; cursor:default; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .port { position:absolute; top:50%; width:44px; height:44px; border-radius:50%; cursor:crosshair; transform:translateY(-50%); z-index:3; }
-.port::after { content:""; position:absolute; left:15px; top:15px; width:14px; height:14px; border-radius:50%; border:2px solid #fff; background:#111827; box-shadow:0 0 0 1px #94a3b8; transition:transform .14s var(--ease); }
+.port::after { content:""; position:absolute; left:15px; top:15px; width:14px; height:14px; border-radius:50%; border:2px solid #fff; background:#111827; box-shadow:0 0 0 1px #94a3b8; transition:transform .14s var(--ease), opacity .1s ease; }
 .port:hover::after { transform:scale(1.25); }
 .port.in { left:-29px; cursor:crosshair; }
 .port.out { right:-15px; }
-.floating-connection-port { position:absolute; width:16px; height:16px; border-radius:50%; z-index:9; pointer-events:none; background:var(--card-solid); border:2px solid var(--muted); box-shadow:0 4px 12px var(--shadow); transform:translateY(-50%); opacity:.82; transition:background .1s ease, border-color .1s ease, box-shadow .1s ease, transform .1s ease, opacity .1s ease; }
-.floating-connection-port.in { left:-9px; }
-.floating-connection-port.out { right:-9px; }
-.floating-connection-port.is-snapped { background:var(--strong); border-color:var(--strong); box-shadow:0 0 0 4px color-mix(in srgb, var(--strong) 18%, transparent), 0 6px 16px var(--shadow); transform:translateY(-50%) scale(1.1); opacity:1; }
+.magnetic-port-overlay { position:fixed; inset:0; z-index:95; pointer-events:none; overflow:visible; }
+.magnetic-port-overlay .floating-connection-port { position:absolute; width:16px; height:16px; box-sizing:border-box; border-radius:50%; pointer-events:none; background:var(--card-solid); border:2px solid #7c7c84; box-shadow:0 4px 12px var(--shadow); transform:translate(-50%,-50%); opacity:.86; transition:background .1s ease, border-color .1s ease, box-shadow .1s ease, transform .1s ease, opacity .1s ease; }
+.magnetic-port-overlay .floating-connection-port::after { content:""; position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:var(--strong); transform:translate(-50%,-50%); }
+.magnetic-port-overlay .floating-connection-port.is-snapped { background:var(--card-solid); border-color:var(--strong); box-shadow:0 0 0 5px color-mix(in srgb, var(--strong) 20%, transparent), 0 6px 16px var(--shadow); transform:translate(-50%,-50%) scale(1.15); opacity:1; }
+.node.magnetic-port-candidate > .port::after { opacity:.25; }
 .node > .port { top:50%; }
 .ltxDirector-node > .port,
 .ltx-director-node > .port { top:50%; }

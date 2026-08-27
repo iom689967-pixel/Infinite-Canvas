@@ -124,9 +124,11 @@ let rightPanState = null;
 let suppressNextSmartContextMenu = false;
 let suppressSmartContextMenuTimer = null;
 const RIGHT_PAN_DRAG_THRESHOLD = 5;
-const CONNECTION_MAGNETIC_ZONE = 40;
-const CONNECTION_SNAP_ZONE = 30;
-const CONNECTION_ANCHOR_PADDING = 16;
+const MAGNETIC_DISPLAY_ENTER_PX = 110;
+const MAGNETIC_SNAP_PX = 65;
+const MAGNETIC_DISPLAY_EXIT_PX = 135;
+const MAGNETIC_VERTICAL_MARGIN_PX = 36;
+const MAGNETIC_HANDLE_INSET_PX = 18;
 let didPan = false;
 let portDragState = null;
 let quickConnectMenu = null;
@@ -9014,7 +9016,7 @@ function ensurePortDragPathElement(){
 }
 function clearPortDragVisual(){
     world.querySelector('path.port-drag-temp')?.remove();
-    world.querySelector('.floating-connection-port')?.remove();
+    clearSmartFloatingConnectionPort();
     world.querySelectorAll('.node-port.is-active').forEach(el => el.classList.remove('is-active'));
     world.querySelectorAll('.image-node.port-hover').forEach(el => el.classList.remove('port-hover'));
 }
@@ -9927,49 +9929,76 @@ function buildSmartConnectionMagneticCandidates(fromId, fromPort){
         return {
             targetId,
             targetPort,
-            side:targetPort === 'in' ? 'left' : 'right',
-            nodeEl,
-            rect:nodeEl.getBoundingClientRect()
+            nodeEl
         };
     }).filter(Boolean);
 }
-function smartConnectionMagneticCandidateAt(candidates, clientX, clientY){
+function smartConnectionMagneticCandidateAt(candidates, clientX, clientY, activeCandidate=null){
     let best = null;
     (candidates || []).forEach(candidate => {
-        const rect = candidate.rect;
-        const sideX = candidate.side === 'left' ? rect.left : rect.right;
-        const insideLimit = 14;
-        if(candidate.side === 'left' && (clientX < rect.left - CONNECTION_MAGNETIC_ZONE || clientX > rect.left + insideLimit)) return;
-        if(candidate.side === 'right' && (clientX > rect.right + CONNECTION_MAGNETIC_ZONE || clientX < rect.right - insideLimit)) return;
-        const padding = Math.min(rect.height / 2, CONNECTION_ANCHOR_PADDING * Math.max(0.05, Number(viewport.scale) || 1));
-        const handleY = Math.max(rect.top + padding, Math.min(rect.bottom - padding, clientY));
-        const distance = Math.hypot(clientX - sideX, clientY - handleY);
-        if(distance > CONNECTION_MAGNETIC_ZONE || (best && distance >= best.distance)) return;
+        const rect = candidate.nodeEl.getBoundingClientRect();
+        if(rect.width <= 0 || rect.height <= 0 || clientY < rect.top - MAGNETIC_VERTICAL_MARGIN_PX || clientY > rect.bottom + MAGNETIC_VERTICAL_MARGIN_PX) return;
+        const leftDistance = Math.abs(clientX - rect.left);
+        const rightDistance = Math.abs(clientX - rect.right);
+        const side = leftDistance < rightDistance ? 'left' : 'right';
+        const sideDistance = Math.min(leftDistance, rightDistance);
+        const displayLimit = activeCandidate?.targetId === candidate.targetId ? MAGNETIC_DISPLAY_EXIT_PX : MAGNETIC_DISPLAY_ENTER_PX;
+        if(sideDistance > displayLimit || (best && sideDistance >= best.sideDistance)) return;
+        const sideX = side === 'left' ? rect.left : rect.right;
+        const inset = Math.min(rect.height / 2, MAGNETIC_HANDLE_INSET_PX);
+        const handleY = Math.max(rect.top + inset, Math.min(rect.bottom - inset, clientY));
         const ratio = rect.height > 0 ? (handleY - rect.top) / rect.height : .5;
         best = {
             ...candidate,
-            distance,
-            snapped:distance <= CONNECTION_SNAP_ZONE,
+            rect,
+            side,
+            sideDistance,
+            snapped:sideDistance <= MAGNETIC_SNAP_PX,
             ratio:Math.max(0, Math.min(1, ratio)),
+            clientPoint:{x:sideX, y:handleY},
             worldPoint:screenToWorld({clientX:sideX, clientY:handleY})
         };
     });
     return best;
 }
+let smartFloatingConnectionTargetEl = null;
+function ensureSmartMagneticPortOverlay(){
+    let overlay = document.querySelector('.magnetic-port-overlay');
+    if(!overlay){
+        overlay = document.createElement('div');
+        overlay.className = 'magnetic-port-overlay';
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(overlay);
+    }
+    return overlay;
+}
+function clearSmartFloatingConnectionPort(){
+    document.querySelector('.magnetic-port-overlay .floating-connection-port')?.remove();
+    smartFloatingConnectionTargetEl?.classList.remove('magnetic-port-candidate');
+    smartFloatingConnectionTargetEl = null;
+}
 function renderSmartFloatingConnectionPort(candidate){
-    if(!candidate){ world.querySelector('.floating-connection-port')?.remove(); return; }
-    let handle = world.querySelector('.floating-connection-port');
-    if(handle?.parentElement !== candidate.nodeEl || handle.dataset.side !== candidate.side){
-        handle?.remove();
+    if(!candidate){ clearSmartFloatingConnectionPort(); return; }
+    const overlay = ensureSmartMagneticPortOverlay();
+    let handle = overlay.querySelector('.floating-connection-port');
+    if(!handle){
         handle = document.createElement('div');
         handle.className = 'floating-connection-port';
-        handle.dataset.side = candidate.side;
-        candidate.nodeEl.appendChild(handle);
+        overlay.appendChild(handle);
     }
+    if(smartFloatingConnectionTargetEl !== candidate.nodeEl){
+        smartFloatingConnectionTargetEl?.classList.remove('magnetic-port-candidate');
+        smartFloatingConnectionTargetEl = candidate.nodeEl;
+        smartFloatingConnectionTargetEl.classList.add('magnetic-port-candidate');
+    }
+    handle.dataset.candidateId = candidate.targetId;
+    handle.dataset.side = candidate.side;
+    handle.dataset.sideDistance = candidate.sideDistance.toFixed(1);
     handle.classList.toggle('in', candidate.side === 'left');
     handle.classList.toggle('out', candidate.side === 'right');
     handle.classList.toggle('is-snapped', candidate.snapped);
-    handle.style.top = `${candidate.ratio * 100}%`;
+    handle.style.left = `${candidate.clientPoint.x}px`;
+    handle.style.top = `${candidate.clientPoint.y}px`;
 }
 function updatePortDragVisual(){
     if(!portDragState) return;
@@ -18427,7 +18456,7 @@ window.onmousemove = e => {
         const p = screenToWorld(e);
         portDragState.currentWorld = p;
         portDragState.moved = true;
-        const magnetic = smartConnectionMagneticCandidateAt(portDragState.magneticCandidates, e.clientX, e.clientY);
+        const magnetic = smartConnectionMagneticCandidateAt(portDragState.magneticCandidates, e.clientX, e.clientY, portDragState.magnetic);
         const hitEl = document.elementFromPoint(e.clientX, e.clientY);
         const portEl = hitEl?.closest?.('.node-port');
         const nodeEl = portEl?.closest?.('.image-node') || hitEl?.closest?.('.image-node');
