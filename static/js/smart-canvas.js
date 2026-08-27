@@ -19,6 +19,12 @@ const inputThumbsRow = document.getElementById('inputThumbsRow');
 const SMART_UPLOAD_MAX = 20;
 const SMART_REFERENCE_IMAGE_MAX = 20;
 const PROMPT_TEXT_MAX_LENGTH = 20000;
+const API_COMPOSER_DEFAULT_WIDTH = 860;
+const API_COMPOSER_DEFAULT_HEIGHT = 540;
+const API_COMPOSER_MIN_WIDTH = 700;
+const API_COMPOSER_MIN_HEIGHT = 430;
+const API_COMPOSER_PROMPT_MIN_HEIGHT = 220;
+const API_COMPOSER_PROMPT_MAX_HEIGHT = 600;
 let promptEditorNodeId = '';
 let promptEditorModal = null;
 let promptEditorTextarea = null;
@@ -92,6 +98,7 @@ let selectionState = null;
 let isRKeyDown = false;
 let selectionJustFinished = false;
 let resizeState = null;
+let composerResizeState = null;
 let llmInstructionResizeState = null;
 let promptSplitResizeState = null;
 let thumbDragState = null;
@@ -368,7 +375,7 @@ let settings = {
     editUpscale:false,
     editUpscaleRes:2048,
     jimengUpscaleRes:'2k',
-    promptH:124
+    promptH:260
 };
 const MS_GEN_MODELS = {
     zimage: { label:'ZImage', modelId:'Tongyi-MAI/Z-Image-Turbo', supportsImage:false, endpoint:'/generate' },
@@ -13077,13 +13084,22 @@ function loadPromptDraft(subject){
         setPromptText('');
     }
 }
+function composerLayoutSize(node){
+    const explicitW = Number(node?.composerWidth);
+    const explicitH = Number(node?.composerHeight);
+    return {
+        width:Math.max(API_COMPOSER_MIN_WIDTH, Math.round(Number.isFinite(explicitW) && explicitW > 0 ? explicitW : API_COMPOSER_DEFAULT_WIDTH)),
+        height:Math.max(API_COMPOSER_MIN_HEIGHT, Math.round(Number.isFinite(explicitH) && explicitH > 0 ? explicitH : API_COMPOSER_DEFAULT_HEIGHT))
+    };
+}
 function positionComposerForNode(node){
     if(!node) return;
     const rect = nodeRect(node);
     const gap = 14;
-    const cardW = 540;
-    composer.style.width = `${cardW}px`;
-    composer.style.left = `${rect.x + rect.width / 2 - cardW / 2}px`;
+    const panel = composerLayoutSize(node);
+    composer.style.width = `${panel.width}px`;
+    composer.style.setProperty('--composer-h', `${panel.height}px`);
+    composer.style.left = `${rect.x + rect.width / 2 - panel.width / 2}px`;
     composer.style.top = `${rect.y + rect.height + gap}px`;
 }
 let composerUpdateTimer = 0;
@@ -13150,7 +13166,7 @@ function updateComposer(){
     setPromptInputLocked(false);
     syncCascadeRunButton(node);
     positionComposerForNode(node);
-    const ph = Math.max(60, Math.min(380, Number(settings.promptH) || 124));
+    const ph = Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Math.min(API_COMPOSER_PROMPT_MAX_HEIGHT, Number(settings.promptH) || 260));
     promptInput.style.setProperty('--prompt-h', `${ph}px`);
     renderInputThumbsRow(node);
     renderInputPromptPreview(node);
@@ -17736,11 +17752,31 @@ window.onmousemove = e => {
         updatePortDragVisual();
         return;
     }
+    if(composerResizeState){
+        e.preventDefault();
+        const node = nodes.find(n => n.id === composerResizeState.id);
+        if(!node) return;
+        const scale = Math.max(0.05, Number(viewport.scale) || 1);
+        const dx = (e.clientX - composerResizeState.startX) / scale;
+        const dy = (e.clientY - composerResizeState.startY) / scale;
+        node.composerWidth = Math.max(API_COMPOSER_MIN_WIDTH, Math.round(composerResizeState.startW + dx));
+        node.composerHeight = Math.max(API_COMPOSER_MIN_HEIGHT, Math.round(composerResizeState.startH + dy));
+        positionComposerForNode(node);
+        return;
+    }
     if(promptResizeState){
         e.preventDefault();
-        const dy = e.clientY - promptResizeState.startY;
-        settings.promptH = Math.max(60, Math.min(380, promptResizeState.startH + dy));
+        const scale = Math.max(0.05, Number(viewport.scale) || 1);
+        const dy = (e.clientY - promptResizeState.startY) / scale;
+        settings.promptH = Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Math.min(API_COMPOSER_PROMPT_MAX_HEIGHT, promptResizeState.startH + dy));
         promptInput.style.setProperty('--prompt-h', `${settings.promptH}px`);
+        const node = activeComposerNode();
+        if(node){
+            const currentPanel = composerLayoutSize(node);
+            const requiredPanelH = Math.max(API_COMPOSER_MIN_HEIGHT, Math.round(settings.promptH + 220));
+            if(requiredPanelH > currentPanel.height) node.composerHeight = requiredPanelH;
+            positionComposerForNode(node);
+        }
         persistActiveSmartSettings();
         return;
     }
@@ -17991,6 +18027,15 @@ window.onmouseup = e => {
         clearPortDragVisual();
         handlePortDrop(drag, e);
         return;
+    }
+    if(composerResizeState){
+        const node = nodes.find(n => n.id === composerResizeState.id);
+        const panel = node ? composerLayoutSize(node) : null;
+        const changed = panel && (Math.abs(panel.width - composerResizeState.startW) > 1 || Math.abs(panel.height - composerResizeState.startH) > 1);
+        if(changed) commitPendingUndo(); else discardPendingUndo();
+        composerResizeState = null;
+        document.body.classList.remove('smart-composer-resize');
+        scheduleSave();
     }
     if(promptResizeState){ promptResizeState = null; scheduleSave(); }
     if(selectionState) finishSelection(e);
@@ -18348,10 +18393,36 @@ if(promptResize){
         e.preventDefault(); e.stopPropagation();
         promptResizeState = {
             startY: e.clientY,
-            startH: Number(settings.promptH) || promptInput.offsetHeight || 124
+            startH: Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Number(settings.promptH) || promptInput.offsetHeight || 260)
         };
     });
 }
+const composerCard = composer?.querySelector('.composer-card');
+let composerResizeHandle = composerCard?.querySelector('.composer-resize-handle');
+if(composerCard && !composerResizeHandle){
+    composerResizeHandle = document.createElement('div');
+    composerResizeHandle.className = 'composer-resize-handle';
+    composerResizeHandle.dataset.composerResize = '1';
+    composerResizeHandle.title = '拖拽调整生成面板尺寸';
+    composerCard.appendChild(composerResizeHandle);
+}
+composerResizeHandle?.addEventListener('mousedown', e => {
+    if(e.button !== 0) return;
+    const node = activeComposerNode();
+    if(!node) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const panel = composerLayoutSize(node);
+    composerResizeState = {
+        id:node.id,
+        startX:e.clientX,
+        startY:e.clientY,
+        startW:panel.width,
+        startH:panel.height
+    };
+    document.body.classList.add('smart-composer-resize');
+    capturePendingUndo();
+});
 runBtn.onclick = runGeneration;
 cascadeRunBtn.onclick = () => {
     const node = selectedNode();
