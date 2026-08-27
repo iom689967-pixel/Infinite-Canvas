@@ -371,6 +371,7 @@ let knifeChanged = false;
 let knifeNeedsRender = false;
 let selectDrag = null;
 let isRKeyDown = false;
+let isSpacePanKeyDown = false;
 let menuPoint = null;
 let linkCreateState = null;
 let internalDrag = false;
@@ -14702,20 +14703,51 @@ function nodeBounds(ids){
     return {x:x1, y:y1, w:x2 - x1, h:y2 - y1};
 }
 
+function resetSelectionGesture(event=null){
+    const state = selectDrag;
+    if(state?.moveHandler) window.removeEventListener('mousemove', state.moveHandler, true);
+    if(state?.upHandler) window.removeEventListener('mouseup', state.upHandler, true);
+    selectionBox.style.display = 'none';
+    selectionBox.style.width = '0px';
+    selectionBox.style.height = '0px';
+    selectDrag = null;
+    document.body.classList.remove('canvas-selecting');
+    window.onmousemove = null;
+    window.onmouseup = null;
+    if(event?.pointerId != null && event.target?.hasPointerCapture?.(event.pointerId)){
+        try { event.target.releasePointerCapture(event.pointerId); } catch(e) {}
+    }
+}
+function cancelSelection(event=null){
+    if(!selectDrag) return false;
+    resetSelectionGesture(event);
+    return true;
+}
 function startSelection(e){
     e.preventDefault();
     e.stopPropagation();
     if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
-    selectDrag = {sx:e.clientX, sy:e.clientY, x:e.clientX, y:e.clientY};
+    selectDrag = {
+        sx:e.clientX,
+        sy:e.clientY,
+        x:e.clientX,
+        y:e.clientY,
+        moved:false,
+        append:Boolean(e.shiftKey),
+        initialSelected:new Set(selected)
+    };
     document.body.classList.add('canvas-selecting');
-    selectionBox.style.display = 'block';
     updateSelectionBox(e.clientX, e.clientY);
-    window.onmousemove = e2 => updateSelectionBox(e2.clientX, e2.clientY);
-    window.onmouseup = finishSelection;
+    selectDrag.moveHandler = e2 => updateSelectionBox(e2.clientX, e2.clientY);
+    selectDrag.upHandler = e2 => finishSelection(e2);
+    window.addEventListener('mousemove', selectDrag.moveHandler, true);
+    window.addEventListener('mouseup', selectDrag.upHandler, true);
 }
 function updateSelectionBox(x, y){
     if(!selectDrag) return;
     selectDrag.x = x; selectDrag.y = y;
+    if(Math.hypot(x - selectDrag.sx, y - selectDrag.sy) > 3) selectDrag.moved = true;
+    selectionBox.style.display = selectDrag.moved ? 'block' : 'none';
     const left = Math.min(selectDrag.sx, x);
     const top = Math.min(selectDrag.sy, y);
     selectionBox.style.left = `${left}px`;
@@ -14723,20 +14755,21 @@ function updateSelectionBox(x, y){
     selectionBox.style.width = `${Math.abs(x - selectDrag.sx)}px`;
     selectionBox.style.height = `${Math.abs(y - selectDrag.sy)}px`;
 }
-function finishSelection(){
+function finishSelection(event=null){
     if(!selectDrag) return;
-    const rect = selectionBox.getBoundingClientRect();
-    selectionBox.style.display = 'none';
+    const state = selectDrag;
+    const nextSelection = state.append ? new Set(state.initialSelected) : new Set();
+    if(state.moved){
+        const rect = selectionBox.getBoundingClientRect();
+        nodesEl.querySelectorAll('.node').forEach(el => {
+            const r = el.getBoundingClientRect();
+            const overlaps = r.left < rect.right && r.right > rect.left && r.top < rect.bottom && r.bottom > rect.top;
+            if(overlaps) nextSelection.add(el.dataset.id);
+        });
+    }
     selected.clear();
-    nodesEl.querySelectorAll('.node').forEach(el => {
-        const r = el.getBoundingClientRect();
-        const overlaps = r.left < rect.right && r.right > rect.left && r.top < rect.bottom && r.bottom > rect.top;
-        if(overlaps) selected.add(el.dataset.id);
-    });
-    selectDrag = null;
-    document.body.classList.remove('canvas-selecting');
-    window.onmousemove = null;
-    window.onmouseup = null;
+    nextSelection.forEach(id => selected.add(id));
+    resetSelectionGesture(event);
     render();
     if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
 }
@@ -15335,6 +15368,7 @@ function sanitizeConnections(){
 function endDrag(event=null){
     const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged || tempLink);
     const hadViewportDrag = Boolean(dragBoard || minimapDrag);
+    const boardDragState = dragBoard;
     if(dragNode){
         const moved = [dragNode.node, ...(dragNode.children || []).map(c => c.node)].filter(Boolean);
         // 拖动 group/promptGroup 自身时不重新评估（成员跟着一起走，包含关系不变）
@@ -15355,6 +15389,8 @@ function endDrag(event=null){
     if(!event?.shiftKey) setKnifeMode(false);
     if(textSelectionGuard) textSelectionGuard.active = false;
     document.body.classList.remove('canvas-node-drag', 'canvas-node-resize', 'canvas-selecting', 'canvas-board-pan');
+    if(boardDragState?.moveHandler) window.removeEventListener('mousemove', boardDragState.moveHandler, true);
+    if(boardDragState?.upHandler) window.removeEventListener('mouseup', boardDragState.upHandler, true);
     window.onmousemove = null;
     window.onmouseup = null;
     if(event?.pointerId != null && event.target?.hasPointerCapture?.(event.pointerId)){
@@ -15797,6 +15833,13 @@ function isEditableTarget(target){
     const tag = target?.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable || target?.closest?.('select, option');
 }
+function isSpacePanBlockedTarget(target){
+    return isEditableTarget(target) || Boolean(target?.closest?.('button, [role="button"], a, .modal, .create-menu, .toolbar, .nodrag, .nopan'));
+}
+function setSpacePanKey(active){
+    isSpacePanKeyDown = Boolean(active && canvas);
+    document.body.classList.toggle('canvas-space-pan-ready', isSpacePanKeyDown);
+}
 minimap?.addEventListener('mousedown', e => {
     if(!canvas || e.button !== 0) return;
     if(e.target.closest?.('#canvasArrangeBtn')) return;
@@ -15845,23 +15888,23 @@ function startBoardPan(e, opts={}){
     e.stopPropagation();
     closeCreateMenu();
     if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
-    dragBoard = {sx:e.clientX, sy:e.clientY, ox:viewport.x, oy:viewport.y, moved:false, clearSelectionOnClick:Boolean(opts.clearSelectionOnClick)};
+    dragBoard = {sx:e.clientX, sy:e.clientY, ox:viewport.x, oy:viewport.y, moved:false, spacePan:Boolean(opts.spacePan)};
     document.body.classList.add('canvas-board-pan');
-    window.onmousemove = e2 => {
+    dragBoard.moveHandler = e2 => {
+        if(!dragBoard) return;
         if(Math.hypot(e2.clientX - dragBoard.sx, e2.clientY - dragBoard.sy) > 4) dragBoard.moved = true;
         viewport.x = dragBoard.ox + e2.clientX - dragBoard.sx;
         viewport.y = dragBoard.oy + e2.clientY - dragBoard.sy;
         applyViewport();
     };
-    window.onmouseup = e2 => {
-        const shouldClearSelection = dragBoard?.clearSelectionOnClick && !dragBoard.moved && selected.size;
-        if(shouldClearSelection){
-            selected.clear();
-            refreshSelectionVisuals();
-        }
-        endDrag(e2);
-    };
+    dragBoard.upHandler = e2 => endDrag(e2);
+    window.addEventListener('mousemove', dragBoard.moveHandler, true);
+    window.addEventListener('mouseup', dragBoard.upHandler, true);
     return true;
+}
+
+function isCanvasBackgroundTarget(target){
+    return target === board || target === world || target === nodesEl || target === linksEl;
 }
 
 board.onmousedown = e => {
@@ -15871,23 +15914,22 @@ board.onmousedown = e => {
         return;
     }
     if(e.button !== 0) return;
-    if(startKnifeDrag(e)) return;
     // Dismiss any open native select dropdown
     if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
-    if(e.target !== board && e.target !== world && e.target !== nodesEl && e.target !== linksEl) return;
+    if(!isCanvasBackgroundTarget(e.target)){
+        startKnifeDrag(e);
+        return;
+    }
     closeCreateMenu();
-    if(isRKeyDown){
-        e.preventDefault();
-        startSelection(e);
+    if(isSpacePanKeyDown){
+        startBoardPan(e, {spacePan:true});
         return;
     }
-    if(e.ctrlKey || e.metaKey){
-        e.preventDefault();
-        startSelection(e);
-        return;
-    }
-    startBoardPan(e, {clearSelectionOnClick:true});
+    startSelection(e);
 };
+board.addEventListener('auxclick', e => {
+    if(e.button === 1) e.preventDefault();
+});
 board.addEventListener('mousemove', e => {
     const point = screenToWorld(e.clientX, e.clientY);
     lastMouseBoard = point;
@@ -15994,13 +16036,24 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     if(!canvas) return;
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && selectDrag){
+        e.preventDefault();
+        cancelSelection(e);
+        setSpacePanKey(false);
+        return;
+    }
     if(e.key === 'Escape' && (dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive)){
         e.preventDefault();
         endDrag(e);
+        setSpacePanKey(false);
+        return;
+    }
+    if((e.code === 'Space' || e.key === ' ') && !e.ctrlKey && !e.metaKey && !e.altKey && !isSpacePanBlockedTarget(e.target)){
+        e.preventDefault();
+        setSpacePanKey(true);
         return;
     }
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
-    if(e.key === 'Shift' && !e.altKey && !isEditableTarget(document.activeElement)) setKnifeMode(true);
     if(e.key === 'Escape' && document.getElementById('imageEditModal').classList.contains('open')) { closeImageEditor(); return; }
     if(e.key === 'Escape' && promptTemplateModal?.classList.contains('open')) { closePromptTemplateModal(); return; }
     if(outputLightbox.classList.contains('open') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')){
@@ -16062,26 +16115,34 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
     if(e.key === 'Shift') setKnifeMode(false);
-});
-window.addEventListener('blur', () => { isRKeyDown = false; setKnifeMode(false); });
-window.addEventListener('blur', () => {
-    if(selectDrag){
-        selectionBox.style.display = 'none';
-        selectDrag = null;
-        document.body.classList.remove('canvas-selecting');
-        window.onmousemove = null;
-        window.onmouseup = null;
+    if(e.code === 'Space' || e.key === ' '){
+        const shouldEndSpacePan = Boolean(dragBoard?.spacePan);
+        setSpacePanKey(false);
+        if(shouldEndSpacePan) endDrag(e);
     }
+});
+window.addEventListener('blur', () => { isRKeyDown = false; setSpacePanKey(false); setKnifeMode(false); });
+window.addEventListener('blur', () => {
+    if(selectDrag) cancelSelection();
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag();
 });
 window.addEventListener('pointerup', event => {
+    if(selectDrag){
+        finishSelection(event);
+        return;
+    }
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
 });
 window.addEventListener('pointercancel', event => {
+    if(selectDrag) cancelSelection(event);
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
+    setSpacePanKey(false);
 });
 document.documentElement.addEventListener('mouseleave', event => {
-    if(event.relatedTarget == null && (dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive)) endDrag(event);
+    if(event.relatedTarget != null) return;
+    if(selectDrag) cancelSelection(event);
+    if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
+    setSpacePanKey(false);
 });
 document.addEventListener('focusin', event => {
     if(dragNode && isEditableTarget(event.target)) endDrag(event);

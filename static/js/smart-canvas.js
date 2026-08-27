@@ -104,6 +104,8 @@ let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
 let isRKeyDown = false;
+let isSpacePanKeyDown = false;
+let spacePanGestureUsed = false;
 let selectionJustFinished = false;
 let resizeState = null;
 let composerResizeState = null;
@@ -17657,11 +17659,27 @@ function resumeSmartPendingTasks(){
         resumeSmartPendingNode(node);
     });
 }
+function resetSmartSelectionGesture(){
+    const state = selectionState;
+    if(state?.moveHandler) window.removeEventListener('mousemove', state.moveHandler, true);
+    if(state?.upHandler) window.removeEventListener('mouseup', state.upHandler, true);
+    selectionState = null;
+    selectionBox.style.display = 'none';
+    selectionBox.style.width = '0px';
+    selectionBox.style.height = '0px';
+    shell.classList.remove('selecting');
+}
+function cancelSmartSelection(){
+    if(!selectionState) return false;
+    resetSmartSelectionGesture();
+    return true;
+}
 function updateSelectionBox(event){
     if(!selectionState) return;
     const sx = selectionState.startScreen.x, sy = selectionState.startScreen.y;
+    if(Math.hypot(event.clientX - sx, event.clientY - sy) > 3) selectionState.moved = true;
     const x = Math.min(sx, event.clientX), y = Math.min(sy, event.clientY);
-    selectionBox.style.display = 'block';
+    selectionBox.style.display = selectionState.moved ? 'block' : 'none';
     selectionBox.style.left = `${x}px`;
     selectionBox.style.top = `${y}px`;
     selectionBox.style.width = `${Math.abs(event.clientX - sx)}px`;
@@ -17669,19 +17687,23 @@ function updateSelectionBox(event){
 }
 function finishSelection(event){
     if(!selectionState) return;
-    const a = selectionState.startWorld;
-    const b = screenToWorld(event);
-    const minX = Math.min(a.x, b.x), minY = Math.min(a.y, b.y);
-    const maxX = Math.max(a.x, b.x), maxY = Math.max(a.y, b.y);
-    selectedIds = nodes.filter(node => {
-        const r = nodeRect(node);
-        return r.x < maxX && r.x + r.width > minX && r.y < maxY && r.y + r.height > minY;
-    }).map(n => n.id);
+    const state = selectionState;
+    const hits = [];
+    if(state.moved){
+        const a = state.startWorld;
+        const b = screenToWorld(event);
+        const minX = Math.min(a.x, b.x), minY = Math.min(a.y, b.y);
+        const maxX = Math.max(a.x, b.x), maxY = Math.max(a.y, b.y);
+        nodes.forEach(node => {
+            const r = nodeRect(node);
+            if(r.x < maxX && r.x + r.width > minX && r.y < maxY && r.y + r.height > minY) hits.push(node.id);
+        });
+    }
+    selectedIds = state.append ? Array.from(new Set([...(state.initialIds || []), ...hits])) : hits;
     selectedId = selectedIds.length === 1 ? selectedIds[0] : '';
     selectedImage = {nodeId:'', index:-1};
-    selectionState = null;
+    resetSmartSelectionGesture();
     selectionJustFinished = true;
-    selectionBox.style.display = 'none';
     render();
     setTimeout(() => { selectionJustFinished = false; }, 0);
 }
@@ -17908,6 +17930,69 @@ function createNodeFromMenu(type){
     createMenuGroupId = '';
     return created;
 }
+const SMART_CANVAS_OVERLAY_SELECTOR = '.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.workflow-transfer-panel,.log-modal,.shortcut-modal,.image-edit-modal,.preview-modal,.create-menu,.smart-minimap,.toolbar,.nodrag,.nopan,input,textarea,select,button,[contenteditable]:not([contenteditable="false"]),.node-port,.node-resize-handle,.conn-hit,.conn-cut';
+function isSmartCanvasBackgroundTarget(target){
+    return target === shell || target === world || target?.classList?.contains?.('connection-layer');
+}
+function isSmartPanBlockedTarget(target){
+    return Boolean(target?.closest?.(SMART_CANVAS_OVERLAY_SELECTOR));
+}
+function setSmartSpacePanKey(active){
+    isSpacePanKeyDown = Boolean(active && canvas);
+    shell.classList.toggle('space-pan-ready', isSpacePanKeyDown);
+}
+function startSmartPan(e, {spacePan=false}={}){
+    if(isSmartPanBlockedTarget(e.target)) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    closeCreateMenu();
+    if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    didPan = false;
+    panState = {
+        button:e.button,
+        startX:e.clientX,
+        startY:e.clientY,
+        ox:viewport.x,
+        oy:viewport.y,
+        moved:false,
+        spacePan:Boolean(spacePan)
+    };
+    panState.moveHandler = e2 => updateSmartPan(e2);
+    panState.upHandler = () => finishSmartPan();
+    window.addEventListener('mousemove', panState.moveHandler, true);
+    window.addEventListener('mouseup', panState.upHandler, true);
+    if(spacePan) spacePanGestureUsed = true;
+    shell.classList.add('panning');
+    return true;
+}
+function finishSmartPan({save=true}={}){
+    if(!panState) return false;
+    const state = panState;
+    if(state.moveHandler) window.removeEventListener('mousemove', state.moveHandler, true);
+    if(state.upHandler) window.removeEventListener('mouseup', state.upHandler, true);
+    panState = null;
+    shell.classList.remove('panning');
+    didPan = Boolean(state.moved || state.spacePan);
+    if(save && state.moved) scheduleSave();
+    setTimeout(() => { didPan = false; }, 0);
+    return true;
+}
+function updateSmartPan(e){
+    if(!panState) return false;
+    if(panState.lastX === e.clientX && panState.lastY === e.clientY) return true;
+    panState.lastX = e.clientX;
+    panState.lastY = e.clientY;
+    const dx = e.clientX - panState.startX;
+    const dy = e.clientY - panState.startY;
+    if(Math.abs(dx) + Math.abs(dy) > 3){
+        panState.moved = true;
+        didPan = true;
+    }
+    viewport.x = panState.ox + dx;
+    viewport.y = panState.oy + dy;
+    applyViewport();
+    return true;
+}
 shell.addEventListener('mousedown', e => {
     if(!zoomPreviewState) return;
     if(e.button !== 0) return;
@@ -17927,37 +18012,36 @@ shell.addEventListener('click', e => {
 }, true);
 shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
-    if(e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
+    if(e.button === 1){
+        startSmartPan(e);
+        return;
+    }
+    if(e.button !== 0 || !isSmartCanvasBackgroundTarget(e.target)) return;
     closeCreateMenu();
-    if(e.button === 0 && e.shiftKey){
-        e.preventDefault();
-        didPan = false;
-        connectionEraseState = {started:false, count:0, indices:new Set(), lastX:e.clientX, lastY:e.clientY, trail:[]};
-        shell.classList.add('connection-erasing');
-        updateConnectionEraseTrail(e);
-        eraseConnectionsAtPoint(e);
+    if(isSpacePanKeyDown){
+        startSmartPan(e, {spacePan:true});
         return;
     }
-    if(e.button === 0 && isRKeyDown){
-        e.preventDefault();
-        didPan = false;
-        selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
-        updateSelectionBox(e);
-        return;
-    }
-    if(e.button === 0 && (e.ctrlKey || e.metaKey)){
-        e.preventDefault();
-        didPan = false;
-        selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
-        updateSelectionBox(e);
-        return;
-    }
-    if(e.button !== 0 && e.button !== 1) return;
     e.preventDefault();
+    e.stopPropagation();
     didPan = false;
-    panState = {button:e.button, startX:e.clientX, startY:e.clientY, ox:viewport.x, oy:viewport.y};
-    shell.classList.add('panning');
+    selectionState = {
+        startScreen:{x:e.clientX, y:e.clientY},
+        startWorld:screenToWorld(e),
+        moved:false,
+        append:Boolean(e.shiftKey),
+        initialIds:selectedNodeIds()
+    };
+    selectionState.moveHandler = e2 => updateSelectionBox(e2);
+    selectionState.upHandler = e2 => finishSelection(e2);
+    window.addEventListener('mousemove', selectionState.moveHandler, true);
+    window.addEventListener('mouseup', selectionState.upHandler, true);
+    shell.classList.add('selecting');
+    updateSelectionBox(e);
 };
+shell.addEventListener('auxclick', e => {
+    if(e.button === 1) e.preventDefault();
+});
 shell.oncontextmenu = e => {
     if((e.ctrlKey || e.metaKey) || isRKeyDown){
         e.preventDefault();
@@ -18261,12 +18345,7 @@ window.onmousemove = e => {
         else return;
     }
     if(panState){
-        const dx = e.clientX - panState.startX;
-        const dy = e.clientY - panState.startY;
-        if(Math.abs(dx) + Math.abs(dy) > 3) didPan = true;
-        viewport.x = panState.ox + dx;
-        viewport.y = panState.oy + dy;
-        applyViewport();
+        updateSmartPan(e);
         return;
     }
     if(!dragState) return;
@@ -18379,12 +18458,7 @@ window.onmouseup = e => {
         if(!thumbDragState.detached) discardPendingUndo();
         thumbDragState = null;
     }
-    if(panState) {
-        panState = null;
-        shell.classList.remove('panning');
-        scheduleSave();
-        setTimeout(() => { didPan = false; }, 0);
-    }
+    if(panState) finishSmartPan();
     if(smartMinimapDrag){
         smartMinimapDrag = false;
     }
@@ -18508,11 +18582,20 @@ function cancelSmartNodeDrag(){
     return true;
 }
 window.addEventListener('pointerup', event => {
-    if(dragState && typeof window.onmouseup === 'function') window.onmouseup(event);
+    if((selectionState || panState || dragState) && typeof window.onmouseup === 'function') window.onmouseup(event);
 });
-window.addEventListener('pointercancel', () => cancelSmartNodeDrag());
+window.addEventListener('pointercancel', () => {
+    cancelSmartSelection();
+    finishSmartPan();
+    cancelSmartNodeDrag();
+    setSmartSpacePanKey(false);
+});
 document.documentElement.addEventListener('mouseleave', event => {
-    if(event.relatedTarget == null) cancelSmartNodeDrag();
+    if(event.relatedTarget != null) return;
+    cancelSmartSelection();
+    finishSmartPan();
+    cancelSmartNodeDrag();
+    setSmartSpacePanKey(false);
 });
 document.addEventListener('focusin', event => {
     if(dragState && isEditableTarget(event.target)) cancelSmartNodeDrag();
@@ -18586,22 +18669,19 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
-    if(e.key === 'Escape' && dragState){
+    if(e.key === 'Escape' && (selectionState || panState || dragState)){
         e.preventDefault();
+        cancelSmartSelection();
+        finishSmartPan();
         cancelSmartNodeDrag();
+        setSmartSpacePanKey(false);
         return;
     }
     if((e.code === 'Space' || e.key === ' ') && !e.ctrlKey && !e.metaKey && !e.altKey && !isEditableTarget(e.target)){
-        const active = selectedNode();
-        if(active?.type === 'smart-minimax'){
-            const nodeEl = [...(world?.querySelectorAll?.('.image-node') || [])].find(item => item.dataset.id === active.id);
-            const playBtn = nodeEl?.querySelector?.('[data-minimax-play-timeline]');
-            if(playBtn){
-                e.preventDefault();
-                playBtn.click();
-                return;
-            }
-        }
+        e.preventDefault();
+        if(!isSpacePanKeyDown) spacePanGestureUsed = false;
+        setSmartSpacePanKey(true);
+        return;
     }
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
     if(imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
@@ -18672,10 +18752,28 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
+    if(e.code === 'Space' || e.key === ' '){
+        const shouldEndSpacePan = Boolean(panState?.spacePan);
+        const shouldRunMinimax = isSpacePanKeyDown && !spacePanGestureUsed && !isEditableTarget(e.target);
+        setSmartSpacePanKey(false);
+        if(shouldEndSpacePan) finishSmartPan();
+        if(shouldRunMinimax){
+            const active = selectedNode();
+            if(active?.type === 'smart-minimax'){
+                const nodeEl = [...(world?.querySelectorAll?.('.image-node') || [])].find(item => item.dataset.id === active.id);
+                nodeEl?.querySelector?.('[data-minimax-play-timeline]')?.click();
+            }
+        }
+        spacePanGestureUsed = false;
+    }
 });
 window.addEventListener('blur', () => {
     isRKeyDown = false;
+    cancelSmartSelection();
+    finishSmartPan();
     cancelSmartNodeDrag();
+    setSmartSpacePanKey(false);
+    spacePanGestureUsed = false;
 });
 engineSelect.onchange = () => {
     settings.engine = engineSelect.value;
