@@ -120,6 +120,10 @@ let mentionRange = null;
 let mentionAnchorEl = null;
 let mentionInsertMode = 'token';
 let panState = null;
+let rightPanState = null;
+let suppressNextSmartContextMenu = false;
+let suppressSmartContextMenuTimer = null;
+const RIGHT_PAN_DRAG_THRESHOLD = 5;
 let didPan = false;
 let portDragState = null;
 let quickConnectMenu = null;
@@ -18090,6 +18094,85 @@ function updateSmartPan(e){
     applyViewport();
     return true;
 }
+function clearSmartContextMenuSuppression(){
+    suppressNextSmartContextMenu = false;
+    clearTimeout(suppressSmartContextMenuTimer);
+    suppressSmartContextMenuTimer = null;
+}
+function suppressNextSmartContextMenuOnce(){
+    clearSmartContextMenuSuppression();
+    suppressNextSmartContextMenu = true;
+    suppressSmartContextMenuTimer = setTimeout(clearSmartContextMenuSuppression, 500);
+}
+function beginSmartRightPan(e){
+    if(!canvas || zoomPreviewState || e.button !== 2 || !isSmartCanvasBackgroundTarget(e.target)) return false;
+    if(selectionState || panState || dragState || resizeState || portDragState) return false;
+    clearSmartContextMenuSuppression();
+    rightPanState = {
+        startX:e.clientX,
+        startY:e.clientY,
+        ox:viewport.x,
+        oy:viewport.y,
+        target:e.target,
+        dragging:false
+    };
+    rightPanState.moveHandler = e2 => updateSmartRightPan(e2);
+    rightPanState.upHandler = e2 => {
+        if(e2.button === 2) finishSmartRightPan({suppressContextMenu:true, releaseEvent:e2});
+    };
+    window.addEventListener('mousemove', rightPanState.moveHandler, true);
+    window.addEventListener('mouseup', rightPanState.upHandler, true);
+    return true;
+}
+function updateSmartRightPan(e){
+    if(!rightPanState) return false;
+    const dx = e.clientX - rightPanState.startX;
+    const dy = e.clientY - rightPanState.startY;
+    if(!rightPanState.dragging){
+        if(Math.hypot(dx, dy) <= RIGHT_PAN_DRAG_THRESHOLD) return false;
+        rightPanState.dragging = true;
+        closeCreateMenu();
+        if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        shell.classList.add('panning');
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    didPan = true;
+    viewport.x = rightPanState.ox + dx;
+    viewport.y = rightPanState.oy + dy;
+    applyViewport();
+    return true;
+}
+function dispatchPreservedSmartContextMenu(state, event){
+    const target = state.target?.isConnected ? state.target : document.elementFromPoint(event?.clientX ?? state.startX, event?.clientY ?? state.startY);
+    if(!target) return;
+    target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles:true,
+        cancelable:true,
+        view:window,
+        button:2,
+        buttons:0,
+        clientX:event?.clientX ?? state.startX,
+        clientY:event?.clientY ?? state.startY,
+        screenX:event?.screenX ?? 0,
+        screenY:event?.screenY ?? 0
+    }));
+}
+function finishSmartRightPan({suppressContextMenu=false, save=true, releaseEvent=null}={}){
+    if(!rightPanState) return false;
+    const state = rightPanState;
+    if(state.moveHandler) window.removeEventListener('mousemove', state.moveHandler, true);
+    if(state.upHandler) window.removeEventListener('mouseup', state.upHandler, true);
+    rightPanState = null;
+    shell.classList.remove('panning');
+    if(suppressContextMenu){
+        if(!state.dragging) dispatchPreservedSmartContextMenu(state, releaseEvent);
+        suppressNextSmartContextMenuOnce();
+    } else clearSmartContextMenuSuppression();
+    if(save && state.dragging) scheduleSave();
+    if(state.dragging) setTimeout(() => { didPan = false; }, 0);
+    return state.dragging;
+}
 shell.addEventListener('mousedown', e => {
     if(!zoomPreviewState) return;
     if(e.button !== 0) return;
@@ -18109,6 +18192,10 @@ shell.addEventListener('click', e => {
 }, true);
 shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
+    if(e.button === 2){
+        beginSmartRightPan(e);
+        return;
+    }
     if(e.button === 1){
         startSmartPan(e);
         return;
@@ -18140,6 +18227,13 @@ shell.onmousedown = e => {
 shell.addEventListener('auxclick', e => {
     if(e.button === 1) e.preventDefault();
 });
+shell.addEventListener('contextmenu', e => {
+    if(!suppressNextSmartContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    clearSmartContextMenuSuppression();
+}, true);
 shell.oncontextmenu = e => {
     if((e.ctrlKey || e.metaKey) || isRKeyDown){
         e.preventDefault();
@@ -18686,9 +18780,15 @@ function cancelSmartNodeDrag(){
     return true;
 }
 window.addEventListener('pointerup', event => {
+    if(rightPanState && event.button === 2){
+        finishSmartRightPan({suppressContextMenu:true, releaseEvent:event});
+        return;
+    }
     if((selectionState || panState || dragState) && typeof window.onmouseup === 'function') window.onmouseup(event);
 });
 window.addEventListener('pointercancel', () => {
+    finishSmartRightPan({suppressContextMenu:false});
+    clearSmartContextMenuSuppression();
     cancelSmartSelection();
     finishSmartPan();
     cancelSmartNodeDrag();
@@ -18696,6 +18796,8 @@ window.addEventListener('pointercancel', () => {
 });
 document.documentElement.addEventListener('mouseleave', event => {
     if(event.relatedTarget != null) return;
+    finishSmartRightPan({suppressContextMenu:false});
+    clearSmartContextMenuSuppression();
     cancelSmartSelection();
     finishSmartPan();
     cancelSmartNodeDrag();
@@ -18773,6 +18875,13 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && suppressNextSmartContextMenu) clearSmartContextMenuSuppression();
+    if(e.key === 'Escape' && rightPanState){
+        e.preventDefault();
+        finishSmartRightPan({suppressContextMenu:Boolean(rightPanState.dragging)});
+        setSmartSpacePanKey(false);
+        return;
+    }
     if(e.key === 'Escape' && (selectionState || panState || dragState)){
         e.preventDefault();
         cancelSmartSelection();
@@ -18873,6 +18982,8 @@ window.addEventListener('keyup', e => {
 });
 window.addEventListener('blur', () => {
     isRKeyDown = false;
+    finishSmartRightPan({suppressContextMenu:false});
+    clearSmartContextMenuSuppression();
     cancelSmartSelection();
     finishSmartPan();
     cancelSmartNodeDrag();

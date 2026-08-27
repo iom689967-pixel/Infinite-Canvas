@@ -356,6 +356,10 @@ let connections = [];
 let viewport = {x: -1800, y: -1000, scale: 1};
 let dragNode = null;
 let dragBoard = null;
+let rightBoardPan = null;
+let suppressNextCanvasContextMenu = false;
+let suppressCanvasContextMenuTimer = null;
+const RIGHT_PAN_DRAG_THRESHOLD = 5;
 let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
@@ -16114,12 +16118,94 @@ function startBoardPan(e, opts={}){
     return true;
 }
 
+function clearCanvasContextMenuSuppression(){
+    suppressNextCanvasContextMenu = false;
+    clearTimeout(suppressCanvasContextMenuTimer);
+    suppressCanvasContextMenuTimer = null;
+}
+function suppressNextCanvasContextMenuOnce(){
+    clearCanvasContextMenuSuppression();
+    suppressNextCanvasContextMenu = true;
+    suppressCanvasContextMenuTimer = setTimeout(clearCanvasContextMenuSuppression, 500);
+}
+function beginRightBoardPan(e){
+    if(!canvas || zoomPreviewState || e.button !== 2 || !isCanvasBackgroundTarget(e.target)) return false;
+    if(selectDrag || dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || tempLink) return false;
+    clearCanvasContextMenuSuppression();
+    rightBoardPan = {
+        startX:e.clientX,
+        startY:e.clientY,
+        ox:viewport.x,
+        oy:viewport.y,
+        target:e.target,
+        dragging:false
+    };
+    rightBoardPan.moveHandler = e2 => updateRightBoardPan(e2);
+    rightBoardPan.upHandler = e2 => {
+        if(e2.button === 2) finishRightBoardPan({suppressContextMenu:true, releaseEvent:e2});
+    };
+    window.addEventListener('mousemove', rightBoardPan.moveHandler, true);
+    window.addEventListener('mouseup', rightBoardPan.upHandler, true);
+    return true;
+}
+function updateRightBoardPan(e){
+    if(!rightBoardPan) return false;
+    const dx = e.clientX - rightBoardPan.startX;
+    const dy = e.clientY - rightBoardPan.startY;
+    if(!rightBoardPan.dragging){
+        if(Math.hypot(dx, dy) <= RIGHT_PAN_DRAG_THRESHOLD) return false;
+        rightBoardPan.dragging = true;
+        closeCreateMenu();
+        if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        document.body.classList.add('canvas-board-pan');
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    viewport.x = rightBoardPan.ox + dx;
+    viewport.y = rightBoardPan.oy + dy;
+    applyViewport();
+    return true;
+}
+function dispatchPreservedCanvasContextMenu(state, event){
+    const target = state.target?.isConnected ? state.target : document.elementFromPoint(event?.clientX ?? state.startX, event?.clientY ?? state.startY);
+    if(!target) return;
+    target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles:true,
+        cancelable:true,
+        view:window,
+        button:2,
+        buttons:0,
+        clientX:event?.clientX ?? state.startX,
+        clientY:event?.clientY ?? state.startY,
+        screenX:event?.screenX ?? 0,
+        screenY:event?.screenY ?? 0
+    }));
+}
+function finishRightBoardPan({suppressContextMenu=false, save=true, releaseEvent=null}={}){
+    if(!rightBoardPan) return false;
+    const state = rightBoardPan;
+    if(state.moveHandler) window.removeEventListener('mousemove', state.moveHandler, true);
+    if(state.upHandler) window.removeEventListener('mouseup', state.upHandler, true);
+    rightBoardPan = null;
+    document.body.classList.remove('canvas-board-pan');
+    if(suppressContextMenu){
+        if(!state.dragging) dispatchPreservedCanvasContextMenu(state, releaseEvent);
+        suppressNextCanvasContextMenuOnce();
+    } else clearCanvasContextMenuSuppression();
+    if(save && state.dragging) scheduleViewportSave();
+    return state.dragging;
+}
+
 function isCanvasBackgroundTarget(target){
     return target === board || target === world || target === nodesEl || target === linksEl;
 }
 
 board.onmousedown = e => {
     if(!canvas) return;
+    if(e.button === 2){
+        beginRightBoardPan(e);
+        return;
+    }
     if(e.button === 1){
         startBoardPan(e);
         return;
@@ -16141,6 +16227,13 @@ board.onmousedown = e => {
 board.addEventListener('auxclick', e => {
     if(e.button === 1) e.preventDefault();
 });
+board.addEventListener('contextmenu', e => {
+    if(!suppressNextCanvasContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    clearCanvasContextMenuSuppression();
+}, true);
 board.addEventListener('mousemove', e => {
     const point = screenToWorld(e.clientX, e.clientY);
     lastMouseBoard = point;
@@ -16247,6 +16340,13 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     if(!canvas) return;
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && suppressNextCanvasContextMenu) clearCanvasContextMenuSuppression();
+    if(e.key === 'Escape' && rightBoardPan){
+        e.preventDefault();
+        finishRightBoardPan({suppressContextMenu:Boolean(rightBoardPan.dragging)});
+        setSpacePanKey(false);
+        return;
+    }
     if(e.key === 'Escape' && selectDrag){
         e.preventDefault();
         cancelSelection(e);
@@ -16336,8 +16436,14 @@ window.addEventListener('blur', () => { isRKeyDown = false; setSpacePanKey(false
 window.addEventListener('blur', () => {
     if(selectDrag) cancelSelection();
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag();
+    finishRightBoardPan({suppressContextMenu:false});
+    clearCanvasContextMenuSuppression();
 });
 window.addEventListener('pointerup', event => {
+    if(rightBoardPan && event.button === 2){
+        finishRightBoardPan({suppressContextMenu:true, releaseEvent:event});
+        return;
+    }
     if(selectDrag){
         finishSelection(event);
         return;
@@ -16345,12 +16451,16 @@ window.addEventListener('pointerup', event => {
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
 });
 window.addEventListener('pointercancel', event => {
+    finishRightBoardPan({suppressContextMenu:false});
+    clearCanvasContextMenuSuppression();
     if(selectDrag) cancelSelection(event);
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
     setSpacePanKey(false);
 });
 document.documentElement.addEventListener('mouseleave', event => {
     if(event.relatedTarget != null) return;
+    finishRightBoardPan({suppressContextMenu:false});
+    clearCanvasContextMenuSuppression();
     if(selectDrag) cancelSelection(event);
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag(event);
     setSpacePanKey(false);
