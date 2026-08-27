@@ -124,6 +124,9 @@ let rightPanState = null;
 let suppressNextSmartContextMenu = false;
 let suppressSmartContextMenuTimer = null;
 const RIGHT_PAN_DRAG_THRESHOLD = 5;
+const CONNECTION_MAGNETIC_ZONE = 40;
+const CONNECTION_SNAP_ZONE = 30;
+const CONNECTION_ANCHOR_PADDING = 16;
 let didPan = false;
 let portDragState = null;
 let quickConnectMenu = null;
@@ -6529,6 +6532,26 @@ function quickConnectTemporaryConnectionSvg(){
     const color = 'rgba(100,116,139,0.62)';
     return `<path class="quick-connect-temp conn-line" d="${curve}" stroke="${color}" stroke-width="1.9" fill="none"></path><circle class="quick-connect-temp quick-connect-temp-end conn-end" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle>`;
 }
+function normalizedSmartConnectionAnchor(anchor, fallbackSide){
+    if(!anchor || typeof anchor !== 'object') return null;
+    const ratio = Number(anchor.ratio);
+    if(!Number.isFinite(ratio)) return null;
+    return {
+        side:anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide,
+        ratio:Math.max(0, Math.min(1, ratio))
+    };
+}
+function smartConnectionAnchorPoint(rect, anchor, fallbackSide){
+    const normalized = normalizedSmartConnectionAnchor(anchor, fallbackSide);
+    if(!normalized) return {
+        x:fallbackSide === 'right' ? rect.x + rect.width : rect.x,
+        y:rect.y + rect.height / 2
+    };
+    return {
+        x:normalized.side === 'right' ? rect.x + rect.width : rect.x,
+        y:rect.y + rect.height * normalized.ratio
+    };
+}
 function renderConnections(){
     const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
     const validSelectionKeys = new Set(conns.map(smartConnectionSelectionKey));
@@ -6551,12 +6574,12 @@ function renderConnections(){
         if(isMemberTarget){
             const key = `${conn.from}|${toScope}|${kind}`;
             let b = buckets.get(key);
-            if(!b){ b = {merged:true, from:conn.from, toId:toScope, kind, indices:[], targets:[], selectionKeys:[]}; buckets.set(key, b); items.push(b); }
+            if(!b){ b = {merged:true, from:conn.from, toId:toScope, kind, indices:[], targets:[], selectionKeys:[], fromAnchor:conn.fromAnchor || null, toAnchor:null}; buckets.set(key, b); items.push(b); }
             b.indices.push(conn.index);
             b.targets.push(conn.to);
             b.selectionKeys.push(smartConnectionSelectionKey(conn));
         } else {
-            items.push({merged:false, from:conn.from, toId:conn.to, kind, indices:[conn.index], targets:[conn.to], selectionKeys:[smartConnectionSelectionKey(conn)]});
+            items.push({merged:false, from:conn.from, toId:conn.to, kind, indices:[conn.index], targets:[conn.to], selectionKeys:[smartConnectionSelectionKey(conn)], fromAnchor:conn.fromAnchor || null, toAnchor:conn.toAnchor || null});
         }
     });
     const paths = items.map(item => {
@@ -6577,10 +6600,12 @@ function renderConnections(){
         const isCascade = !isHistory && (edgeKeys.some(k => cascadeKeys.has(k)) || Boolean(cascadeState) || isInsertPreview);
         const isPendingLine = !isCascade && item.targets.some(t => nodes.find(n => n.id === t)?.pending);
         const isSelectedLine = item.selectionKeys.some(key => selectedConnectionKeys.has(key));
-        const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
-        const fy = isHistory ? fr.y + fr.height : fr.y + fr.height / 2;
-        const tx = isHistory ? tr.x + tr.width / 2 : tr.x;
-        const ty = isHistory ? tr.y : tr.y + tr.height / 2;
+        const fromPoint = isHistory ? {x:fr.x + fr.width / 2, y:fr.y + fr.height} : smartConnectionAnchorPoint(fr, item.fromAnchor, 'right');
+        const toPoint = isHistory ? {x:tr.x + tr.width / 2, y:tr.y} : smartConnectionAnchorPoint(tr, item.toAnchor, 'left');
+        const fx = fromPoint.x;
+        const fy = fromPoint.y;
+        const tx = toPoint.x;
+        const ty = toPoint.y;
         const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
         const dy = Math.max(36, Math.abs(ty - fy) * 0.45);
         const curve = isHistory
@@ -8972,6 +8997,7 @@ function ensurePortDragPathElement(){
 }
 function clearPortDragVisual(){
     world.querySelector('path.port-drag-temp')?.remove();
+    world.querySelector('.floating-connection-port')?.remove();
     world.querySelectorAll('.node-port.is-active').forEach(el => el.classList.remove('is-active'));
     world.querySelectorAll('.image-node.port-hover').forEach(el => el.classList.remove('port-hover'));
 }
@@ -9871,6 +9897,63 @@ function bindScrollableText(el){
         if(textSelectionGuard?.el === el) textSelectionGuard.wheelUntil = Date.now() + 180;
     }, {passive:true});
 }
+function buildSmartConnectionMagneticCandidates(fromId, fromPort){
+    const targetPort = fromPort === 'out' ? 'in' : 'out';
+    return [...world.querySelectorAll('.image-node')].map(nodeEl => {
+        const targetId = nodeEl.dataset.id;
+        if(!targetId || targetId === fromId) return null;
+        const port = nodeEl.querySelector(`.node-port[data-port="${targetPort}"]`);
+        if(!port || getComputedStyle(port).display === 'none') return null;
+        const sourceNode = nodes.find(node => node.id === (fromPort === 'out' ? fromId : targetId));
+        const targetNode = nodes.find(node => node.id === (fromPort === 'out' ? targetId : fromId));
+        if(!canConnectSmartInputNodes(sourceNode, targetNode)) return null;
+        return {
+            targetId,
+            targetPort,
+            side:targetPort === 'in' ? 'left' : 'right',
+            nodeEl,
+            rect:nodeEl.getBoundingClientRect()
+        };
+    }).filter(Boolean);
+}
+function smartConnectionMagneticCandidateAt(candidates, clientX, clientY){
+    let best = null;
+    (candidates || []).forEach(candidate => {
+        const rect = candidate.rect;
+        const sideX = candidate.side === 'left' ? rect.left : rect.right;
+        const insideLimit = 14;
+        if(candidate.side === 'left' && (clientX < rect.left - CONNECTION_MAGNETIC_ZONE || clientX > rect.left + insideLimit)) return;
+        if(candidate.side === 'right' && (clientX > rect.right + CONNECTION_MAGNETIC_ZONE || clientX < rect.right - insideLimit)) return;
+        const padding = Math.min(rect.height / 2, CONNECTION_ANCHOR_PADDING * Math.max(0.05, Number(viewport.scale) || 1));
+        const handleY = Math.max(rect.top + padding, Math.min(rect.bottom - padding, clientY));
+        const distance = Math.hypot(clientX - sideX, clientY - handleY);
+        if(distance > CONNECTION_MAGNETIC_ZONE || (best && distance >= best.distance)) return;
+        const ratio = rect.height > 0 ? (handleY - rect.top) / rect.height : .5;
+        best = {
+            ...candidate,
+            distance,
+            snapped:distance <= CONNECTION_SNAP_ZONE,
+            ratio:Math.max(0, Math.min(1, ratio)),
+            worldPoint:screenToWorld({clientX:sideX, clientY:handleY})
+        };
+    });
+    return best;
+}
+function renderSmartFloatingConnectionPort(candidate){
+    if(!candidate){ world.querySelector('.floating-connection-port')?.remove(); return; }
+    let handle = world.querySelector('.floating-connection-port');
+    if(handle?.parentElement !== candidate.nodeEl || handle.dataset.side !== candidate.side){
+        handle?.remove();
+        handle = document.createElement('div');
+        handle.className = 'floating-connection-port';
+        handle.dataset.side = candidate.side;
+        candidate.nodeEl.appendChild(handle);
+    }
+    handle.classList.toggle('in', candidate.side === 'left');
+    handle.classList.toggle('out', candidate.side === 'right');
+    handle.classList.toggle('is-snapped', candidate.snapped);
+    handle.style.top = `${candidate.ratio * 100}%`;
+}
 function updatePortDragVisual(){
     if(!portDragState) return;
     const fromNode = nodes.find(n => n.id === portDragState.fromId);
@@ -9879,18 +9962,19 @@ function updatePortDragVisual(){
     const isOut = portDragState.fromPort === 'out';
     const fx = isOut ? fr.x + fr.width : fr.x;
     const fy = fr.y + fr.height / 2;
-    const tx = portDragState.currentWorld.x;
-    const ty = portDragState.currentWorld.y;
+    const tx = portDragState.magnetic?.worldPoint?.x ?? portDragState.currentWorld.x;
+    const ty = portDragState.magnetic?.worldPoint?.y ?? portDragState.currentWorld.y;
     const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
     const sign = isOut ? 1 : -1;
     const path = ensurePortDragPathElement();
     if(path) path.setAttribute('d', `M${fx} ${fy} C ${fx + dx * sign} ${fy}, ${tx - dx * sign} ${ty}, ${tx} ${ty}`);
     world.querySelectorAll('.node-port.is-active').forEach(el => el.classList.remove('is-active'));
     world.querySelectorAll('.image-node.port-hover').forEach(el => el.classList.remove('port-hover'));
+    renderSmartFloatingConnectionPort(portDragState.magnetic);
     if(portDragState.hoverTargetId){
         const targetNodeEl = world.querySelector(`.image-node[data-id="${portDragState.hoverTargetId}"]`);
         targetNodeEl?.classList.add('port-hover');
-        targetNodeEl?.querySelector(`.node-port[data-port="${portDragState.hoverPort}"]`)?.classList.add('is-active');
+        if(!portDragState.magnetic) targetNodeEl?.querySelector(`.node-port[data-port="${portDragState.hoverPort}"]`)?.classList.add('is-active');
     }
 }
 const QUICK_CONNECT_NODE_REGISTRY = Object.freeze([
@@ -9994,7 +10078,11 @@ function openQuickConnectMenu(drag, event){
     refreshIcons();
 }
 function handlePortDrop(drag, e){
+    const hoveredMagnetic = drag.magnetic || null;
+    const magnetic = hoveredMagnetic?.snapped ? hoveredMagnetic : null;
+    if(hoveredMagnetic && !magnetic){ discardPendingUndo(); render(); return; }
     const {targetId, targetPort, hit} = (() => {
+        if(magnetic) return {targetId:magnetic.targetId, targetPort:magnetic.targetPort, hit:document.elementFromPoint(e.clientX, e.clientY)};
         const hitEl = document.elementFromPoint(e.clientX, e.clientY);
         const portEl = hitEl?.closest?.('.node-port');
         const nodeEl = portEl?.closest?.('.image-node') || hitEl?.closest?.('.image-node');
@@ -10015,7 +10103,9 @@ function handlePortDrop(drag, e){
         if(!compatible){ discardPendingUndo(); render(); return; }
         const fromId = drag.fromPort === 'out' ? drag.fromId : targetId;
         const toId = drag.fromPort === 'out' ? targetId : drag.fromId;
-        if(connectInputNode(fromId, toId)){
+        const anchor = magnetic ? {side:magnetic.side, ratio:Number(magnetic.ratio.toFixed(4))} : null;
+        const anchors = anchor ? (drag.fromPort === 'out' ? {toAnchor:anchor} : {fromAnchor:anchor}) : {};
+        if(connectInputNode(fromId, toId, anchors)){
             commitPendingUndo();
             render();
             scheduleSave();
@@ -10380,6 +10470,8 @@ function bindNodeEvents(){
                     currentWorld:p,
                     hoverTargetId:'',
                     hoverPort:'',
+                    magnetic:null,
+                    magneticCandidates:buildSmartConnectionMagneticCandidates(id, portType),
                     moved:false
                 };
                 shell.classList.add('port-dragging');
@@ -14278,16 +14370,34 @@ function stripImageGenerationMeta(img){
     delete img.promptDraftText;
     return img;
 }
-function addConnection(fromId, toId, kind='flow'){
+function addConnection(fromId, toId, kind='flow', anchors={}){
     if(!fromId || !toId || fromId === toId) return;
     canvas.connections = canvas.connections || [];
-    if(canvas.connections.some(c => c.from === fromId && c.to === toId && (c.kind || 'flow') === kind)) return;
-    canvas.connections.push({from:fromId, to:toId, kind});
+    const existing = canvas.connections.find(c => c.from === fromId && c.to === toId && (c.kind || 'flow') === kind);
+    if(existing){
+        if(anchors.fromAnchor) existing.fromAnchor = anchors.fromAnchor;
+        if(anchors.toAnchor) existing.toAnchor = anchors.toAnchor;
+        return existing;
+    }
+    const connection = {from:fromId, to:toId, kind};
+    if(anchors.fromAnchor) connection.fromAnchor = anchors.fromAnchor;
+    if(anchors.toAnchor) connection.toAnchor = anchors.toAnchor;
+    canvas.connections.push(connection);
+    return connection;
 }
-function connectInputNode(fromId, toId){
+function canConnectSmartInputNodes(from, to){
+    if(!from || !to || from.id === to.id) return false;
+    if(to.type !== 'smart-loop') return true;
+    const groupImages = isSmartGroupNode(from) ? imagesForNode(from).filter(img => img?.url) : [];
+    const groupPrompts = isSmartGroupNode(from) ? promptTextItemsForNode(from).filter(Boolean) : [];
+    const looksImage = isSmartImageNode(from) || groupImages.length > 0 || (from.type === 'smart-loop' && from.imageInput);
+    const looksPrompt = from.type === 'smart-prompt' || from.type === 'smart-text' || groupPrompts.length > 0 || (from.type === 'smart-loop' && from.showPrompt);
+    return looksImage || looksPrompt;
+}
+function connectInputNode(fromId, toId, anchors={}){
     const from = nodes.find(n => n.id === fromId);
     const to = nodes.find(n => n.id === toId);
-    if(!from || !to || from.id === to.id) return false;
+    if(!canConnectSmartInputNodes(from, to)) return false;
     if(to.type === 'smart-loop'){
         const groupImages = isSmartGroupNode(from) ? imagesForNode(from).filter(img => img?.url) : [];
         const groupPrompts = isSmartGroupNode(from) ? promptTextItemsForNode(from).filter(Boolean) : [];
@@ -14301,7 +14411,7 @@ function connectInputNode(fromId, toId){
         if(!canImage && !canPrompt) return false;
     }
     to.inputNodeIds = Array.from(new Set([...(to.inputNodeIds || []), from.id]));
-    addConnection(from.id, to.id, 'input');
+    addConnection(from.id, to.id, 'input', anchors);
     return true;
 }
 function upstreamNodesForKinds(node, kinds=['input']){
@@ -18301,11 +18411,15 @@ window.onmousemove = e => {
         const p = screenToWorld(e);
         portDragState.currentWorld = p;
         portDragState.moved = true;
+        const magnetic = smartConnectionMagneticCandidateAt(portDragState.magneticCandidates, e.clientX, e.clientY);
         const hitEl = document.elementFromPoint(e.clientX, e.clientY);
         const portEl = hitEl?.closest?.('.node-port');
         const nodeEl = portEl?.closest?.('.image-node') || hitEl?.closest?.('.image-node');
         let targetId = '', targetPort = '';
-        if(nodeEl && nodeEl.dataset.id && nodeEl.dataset.id !== portDragState.fromId){
+        if(magnetic){
+            targetId = magnetic.targetId;
+            targetPort = magnetic.targetPort;
+        } else if(nodeEl && nodeEl.dataset.id && nodeEl.dataset.id !== portDragState.fromId){
             targetId = nodeEl.dataset.id;
             if(portEl){
                 targetPort = portEl.dataset.port;
@@ -18318,6 +18432,7 @@ window.onmousemove = e => {
         }
         portDragState.hoverTargetId = targetId;
         portDragState.hoverPort = targetPort;
+        portDragState.magnetic = magnetic;
         updatePortDragVisual();
         return;
     }

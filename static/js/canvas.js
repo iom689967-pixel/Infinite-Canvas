@@ -360,6 +360,9 @@ let rightBoardPan = null;
 let suppressNextCanvasContextMenu = false;
 let suppressCanvasContextMenuTimer = null;
 const RIGHT_PAN_DRAG_THRESHOLD = 5;
+const CONNECTION_MAGNETIC_ZONE = 40;
+const CONNECTION_SNAP_ZONE = 30;
+const CONNECTION_ANCHOR_PADDING = 16;
 let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
@@ -15405,36 +15408,131 @@ function onNodeResize(e){
     renderSelectionHub();
     scheduleMinimapRender();
 }
+function normalizedConnectionAnchor(anchor, fallbackSide){
+    if(!anchor || typeof anchor !== 'object') return null;
+    const ratio = Number(anchor.ratio);
+    if(!Number.isFinite(ratio)) return null;
+    return {
+        side:anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide,
+        ratio:Math.max(0, Math.min(1, ratio))
+    };
+}
+function buildConnectionMagneticCandidates(originId, originKind){
+    const targetKind = originKind === 'out' ? 'in' : 'out';
+    return [...nodesEl.querySelectorAll('.node')].map(nodeEl => {
+        const targetId = nodeEl.dataset.id;
+        if(!targetId || targetId === originId) return null;
+        const port = nodeEl.querySelector(`.port.${targetKind}`);
+        if(!port || getComputedStyle(port).display === 'none') return null;
+        const fromId = originKind === 'out' ? originId : targetId;
+        const toId = originKind === 'out' ? targetId : originId;
+        if(!canConnect(fromId, toId)) return null;
+        return {
+            targetId,
+            targetKind,
+            side:targetKind === 'in' ? 'left' : 'right',
+            nodeEl,
+            rect:nodeEl.getBoundingClientRect()
+        };
+    }).filter(Boolean);
+}
+function connectionMagneticCandidateAt(candidates, clientX, clientY){
+    let best = null;
+    (candidates || []).forEach(candidate => {
+        const rect = candidate.rect;
+        const sideX = candidate.side === 'left' ? rect.left : rect.right;
+        const insideLimit = 14;
+        if(candidate.side === 'left' && (clientX < rect.left - CONNECTION_MAGNETIC_ZONE || clientX > rect.left + insideLimit)) return;
+        if(candidate.side === 'right' && (clientX > rect.right + CONNECTION_MAGNETIC_ZONE || clientX < rect.right - insideLimit)) return;
+        const padding = Math.min(rect.height / 2, CONNECTION_ANCHOR_PADDING * Math.max(0.05, Number(viewport.scale) || 1));
+        const handleY = Math.max(rect.top + padding, Math.min(rect.bottom - padding, clientY));
+        const distance = Math.hypot(clientX - sideX, clientY - handleY);
+        if(distance > CONNECTION_MAGNETIC_ZONE || (best && distance >= best.distance)) return;
+        const ratio = rect.height > 0 ? (handleY - rect.top) / rect.height : .5;
+        best = {
+            ...candidate,
+            distance,
+            snapped:distance <= CONNECTION_SNAP_ZONE,
+            ratio:Math.max(0, Math.min(1, ratio)),
+            worldPoint:screenToWorld(sideX, handleY)
+        };
+    });
+    return best;
+}
+function clearFloatingConnectionPort(){
+    nodesEl.querySelector('.floating-connection-port')?.remove();
+}
+function renderFloatingConnectionPort(candidate){
+    if(!candidate){ clearFloatingConnectionPort(); return; }
+    let handle = nodesEl.querySelector('.floating-connection-port');
+    if(handle?.parentElement !== candidate.nodeEl || handle.dataset.side !== candidate.side){
+        handle?.remove();
+        handle = document.createElement('div');
+        handle.className = 'floating-connection-port';
+        handle.dataset.side = candidate.side;
+        candidate.nodeEl.appendChild(handle);
+    }
+    handle.classList.toggle('in', candidate.side === 'left');
+    handle.classList.toggle('out', candidate.side === 'right');
+    handle.classList.toggle('is-snapped', candidate.snapped);
+    handle.style.top = `${candidate.ratio * 100}%`;
+}
+function updateTempLinkMagnet(event){
+    if(!tempLink) return;
+    const candidate = connectionMagneticCandidateAt(tempLink.magneticCandidates, event.clientX, event.clientY);
+    tempLink.magnetic = candidate;
+    renderFloatingConnectionPort(candidate);
+    const point = candidate?.worldPoint || screenToWorld(event.clientX, event.clientY);
+    tempLink.x2 = point.x;
+    tempLink.y2 = point.y;
+}
 function startLink(e, originId, originKind){
     e.stopPropagation();
     originKind = originKind || 'out';
     const src = portPoint(originId, originKind);
     const source = nodes.find(n => n.id === originId);
-    tempLink = {from:originId, originKind, x1:src.x, y1:src.y, x2:src.x, y2:src.y};
+    clearFloatingConnectionPort();
+    tempLink = {
+        from:originId,
+        originKind,
+        x1:src.x,
+        y1:src.y,
+        x2:src.x,
+        y2:src.y,
+        magnetic:null,
+        magneticCandidates:buildConnectionMagneticCandidates(originId, originKind)
+    };
     window.onmousemove = e2 => {
-        const p = screenToWorld(e2.clientX, e2.clientY);
-        tempLink.x2 = p.x;
-        tempLink.y2 = p.y;
+        updateTempLinkMagnet(e2);
         renderLinks();
     };
     window.onmouseup = e2 => {
+        const hoveredMagnetic = tempLink?.magnetic || null;
+        const magnetic = hoveredMagnetic?.snapped ? hoveredMagnetic : null;
         const targetKind = originKind === 'out' ? 'in' : 'out';
-        const targetPort = nearestPort(e2.clientX, e2.clientY, targetKind);
-        const target = targetPort?.closest('.node');
+        const targetPort = hoveredMagnetic ? null : nearestPort(e2.clientX, e2.clientY, targetKind);
+        const target = magnetic?.nodeEl || targetPort?.closest('.node');
         if(target){
             const targetId = target.dataset.id;
             const fromId = originKind === 'out' ? originId : targetId;
             const toId = originKind === 'out' ? targetId : originId;
             if(canConnect(fromId, toId)){
-                if(!connections.some(c => c.from === fromId && c.to === toId)){
+                const existing = connections.find(c => c.from === fromId && c.to === toId);
+                const anchor = magnetic ? {side:magnetic.side, ratio:Number(magnetic.ratio.toFixed(4))} : null;
+                const anchorKey = originKind === 'out' ? 'toAnchor' : 'fromAnchor';
+                const anchorChanged = Boolean(anchor && JSON.stringify(existing?.[anchorKey] || null) !== JSON.stringify(anchor));
+                if(!existing || anchorChanged){
                     pushUndo();
-                    connections.push({id:uid('c'), from:fromId, to:toId});
+                    if(existing) existing[anchorKey] = anchor;
+                    else connections.push({id:uid('c'), from:fromId, to:toId, ...(anchor ? {[anchorKey]:anchor} : {})});
                     syncLatestGeneratedOutputToConnection(fromId, toId);
                 }
                 syncGeneratorInputs();
                 scheduleSave();
                 render();
             }
+        } else if(hoveredMagnetic){
+            // 感应区内但尚未进入 snap 区：保持“未高亮即不连接”的明确反馈。
         } else if(originKind === 'out'){
             if(source && CANVAS_GENERATOR_TYPES.includes(source.type)){
                 const p = screenToWorld(e2.clientX, e2.clientY);
@@ -15453,6 +15551,7 @@ function startLink(e, originId, originKind){
             openLinkCreateMenu(originId, originKind, e2.clientX, e2.clientY);
         }
         tempLink = null;
+        clearFloatingConnectionPort();
         window.onmousemove = null;
         window.onmouseup = null;
         renderLinks();
@@ -15743,10 +15842,18 @@ function updateGroupMembership(movedNodes){
     }
 }
 
-function portPoint(id, kind){
+function portPoint(id, kind, anchor=null){
     const n = nodes.find(x => x.id === id);
     if(!n) return {x:0,y:0};  // 真正的孤儿连线（节点已删除）：renderLinks 会跳过它
     const el = nodesEl.querySelector(`.node[data-id="${CSS.escape(id)}"]`);
+    const normalizedAnchor = normalizedConnectionAnchor(anchor, kind === 'out' ? 'right' : 'left');
+    if(normalizedAnchor){
+        const w = el?.offsetWidth || n.w || 260;
+        const h = el?.offsetHeight || n.h || 160;
+        const x = (Number(n.x) || 0) + (normalizedAnchor.side === 'right' ? w : 0);
+        const y = (Number(n.y) || 0) + h * normalizedAnchor.ratio;
+        return {x, y};
+    }
     const port = el?.querySelector(`.port.${kind}`);
     if(port){
         const r = port.getBoundingClientRect();
@@ -15775,7 +15882,7 @@ function renderLinks(){
         // 端点无法解析（节点已删除、或尚未渲染出 DOM）就跳过，否则连线会被画到 (0,0)，
         // 看起来像很多连线都从同一个空白处中转。
         if(!canResolvePort(c.from) || !canResolvePort(c.to)) return;
-        segments.push({c, a:portPoint(c.from, 'out'), b:portPoint(c.to, 'in')});
+        segments.push({c, a:portPoint(c.from, 'out', c.fromAnchor), b:portPoint(c.to, 'in', c.toAnchor)});
     });
     segments.forEach(({c, a, b}) => {
         const relClass = isConnectionSelected(c) ? ' link-active' : '';
@@ -15829,8 +15936,8 @@ function setHoveredConnection(id){
     }
 }
 function connectionDistanceToPoint(connection, point){
-    const from = portPoint(connection.from, 'out');
-    const to = portPoint(connection.to, 'in');
+    const from = portPoint(connection.from, 'out', connection.fromAnchor);
+    const to = portPoint(connection.to, 'in', connection.toAnchor);
     let min = Infinity;
     let prev = cubicPoint(from, to, 0);
     for(let i = 1; i <= 28; i++){
@@ -15971,8 +16078,8 @@ function cubicPoint(a, b, t){
     };
 }
 function knifeHitsConnection(a, b, connection){
-    const from = portPoint(connection.from, 'out');
-    const to = portPoint(connection.to, 'in');
+    const from = portPoint(connection.from, 'out', connection.fromAnchor);
+    const to = portPoint(connection.to, 'in', connection.toAnchor);
     const threshold = Math.max(8, 12 / viewport.scale);
     let prev = cubicPoint(from, to, 0);
     for(let i = 1; i <= 28; i++){

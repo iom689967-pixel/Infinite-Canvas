@@ -807,6 +807,10 @@ input[type=range].canvas-range::-webkit-slider-runnable-track { height:3px; bord
 .port:hover::after { transform:scale(1.25); }
 .port.in { left:-29px; cursor:crosshair; }
 .port.out { right:-15px; }
+.floating-connection-port { position:absolute; width:16px; height:16px; border-radius:50%; z-index:9; pointer-events:none; background:var(--card-solid); border:2px solid var(--muted); box-shadow:0 4px 12px var(--shadow); transform:translateY(-50%); opacity:.82; transition:background .1s ease, border-color .1s ease, box-shadow .1s ease, transform .1s ease, opacity .1s ease; }
+.floating-connection-port.in { left:-9px; }
+.floating-connection-port.out { right:-9px; }
+.floating-connection-port.is-snapped { background:var(--strong); border-color:var(--strong); box-shadow:0 0 0 4px color-mix(in srgb, var(--strong) 18%, transparent), 0 6px 16px var(--shadow); transform:translateY(-50%) scale(1.1); opacity:1; }
 .node > .port { top:50%; }
 .ltxDirector-node > .port,
 .ltx-director-node > .port { top:50%; }

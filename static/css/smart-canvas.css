@@ -803,6 +803,10 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .node-port { position:absolute; top:50%; width:14px; height:14px; border-radius:50%; background:var(--card); border:1.8px solid var(--strong); transform:translateY(-50%); z-index:6; cursor:crosshair; opacity:0; pointer-events:none; transition:opacity .15s ease, background .15s ease, transform .15s ease, box-shadow .15s ease; box-shadow:0 4px 10px rgba(15,23,42,.18); }
 .node-port.port-in { left:-8px; }
 .node-port.port-out { right:-8px; }
+.floating-connection-port { position:absolute; width:16px; height:16px; border-radius:50%; z-index:9; pointer-events:none; background:var(--card); border:2px solid var(--muted); box-shadow:0 4px 12px var(--shadow); transform:translateY(-50%); opacity:.82; transition:background .1s ease, border-color .1s ease, box-shadow .1s ease, transform .1s ease, opacity .1s ease; }
+.floating-connection-port.in { left:-9px; }
+.floating-connection-port.out { right:-9px; }
+.floating-connection-port.is-snapped { background:var(--strong); border-color:var(--strong); box-shadow:0 0 0 4px color-mix(in srgb, var(--strong) 18%, transparent), 0 6px 16px var(--shadow); transform:translateY(-50%) scale(1.1); opacity:1; }
 .image-node:hover .node-port, .image-node.selected .node-port, .image-node.port-hover .node-port { opacity:1; pointer-events:auto; }
 .shell.port-dragging .node-port { opacity:1; pointer-events:auto; }
 .node-port:hover, .node-port.is-active { background:var(--strong); transform:translateY(-50%) scale(1.22); box-shadow:0 6px 14px rgba(15,23,42,.26); }
