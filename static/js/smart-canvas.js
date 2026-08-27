@@ -1373,7 +1373,7 @@ function smartConnectionSelectionKey(connection){
 }
 function isEditableTarget(target){
     const el = target || document.activeElement;
-    return !!el?.closest?.('input, textarea, select, option, button, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .prompt-node-control, .prompt-input, .text-node-preview');
+    return !!el?.closest?.('input, textarea, select, option, button, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .prompt-node-control, .prompt-input');
 }
 function safeScale(value){
     const n = Number(value);
@@ -7417,7 +7417,10 @@ function syncPromptNodeText(node, value, source=null){
     if(source && source.value !== next) source.value = next;
     const nodeEl = world.querySelector(`.image-node[data-id="${CSS.escape(node.id)}"]`);
     const inlineText = nodeEl?.querySelector('.prompt-node-text');
-    if(inlineText && inlineText !== source && inlineText.value !== next) inlineText.value = next;
+    if(inlineText){
+        inlineText.textContent = next || tr('smart.promptPlaceholderNode');
+        inlineText.classList.toggle('is-empty', !next);
+    }
     const textPreview = nodeEl?.querySelector('.text-node-preview');
     if(textPreview){
         textPreview.textContent = next || '输入提示词或文本';
@@ -7554,7 +7557,6 @@ function promptNodeBodyHtml(node){
     node.llmSystemEnabled = node.llmSystemEnabled === true;
     node.promptSplitEnabled = node.promptSplitEnabled === true;
     node.promptSeparator = promptNodeSeparator(node);
-    const readonly = node.llmEnabled ? 'readonly' : '';
     const systemPrompt = (node.llmSystemPrompt || '').trim();
     const inputThumbs = smartNodeInputThumbsHtml(promptNodeInputImages(node));
     const templateActive = activePromptTemplateNodeId() === node.id;
@@ -7581,7 +7583,7 @@ function promptNodeBodyHtml(node){
             ${node.llmSystemEnabled ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="${escapeHtml(tr('smart.promptLlmSystemPlaceholder'))}">${escapeHtml(systemPrompt || 'You are a helpful prompt assistant.')}</textarea>` : ''}
         </div>` : '';
     return `<div class="prompt-node-card">
-        <textarea class="prompt-node-text prompt-node-control" ${readonly} maxlength="${PROMPT_TEXT_MAX_LENGTH}" placeholder="${escapeHtml(tr('smart.promptPlaceholderNode'))}">${escapeHtml(node.text || '')}</textarea>
+        <div class="prompt-node-text ${node.text ? '' : 'is-empty'}">${escapeHtml(node.text || tr('smart.promptPlaceholderNode'))}</div>
         <div class="prompt-node-tools">
             <button class="prompt-node-pill prompt-node-control prompt-preset-edit ${templateActive ? 'active' : ''}" type="button"><i data-lucide="library"></i><span>模板库</span></button>
             <button class="prompt-node-pill prompt-node-control prompt-split-toggle ${node.promptSplitEnabled ? 'active' : ''}" type="button"><i data-lucide="split"></i><span>分隔符</span></button>
@@ -8976,12 +8978,11 @@ function bindPromptNodeControls(el, node){
         control.addEventListener('mousedown', e => e.stopPropagation());
         control.addEventListener('touchstart', e => e.stopPropagation(), {passive:true});
         control.addEventListener('click', e => e.stopPropagation());
-        if(!control.classList.contains('prompt-node-text')) control.addEventListener('dblclick', e => e.stopPropagation());
+        control.addEventListener('dblclick', e => e.stopPropagation());
     });
     const textEl = el.querySelector('.prompt-node-text');
     if(textEl) {
-        bindScrollableText(textEl);
-        textEl.oninput = e => syncPromptNodeText(node, e.target.value, e.target);
+        textEl.addEventListener('wheel', e => e.stopPropagation(), {passive:true});
         textEl.addEventListener('dblclick', e => openPromptEditor(node.id, e), true);
     }
     const editorExpand = el.querySelector('.prompt-editor-expand');
@@ -10049,13 +10050,7 @@ function bindNodeEvents(){
         if(nodeForControls?.type === 'smart-prompt') bindPromptNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-text'){
             el.querySelector('.text-node-expand')?.addEventListener('click', e => openPromptEditor(id, e));
-            const preview = el.querySelector('.text-node-preview');
-            if(preview){
-                preview.classList.add('nodrag', 'nopan');
-                preview.addEventListener('pointerdown', e => e.stopPropagation());
-                preview.addEventListener('mousedown', e => e.stopPropagation());
-                preview.addEventListener('touchstart', e => e.stopPropagation(), {passive:true});
-            }
+            el.querySelector('.text-node-preview')?.addEventListener('wheel', e => e.stopPropagation(), {passive:true});
         }
         if(nodeForControls?.type === 'smart-loop') bindLoopNodeControls(el, nodeForControls);
         if(nodeForControls?.type === 'smart-minimax') bindMinimaxNodeControls(el, nodeForControls);
@@ -10089,7 +10084,7 @@ function bindNodeEvents(){
         };
         if(nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') {
             el.ondblclick = e => {
-                if(e.target.closest('.node-port,.node-delete,button,input,select,textarea:not(.prompt-node-text),.prompt-node-segments,.prompt-node-llm')){
+                if(e.target.closest('.node-port,.node-delete,button,input,select,textarea,.prompt-node-segments,.prompt-node-llm')){
                     e.stopPropagation();
                     return;
                 }
@@ -10363,8 +10358,9 @@ function bindNodeEvents(){
                 const n = nodes.find(x => x.id === dragId);
                 return n ? {id:n.id, ox:Number(n.x) || 0, oy:Number(n.y) || 0} : null;
             }).filter(Boolean);
-            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), ctrlGroup:Boolean(e.ctrlKey)};
-            document.body.classList.add('smart-node-drag');
+            const activationThreshold = (nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') ? 4 : 0;
+            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), ctrlGroup:Boolean(e.ctrlKey), activationThreshold, activated:activationThreshold === 0};
+            if(dragState.activated) document.body.classList.add('smart-node-drag');
             capturePendingUndo();
         };
         el.querySelectorAll('.node-port').forEach(port => {
@@ -18453,6 +18449,12 @@ window.onmousemove = e => {
     if(!dragState) return;
     const node = nodes.find(n => n.id === dragState.id);
     if(!node) return;
+    if(!dragState.activated){
+        const distance = Math.hypot(e.clientX - dragState.startX, e.clientY - dragState.startY);
+        if(distance < (dragState.activationThreshold || 0)) return;
+        dragState.activated = true;
+        document.body.classList.add('smart-node-drag');
+    }
     const moveDx = (e.clientX - dragState.startX) / viewport.scale;
     const moveDy = (e.clientY - dragState.startY) / viewport.scale;
     (dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}]).forEach(item => {

@@ -435,6 +435,10 @@ let outputTimer = null;
 let loopContext = null;
 let clipboard = null;
 let lastImagePasteAt = 0;
+let canvasPromptEditorNodeId = '';
+let canvasPromptEditorModal = null;
+let canvasPromptEditorTextarea = null;
+let canvasPromptEditorCount = null;
 let promptTemplateNodeId = '';
 let promptTemplateCategory = 'all';
 let promptTemplateSelectedId = '';
@@ -6275,22 +6279,17 @@ function renderNode(node){
     }
     if(node.type === 'prompt') {
         const templateActive = promptTemplateModal?.classList.contains('open') && promptTemplateNodeId === node.id;
-        body.innerHTML = `<div class="prompt-editor"><div class="prompt-toolbar"><button class="prompt-template-btn ${templateActive ? 'active' : ''}" type="button" data-prompt-template-open data-prompt-template-node-id="${escapeAttr(node.id)}" aria-pressed="${templateActive ? 'true' : 'false'}" title="${escapeAttr(tr('canvas.promptTemplateLibrary'))}"><i data-lucide="library"></i><span>${escapeHtml(tr('canvas.promptTemplateShort'))}</span></button>${promptCounterHtml(node.text || '')}</div><textarea placeholder="${tr('canvas.promptPlaceholder')}">${escapeHtml(node.text || '')}</textarea></div>`;
-        const textarea = body.querySelector('textarea');
+        body.innerHTML = `<div class="prompt-editor"><div class="prompt-toolbar"><div class="prompt-toolbar-actions"><button class="prompt-template-btn ${templateActive ? 'active' : ''}" type="button" data-prompt-template-open data-prompt-template-node-id="${escapeAttr(node.id)}" aria-pressed="${templateActive ? 'true' : 'false'}" title="${escapeAttr(tr('canvas.promptTemplateLibrary'))}"><i data-lucide="library"></i><span>${escapeHtml(tr('canvas.promptTemplateShort'))}</span></button><button class="prompt-expand-btn" type="button" title="展开编辑" aria-label="展开编辑 Prompt"><i data-lucide="maximize-2"></i><span>展开编辑</span></button></div>${promptCounterHtml(node.text || '')}</div><div class="prompt-node-preview ${node.text ? '' : 'is-empty'}">${escapeHtml(node.text || tr('canvas.promptPlaceholder'))}</div></div>`;
+        const preview = body.querySelector('.prompt-node-preview');
         const templateBtn = body.querySelector('[data-prompt-template-open]');
         templateBtn.onclick = e => {
             e.preventDefault();
             e.stopPropagation();
             openPromptTemplateModal(node.id);
         };
-        bindScrollableText(textarea);
-        textarea.oninput = e => {
-            node.text = e.target.value;
-            refreshPromptCounter(body, node.text);
-            scheduleSave();
-            scheduleGeneratorInputSync();
-        };
-        protectNodeInteractiveArea(body.querySelector('.prompt-editor'));
+        body.querySelector('.prompt-expand-btn').onclick = e => openCanvasPromptEditor(node.id, e);
+        preview.addEventListener('wheel', e => e.stopPropagation(), {passive:true});
+        preview.addEventListener('dblclick', e => openCanvasPromptEditor(node.id, e), true);
     }
     if(node.type === 'loop') body.appendChild(renderLoopBody(node));
     if(node.type === 'group') {
@@ -6360,6 +6359,11 @@ function renderNode(node){
     el.onmousedown = e => {
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
         if(node.type === 'llm' && !e.target.closest('.node-head')) return;
+        if(node.type === 'prompt' && e.detail >= 2){
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
         startNodeDrag(e, node);
     };
     const canInput = ['generator','midjourney','comfy','ltxDirector','output','llm','msgen','video','rh','minimax'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
@@ -6771,6 +6775,124 @@ function refreshPromptCounter(container, text){
     const count = promptTextLength(text);
     counter.classList.toggle('over', count > PROMPT_TEXT_MAX_LENGTH);
     counter.innerHTML = `<span>${count.toLocaleString()}</span><span>/ ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}</span>`;
+}
+function normalizedCanvasPromptText(value){
+    return Array.from(String(value == null ? '' : value)).slice(0, PROMPT_TEXT_MAX_LENGTH).join('');
+}
+function updateCanvasPromptEditorCount(value){
+    if(canvasPromptEditorCount) canvasPromptEditorCount.textContent = `${promptTextLength(value).toLocaleString()} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}`;
+}
+function syncCanvasPromptNodeText(node, value, source=null){
+    if(!node || node.type !== 'prompt') return '';
+    const next = normalizedCanvasPromptText(value);
+    node.text = next;
+    if(source && source.value !== next) source.value = next;
+    const nodeEl = nodesEl.querySelector(`.prompt-node[data-id="${CSS.escape(node.id)}"]`);
+    const preview = nodeEl?.querySelector('.prompt-node-preview');
+    if(preview){
+        preview.textContent = next || tr('canvas.promptPlaceholder');
+        preview.classList.toggle('is-empty', !next);
+    }
+    refreshPromptCounter(nodeEl, next);
+    if(canvasPromptEditorNodeId === node.id) updateCanvasPromptEditorCount(next);
+    scheduleSave();
+    scheduleGeneratorInputSync();
+    return next;
+}
+function closeCanvasPromptEditor(){
+    if(!canvasPromptEditorNodeId || !canvasPromptEditorModal) return;
+    const node = nodes.find(item => item.id === canvasPromptEditorNodeId && item.type === 'prompt');
+    if(node && canvasPromptEditorTextarea) syncCanvasPromptNodeText(node, canvasPromptEditorTextarea.value, canvasPromptEditorTextarea);
+    canvasPromptEditorNodeId = '';
+    canvasPromptEditorModal.hidden = true;
+    canvasPromptEditorModal.classList.remove('open');
+    document.body.classList.remove('prompt-editor-open');
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    void saveCanvas();
+}
+function ensureCanvasPromptEditor(){
+    if(canvasPromptEditorModal) return canvasPromptEditorModal;
+    const modal = document.createElement('div');
+    modal.className = 'prompt-editor-modal';
+    modal.hidden = true;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'canvasPromptEditorTitle');
+    modal.innerHTML = `
+        <div class="prompt-editor-dialog">
+            <header class="prompt-editor-head">
+                <h2 id="canvasPromptEditorTitle">Prompt 编辑器</h2>
+                <div class="prompt-editor-head-actions">
+                    <button class="prompt-editor-copy" type="button"><i data-lucide="copy"></i><span>复制全文</span></button>
+                    <button class="prompt-editor-close" type="button" title="关闭" aria-label="关闭 Prompt 编辑器"><i data-lucide="x"></i></button>
+                </div>
+            </header>
+            <div class="prompt-editor-main">
+                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+            </div>
+            <footer class="prompt-editor-footer">
+                <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}</span>
+                <span class="prompt-editor-hint">自动保存 · Esc 关闭</span>
+            </footer>
+        </div>`;
+    document.body.appendChild(modal);
+    canvasPromptEditorModal = modal;
+    canvasPromptEditorTextarea = modal.querySelector('.prompt-editor-textarea');
+    canvasPromptEditorCount = modal.querySelector('.prompt-editor-count');
+    const stopCanvasEvent = event => event.stopPropagation();
+    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','wheel'].forEach(type => {
+        modal.querySelector('.prompt-editor-dialog')?.addEventListener(type, stopCanvasEvent);
+    });
+    modal.addEventListener('mousedown', event => {
+        if(event.target !== modal) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeCanvasPromptEditor();
+    });
+    canvasPromptEditorTextarea.addEventListener('input', event => {
+        const node = nodes.find(item => item.id === canvasPromptEditorNodeId && item.type === 'prompt');
+        if(node) syncCanvasPromptNodeText(node, event.target.value, event.target);
+    });
+    modal.querySelector('.prompt-editor-close')?.addEventListener('click', event => {
+        event.preventDefault();
+        closeCanvasPromptEditor();
+    });
+    modal.querySelector('.prompt-editor-copy')?.addEventListener('click', async event => {
+        event.preventDefault();
+        const text = canvasPromptEditorTextarea?.value || '';
+        const copied = await copyTextToClipboard(text);
+        setStatus(copied ? '已复制全文' : (text ? '复制失败' : 'Prompt 为空'));
+    });
+    document.addEventListener('keydown', event => {
+        if(event.key !== 'Escape' || !canvasPromptEditorNodeId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        closeCanvasPromptEditor();
+    }, true);
+    refreshIcons();
+    return modal;
+}
+function openCanvasPromptEditor(nodeId, event=null){
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
+    const node = nodes.find(item => item.id === nodeId && item.type === 'prompt');
+    if(!node) return;
+    const modal = ensureCanvasPromptEditor();
+    canvasPromptEditorNodeId = node.id;
+    canvasPromptEditorTextarea.value = normalizedCanvasPromptText(node.text || '');
+    updateCanvasPromptEditorCount(canvasPromptEditorTextarea.value);
+    modal.hidden = false;
+    modal.classList.add('open');
+    document.body.classList.add('prompt-editor-open');
+    refreshIcons();
+    requestAnimationFrame(() => {
+        canvasPromptEditorTextarea?.focus({preventScroll:true});
+        const end = canvasPromptEditorTextarea?.value.length || 0;
+        canvasPromptEditorTextarea?.setSelectionRange(end, end);
+    });
 }
 function canvasAssetLibraries(){
     return Array.isArray(canvasAssetLibrary.libraries) && canvasAssetLibrary.libraries.length ? canvasAssetLibrary.libraries : [{id:'default', name:'默认资产库', categories:canvasAssetLibrary.categories || []}];
@@ -15209,13 +15331,20 @@ function startNodeDrag(e, node){
         [...selected].forEach(id => collect(nodes.find(n => n.id === id)));
     }
     const children = [...collected.values()];
-    dragNode = {node: dragTarget, children, sx:e.clientX, sy:e.clientY, ox:dragTarget.x, oy:dragTarget.y};
-    document.body.classList.add('canvas-node-drag');
+    const activationThreshold = dragTarget.type === 'prompt' ? 4 : 0;
+    dragNode = {node: dragTarget, children, sx:e.clientX, sy:e.clientY, ox:dragTarget.x, oy:dragTarget.y, activationThreshold, activated:activationThreshold === 0};
+    if(dragNode.activated) document.body.classList.add('canvas-node-drag');
     window.onmousemove = onNodeDrag;
     window.onmouseup = endDrag;
 }
 function onNodeDrag(e){
     if(!dragNode) return;
+    if(!dragNode.activated){
+        const distance = Math.hypot(e.clientX - dragNode.sx, e.clientY - dragNode.sy);
+        if(distance < (dragNode.activationThreshold || 0)) return;
+        dragNode.activated = true;
+        document.body.classList.add('canvas-node-drag');
+    }
     const dx = (e.clientX - dragNode.sx) / viewport.scale;
     const dy = (e.clientY - dragNode.sy) / viewport.scale;
     dragNode.node.x = dragNode.ox + dx;
@@ -15387,10 +15516,10 @@ function sanitizeConnections(){
     connections = (connections || []).filter(c => canConnect(c.from, c.to));
 }
 function endDrag(event=null){
-    const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged || tempLink);
+    const hadContentDrag = Boolean((dragNode && dragNode.activated !== false) || resizeNode || llmPaneDrag || knifeChanged || tempLink);
     const hadViewportDrag = Boolean(dragBoard || minimapDrag);
     const boardDragState = dragBoard;
-    if(dragNode){
+    if(dragNode?.activated !== false){
         const moved = [dragNode.node, ...(dragNode.children || []).map(c => c.node)].filter(Boolean);
         // 拖动 group/promptGroup 自身时不重新评估（成员跟着一起走，包含关系不变）
         const draggedGroup = moved.some(n => n.type === 'group' || n.type === 'promptGroup');
