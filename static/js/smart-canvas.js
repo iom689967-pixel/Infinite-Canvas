@@ -771,6 +771,7 @@ function mediaItemForStorage(item){
 }
 function canvasForStorage(){
     const clean = JSON.parse(JSON.stringify(canvas || {}));
+    normalizeStoredSmartConnectionAnchors(clean.connections);
     clean.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
     // 日志预览的临时节点（编辑器打开期间临时塞进 nodes）绝不能被持久化，否则刷新后会留下幽灵节点。
     if(Array.isArray(clean.nodes)) clean.nodes = clean.nodes.filter(node => node.id !== SMART_LOG_PREVIEW_NODE_ID);
@@ -6534,11 +6535,27 @@ function quickConnectTemporaryConnectionSvg(){
 }
 function normalizedSmartConnectionAnchor(anchor, fallbackSide){
     if(!anchor || typeof anchor !== 'object') return null;
-    const ratio = Number(anchor.ratio);
-    if(!Number.isFinite(ratio)) return null;
+    const side = anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide;
+    // Floating Handle 的 Y 只服务于拖线反馈；正式 Edge 始终落在左右侧边中心。
+    anchor.side = side;
+    anchor.ratio = .5;
+    return {side, ratio:.5};
+}
+function normalizeStoredSmartConnectionAnchors(list=canvas?.connections){
+    (list || []).forEach(connection => {
+        if(connection?.fromAnchor) normalizedSmartConnectionAnchor(connection.fromAnchor, 'right');
+        if(connection?.toAnchor) normalizedSmartConnectionAnchor(connection.toAnchor, 'left');
+    });
+}
+function centeredSmartConnectionAnchors(fromId, toId){
+    const fromNode = nodes.find(node => node.id === fromId);
+    const toNode = nodes.find(node => node.id === toId);
+    const fromRect = fromNode ? nodeRect(fromNode) : {x:0, width:0};
+    const toRect = toNode ? nodeRect(toNode) : {x:0, width:0};
+    const targetOnRight = toRect.x + toRect.width / 2 >= fromRect.x + fromRect.width / 2;
     return {
-        side:anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide,
-        ratio:Math.max(0, Math.min(1, ratio))
+        fromAnchor:{side:targetOnRight ? 'right' : 'left', ratio:.5},
+        toAnchor:{side:targetOnRight ? 'left' : 'right', ratio:.5}
     };
 }
 function smartConnectionAnchorPoint(rect, anchor, fallbackSide){
@@ -10103,8 +10120,7 @@ function handlePortDrop(drag, e){
         if(!compatible){ discardPendingUndo(); render(); return; }
         const fromId = drag.fromPort === 'out' ? drag.fromId : targetId;
         const toId = drag.fromPort === 'out' ? targetId : drag.fromId;
-        const anchor = magnetic ? {side:magnetic.side, ratio:Number(magnetic.ratio.toFixed(4))} : null;
-        const anchors = anchor ? (drag.fromPort === 'out' ? {toAnchor:anchor} : {fromAnchor:anchor}) : {};
+        const anchors = magnetic ? centeredSmartConnectionAnchors(fromId, toId) : {};
         if(connectInputNode(fromId, toId, anchors)){
             commitPendingUndo();
             render();

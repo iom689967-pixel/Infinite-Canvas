@@ -1472,6 +1472,7 @@ async function saveCanvas(){
         return;
     }
     sanitizeConnections();
+    normalizeStoredConnectionAnchors();
     savingCanvasNow = true;
     saveCanvasAgain = false;
     try {
@@ -15410,11 +15411,29 @@ function onNodeResize(e){
 }
 function normalizedConnectionAnchor(anchor, fallbackSide){
     if(!anchor || typeof anchor !== 'object') return null;
-    const ratio = Number(anchor.ratio);
-    if(!Number.isFinite(ratio)) return null;
+    const side = anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide;
+    // Floating Handle 的 Y 只服务于拖线反馈；正式 Edge 始终落在左右侧边中心。
+    anchor.side = side;
+    anchor.ratio = .5;
+    return {side, ratio:.5};
+}
+function normalizeStoredConnectionAnchors(list=connections){
+    (list || []).forEach(connection => {
+        if(connection?.fromAnchor) normalizedConnectionAnchor(connection.fromAnchor, 'right');
+        if(connection?.toAnchor) normalizedConnectionAnchor(connection.toAnchor, 'left');
+    });
+}
+function centeredConnectionAnchors(fromId, toId){
+    const fromNode = nodes.find(node => node.id === fromId);
+    const toNode = nodes.find(node => node.id === toId);
+    const fromEl = nodesEl.querySelector(`.node[data-id="${CSS.escape(fromId)}"]`);
+    const toEl = nodesEl.querySelector(`.node[data-id="${CSS.escape(toId)}"]`);
+    const fromCenterX = (Number(fromNode?.x) || 0) + (fromEl?.offsetWidth || fromNode?.w || 260) / 2;
+    const toCenterX = (Number(toNode?.x) || 0) + (toEl?.offsetWidth || toNode?.w || 260) / 2;
+    const targetOnRight = toCenterX >= fromCenterX;
     return {
-        side:anchor.side === 'right' ? 'right' : anchor.side === 'left' ? 'left' : fallbackSide,
-        ratio:Math.max(0, Math.min(1, ratio))
+        fromAnchor:{side:targetOnRight ? 'right' : 'left', ratio:.5},
+        toAnchor:{side:targetOnRight ? 'left' : 'right', ratio:.5}
     };
 }
 function buildConnectionMagneticCandidates(originId, originKind){
@@ -15518,13 +15537,15 @@ function startLink(e, originId, originKind){
             const toId = originKind === 'out' ? targetId : originId;
             if(canConnect(fromId, toId)){
                 const existing = connections.find(c => c.from === fromId && c.to === toId);
-                const anchor = magnetic ? {side:magnetic.side, ratio:Number(magnetic.ratio.toFixed(4))} : null;
-                const anchorKey = originKind === 'out' ? 'toAnchor' : 'fromAnchor';
-                const anchorChanged = Boolean(anchor && JSON.stringify(existing?.[anchorKey] || null) !== JSON.stringify(anchor));
-                if(!existing || anchorChanged){
+                const anchors = magnetic ? centeredConnectionAnchors(fromId, toId) : null;
+                const anchorsChanged = Boolean(anchors && (
+                    JSON.stringify(existing?.fromAnchor || null) !== JSON.stringify(anchors.fromAnchor)
+                    || JSON.stringify(existing?.toAnchor || null) !== JSON.stringify(anchors.toAnchor)
+                ));
+                if(!existing || anchorsChanged){
                     pushUndo();
-                    if(existing) existing[anchorKey] = anchor;
-                    else connections.push({id:uid('c'), from:fromId, to:toId, ...(anchor ? {[anchorKey]:anchor} : {})});
+                    if(existing) Object.assign(existing, anchors);
+                    else connections.push({id:uid('c'), from:fromId, to:toId, ...(anchors || {})});
                     syncLatestGeneratedOutputToConnection(fromId, toId);
                 }
                 syncGeneratorInputs();
