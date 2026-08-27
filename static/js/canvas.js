@@ -15469,14 +15469,13 @@ function connectionMagneticCandidateAt(candidates, clientX, clientY, activeCandi
         const sideX = side === 'left' ? rect.left : rect.right;
         const inset = Math.min(rect.height / 2, MAGNETIC_HANDLE_INSET_PX);
         const handleY = Math.max(rect.top + inset, Math.min(rect.bottom - inset, clientY));
-        const ratio = rect.height > 0 ? (handleY - rect.top) / rect.height : .5;
         best = {
             ...candidate,
             rect,
             side,
             sideDistance,
             snapped:sideDistance <= MAGNETIC_SNAP_PX,
-            ratio:Math.max(0, Math.min(1, ratio)),
+            pointerClient:{x:clientX, y:clientY},
             clientPoint:{x:sideX, y:handleY},
             worldPoint:screenToWorld(sideX, handleY)
         };
@@ -15484,6 +15483,8 @@ function connectionMagneticCandidateAt(candidates, clientX, clientY, activeCandi
     return best;
 }
 let floatingConnectionTargetEl = null;
+let floatingConnectionPreview = null;
+let connectionPointerCaptureCleanup = null;
 function ensureMagneticPortOverlay(){
     let overlay = document.querySelector('.magnetic-port-overlay');
     if(!overlay){
@@ -15498,9 +15499,21 @@ function clearFloatingConnectionPort(){
     document.querySelector('.magnetic-port-overlay .floating-connection-port')?.remove();
     floatingConnectionTargetEl?.classList.remove('magnetic-port-candidate');
     floatingConnectionTargetEl = null;
+    floatingConnectionPreview = null;
 }
 function renderFloatingConnectionPort(candidate){
     if(!candidate){ clearFloatingConnectionPort(); return; }
+    // 预览坐标完全独立于正式 Edge Anchor；同一候选节点也要在每次 pointermove 刷新。
+    floatingConnectionPreview = {
+        nodeId:candidate.targetId,
+        side:candidate.side,
+        clientX:candidate.pointerClient.x,
+        clientY:candidate.pointerClient.y,
+        previewX:candidate.clientPoint.x,
+        previewY:candidate.clientPoint.y,
+        visible:true,
+        snapActive:candidate.snapped
+    };
     const overlay = ensureMagneticPortOverlay();
     let handle = overlay.querySelector('.floating-connection-port');
     if(!handle){
@@ -15513,14 +15526,14 @@ function renderFloatingConnectionPort(candidate){
         floatingConnectionTargetEl = candidate.nodeEl;
         floatingConnectionTargetEl.classList.add('magnetic-port-candidate');
     }
-    handle.dataset.candidateId = candidate.targetId;
-    handle.dataset.side = candidate.side;
+    handle.dataset.candidateId = floatingConnectionPreview.nodeId;
+    handle.dataset.side = floatingConnectionPreview.side;
     handle.dataset.sideDistance = candidate.sideDistance.toFixed(1);
-    handle.classList.toggle('in', candidate.side === 'left');
-    handle.classList.toggle('out', candidate.side === 'right');
-    handle.classList.toggle('is-snapped', candidate.snapped);
-    handle.style.left = `${candidate.clientPoint.x}px`;
-    handle.style.top = `${candidate.clientPoint.y}px`;
+    handle.classList.toggle('in', floatingConnectionPreview.side === 'left');
+    handle.classList.toggle('out', floatingConnectionPreview.side === 'right');
+    handle.classList.toggle('is-snapped', floatingConnectionPreview.snapActive);
+    handle.style.left = `${floatingConnectionPreview.previewX}px`;
+    handle.style.top = `${floatingConnectionPreview.previewY}px`;
 }
 function updateTempLinkMagnet(event){
     if(!tempLink) return;
@@ -15531,11 +15544,113 @@ function updateTempLinkMagnet(event){
     tempLink.x2 = point.x;
     tempLink.y2 = point.y;
 }
+function removeConnectionPointerCapture(){
+    connectionPointerCaptureCleanup?.();
+    connectionPointerCaptureCleanup = null;
+}
+function cancelTempLinkInteraction(){
+    if(!tempLink) return false;
+    tempLink = null;
+    removeConnectionPointerCapture();
+    clearFloatingConnectionPort();
+    renderLinks();
+    return true;
+}
+function finishTempLinkInteraction(event){
+    const drag = tempLink;
+    if(!drag) return;
+    const originId = drag.from;
+    const originKind = drag.originKind || 'out';
+    const source = nodes.find(node => node.id === originId);
+    const hoveredMagnetic = drag.magnetic || null;
+    const magnetic = hoveredMagnetic?.snapped ? hoveredMagnetic : null;
+    const targetKind = originKind === 'out' ? 'in' : 'out';
+    const targetPort = hoveredMagnetic ? null : nearestPort(event.clientX, event.clientY, targetKind);
+    const target = magnetic?.nodeEl || targetPort?.closest('.node');
+    if(target){
+        const targetId = target.dataset.id;
+        const fromId = originKind === 'out' ? originId : targetId;
+        const toId = originKind === 'out' ? targetId : originId;
+        if(canConnect(fromId, toId)){
+            const existing = connections.find(connection => connection.from === fromId && connection.to === toId);
+            const anchors = magnetic ? centeredConnectionAnchors(fromId, toId) : null;
+            const anchorsChanged = Boolean(anchors && (
+                JSON.stringify(existing?.fromAnchor || null) !== JSON.stringify(anchors.fromAnchor)
+                || JSON.stringify(existing?.toAnchor || null) !== JSON.stringify(anchors.toAnchor)
+            ));
+            if(!existing || anchorsChanged){
+                pushUndo();
+                if(existing) Object.assign(existing, anchors);
+                else connections.push({id:uid('c'), from:fromId, to:toId, ...(anchors || {})});
+                syncLatestGeneratedOutputToConnection(fromId, toId);
+            }
+            syncGeneratorInputs();
+            scheduleSave();
+            render();
+        }
+    } else if(hoveredMagnetic){
+        // 感应区内但尚未进入 snap 区：保持“未高亮即不连接”的明确反馈。
+    } else if(originKind === 'out'){
+        if(source && CANVAS_GENERATOR_TYPES.includes(source.type)){
+            const point = screenToWorld(event.clientX, event.clientY);
+            pushUndo();
+            const out = {id:uid('out'), type:'output', x:point.x, y:point.y - 63, images:[]};
+            nodes.push(out);
+            connections.push({id:uid('c'), from:source.id, to:out.id});
+            syncLatestGeneratedOutputToConnection(source.id, out.id);
+            syncGeneratorInputs();
+            scheduleSave();
+            render();
+        } else {
+            openLinkCreateMenu(originId, originKind, event.clientX, event.clientY);
+        }
+    } else {
+        openLinkCreateMenu(originId, originKind, event.clientX, event.clientY);
+    }
+    tempLink = null;
+    removeConnectionPointerCapture();
+    clearFloatingConnectionPort();
+    renderLinks();
+}
+function installConnectionPointerCapture(){
+    removeConnectionPointerCapture();
+    const onPointerMove = event => {
+        if(!tempLink) return;
+        event.preventDefault();
+        updateTempLinkMagnet(event);
+        renderLinks();
+    };
+    const onPointerUp = event => finishTempLinkInteraction(event);
+    const onPointerCancel = () => cancelTempLinkInteraction();
+    const onWindowBlur = () => cancelTempLinkInteraction();
+    const onMouseLeave = event => {
+        if(event.relatedTarget == null) cancelTempLinkInteraction();
+    };
+    const onKeyDown = event => {
+        if(event.key !== 'Escape' || !tempLink) return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancelTempLinkInteraction();
+    };
+    window.addEventListener('pointermove', onPointerMove, true);
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerCancel, true);
+    window.addEventListener('blur', onWindowBlur, true);
+    document.documentElement.addEventListener('mouseleave', onMouseLeave, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    connectionPointerCaptureCleanup = () => {
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerCancel, true);
+        window.removeEventListener('blur', onWindowBlur, true);
+        document.documentElement.removeEventListener('mouseleave', onMouseLeave, true);
+        document.removeEventListener('keydown', onKeyDown, true);
+    };
+}
 function startLink(e, originId, originKind){
     e.stopPropagation();
     originKind = originKind || 'out';
     const src = portPoint(originId, originKind);
-    const source = nodes.find(n => n.id === originId);
     clearFloatingConnectionPort();
     tempLink = {
         from:originId,
@@ -15547,62 +15662,7 @@ function startLink(e, originId, originKind){
         magnetic:null,
         magneticCandidates:buildConnectionMagneticCandidates(originId, originKind)
     };
-    window.onmousemove = e2 => {
-        updateTempLinkMagnet(e2);
-        renderLinks();
-    };
-    window.onmouseup = e2 => {
-        const hoveredMagnetic = tempLink?.magnetic || null;
-        const magnetic = hoveredMagnetic?.snapped ? hoveredMagnetic : null;
-        const targetKind = originKind === 'out' ? 'in' : 'out';
-        const targetPort = hoveredMagnetic ? null : nearestPort(e2.clientX, e2.clientY, targetKind);
-        const target = magnetic?.nodeEl || targetPort?.closest('.node');
-        if(target){
-            const targetId = target.dataset.id;
-            const fromId = originKind === 'out' ? originId : targetId;
-            const toId = originKind === 'out' ? targetId : originId;
-            if(canConnect(fromId, toId)){
-                const existing = connections.find(c => c.from === fromId && c.to === toId);
-                const anchors = magnetic ? centeredConnectionAnchors(fromId, toId) : null;
-                const anchorsChanged = Boolean(anchors && (
-                    JSON.stringify(existing?.fromAnchor || null) !== JSON.stringify(anchors.fromAnchor)
-                    || JSON.stringify(existing?.toAnchor || null) !== JSON.stringify(anchors.toAnchor)
-                ));
-                if(!existing || anchorsChanged){
-                    pushUndo();
-                    if(existing) Object.assign(existing, anchors);
-                    else connections.push({id:uid('c'), from:fromId, to:toId, ...(anchors || {})});
-                    syncLatestGeneratedOutputToConnection(fromId, toId);
-                }
-                syncGeneratorInputs();
-                scheduleSave();
-                render();
-            }
-        } else if(hoveredMagnetic){
-            // 感应区内但尚未进入 snap 区：保持“未高亮即不连接”的明确反馈。
-        } else if(originKind === 'out'){
-            if(source && CANVAS_GENERATOR_TYPES.includes(source.type)){
-                const p = screenToWorld(e2.clientX, e2.clientY);
-                pushUndo();
-                const out = {id:uid('out'), type:'output', x:p.x, y:p.y - 63, images:[]};
-                nodes.push(out);
-                connections.push({id:uid('c'), from:source.id, to:out.id});
-                syncLatestGeneratedOutputToConnection(source.id, out.id);
-                syncGeneratorInputs();
-                scheduleSave();
-                render();
-            } else {
-                openLinkCreateMenu(originId, originKind, e2.clientX, e2.clientY);
-            }
-        } else if(originKind === 'in'){
-            openLinkCreateMenu(originId, originKind, e2.clientX, e2.clientY);
-        }
-        tempLink = null;
-        clearFloatingConnectionPort();
-        window.onmousemove = null;
-        window.onmouseup = null;
-        renderLinks();
-    };
+    installConnectionPointerCapture();
 }
 function nearestPort(clientX, clientY, kind){
     const selector = `.port.${kind}`;

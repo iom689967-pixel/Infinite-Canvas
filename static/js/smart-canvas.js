@@ -9947,14 +9947,13 @@ function smartConnectionMagneticCandidateAt(candidates, clientX, clientY, active
         const sideX = side === 'left' ? rect.left : rect.right;
         const inset = Math.min(rect.height / 2, MAGNETIC_HANDLE_INSET_PX);
         const handleY = Math.max(rect.top + inset, Math.min(rect.bottom - inset, clientY));
-        const ratio = rect.height > 0 ? (handleY - rect.top) / rect.height : .5;
         best = {
             ...candidate,
             rect,
             side,
             sideDistance,
             snapped:sideDistance <= MAGNETIC_SNAP_PX,
-            ratio:Math.max(0, Math.min(1, ratio)),
+            pointerClient:{x:clientX, y:clientY},
             clientPoint:{x:sideX, y:handleY},
             worldPoint:screenToWorld({clientX:sideX, clientY:handleY})
         };
@@ -9962,6 +9961,8 @@ function smartConnectionMagneticCandidateAt(candidates, clientX, clientY, active
     return best;
 }
 let smartFloatingConnectionTargetEl = null;
+let smartFloatingConnectionPreview = null;
+let smartConnectionPointerCaptureCleanup = null;
 function ensureSmartMagneticPortOverlay(){
     let overlay = document.querySelector('.magnetic-port-overlay');
     if(!overlay){
@@ -9976,9 +9977,21 @@ function clearSmartFloatingConnectionPort(){
     document.querySelector('.magnetic-port-overlay .floating-connection-port')?.remove();
     smartFloatingConnectionTargetEl?.classList.remove('magnetic-port-candidate');
     smartFloatingConnectionTargetEl = null;
+    smartFloatingConnectionPreview = null;
 }
 function renderSmartFloatingConnectionPort(candidate){
     if(!candidate){ clearSmartFloatingConnectionPort(); return; }
+    // 预览坐标只服务于拖线反馈；同一候选节点也必须在每次 pointermove 刷新。
+    smartFloatingConnectionPreview = {
+        nodeId:candidate.targetId,
+        side:candidate.side,
+        clientX:candidate.pointerClient.x,
+        clientY:candidate.pointerClient.y,
+        previewX:candidate.clientPoint.x,
+        previewY:candidate.clientPoint.y,
+        visible:true,
+        snapActive:candidate.snapped
+    };
     const overlay = ensureSmartMagneticPortOverlay();
     let handle = overlay.querySelector('.floating-connection-port');
     if(!handle){
@@ -9991,14 +10004,14 @@ function renderSmartFloatingConnectionPort(candidate){
         smartFloatingConnectionTargetEl = candidate.nodeEl;
         smartFloatingConnectionTargetEl.classList.add('magnetic-port-candidate');
     }
-    handle.dataset.candidateId = candidate.targetId;
-    handle.dataset.side = candidate.side;
+    handle.dataset.candidateId = smartFloatingConnectionPreview.nodeId;
+    handle.dataset.side = smartFloatingConnectionPreview.side;
     handle.dataset.sideDistance = candidate.sideDistance.toFixed(1);
-    handle.classList.toggle('in', candidate.side === 'left');
-    handle.classList.toggle('out', candidate.side === 'right');
-    handle.classList.toggle('is-snapped', candidate.snapped);
-    handle.style.left = `${candidate.clientPoint.x}px`;
-    handle.style.top = `${candidate.clientPoint.y}px`;
+    handle.classList.toggle('in', smartFloatingConnectionPreview.side === 'left');
+    handle.classList.toggle('out', smartFloatingConnectionPreview.side === 'right');
+    handle.classList.toggle('is-snapped', smartFloatingConnectionPreview.snapActive);
+    handle.style.left = `${smartFloatingConnectionPreview.previewX}px`;
+    handle.style.top = `${smartFloatingConnectionPreview.previewY}px`;
 }
 function updatePortDragVisual(){
     if(!portDragState) return;
@@ -10022,6 +10035,98 @@ function updatePortDragVisual(){
         targetNodeEl?.classList.add('port-hover');
         if(!portDragState.magnetic) targetNodeEl?.querySelector(`.node-port[data-port="${portDragState.hoverPort}"]`)?.classList.add('is-active');
     }
+}
+function updateSmartConnectionPointer(event){
+    if(!portDragState) return false;
+    event.preventDefault();
+    const point = screenToWorld(event);
+    portDragState.currentWorld = point;
+    portDragState.moved = true;
+    const magnetic = smartConnectionMagneticCandidateAt(
+        portDragState.magneticCandidates,
+        event.clientX,
+        event.clientY,
+        portDragState.magnetic
+    );
+    const hitEl = document.elementFromPoint(event.clientX, event.clientY);
+    const portEl = hitEl?.closest?.('.node-port');
+    const nodeEl = portEl?.closest?.('.image-node') || hitEl?.closest?.('.image-node');
+    let targetId = '';
+    let targetPort = '';
+    if(magnetic){
+        targetId = magnetic.targetId;
+        targetPort = magnetic.targetPort;
+    } else if(nodeEl && nodeEl.dataset.id && nodeEl.dataset.id !== portDragState.fromId){
+        targetId = nodeEl.dataset.id;
+        if(portEl){
+            targetPort = portEl.dataset.port;
+        } else {
+            const rect = nodeEl.getBoundingClientRect();
+            targetPort = (event.clientX - rect.left) < rect.width / 2 ? 'in' : 'out';
+        }
+        const compatible = (portDragState.fromPort === 'out' && targetPort === 'in')
+            || (portDragState.fromPort === 'in' && targetPort === 'out');
+        if(!compatible){ targetId = ''; targetPort = ''; }
+    }
+    portDragState.hoverTargetId = targetId;
+    portDragState.hoverPort = targetPort;
+    portDragState.magnetic = magnetic;
+    updatePortDragVisual();
+    return true;
+}
+function removeSmartConnectionPointerCapture(){
+    smartConnectionPointerCaptureCleanup?.();
+    smartConnectionPointerCaptureCleanup = null;
+}
+function cancelSmartPortDrag(){
+    if(!portDragState) return false;
+    portDragState = null;
+    removeSmartConnectionPointerCapture();
+    shell.classList.remove('port-dragging');
+    clearPortDragVisual();
+    discardPendingUndo();
+    render();
+    return true;
+}
+function finishSmartPortDrag(event){
+    const drag = portDragState;
+    if(!drag) return false;
+    portDragState = null;
+    removeSmartConnectionPointerCapture();
+    shell.classList.remove('port-dragging');
+    clearPortDragVisual();
+    handlePortDrop(drag, event);
+    return true;
+}
+function installSmartConnectionPointerCapture(){
+    removeSmartConnectionPointerCapture();
+    const onPointerMove = event => updateSmartConnectionPointer(event);
+    const onPointerUp = event => finishSmartPortDrag(event);
+    const onPointerCancel = () => cancelSmartPortDrag();
+    const onWindowBlur = () => cancelSmartPortDrag();
+    const onMouseLeave = event => {
+        if(event.relatedTarget == null) cancelSmartPortDrag();
+    };
+    const onKeyDown = event => {
+        if(event.key !== 'Escape' || !portDragState) return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancelSmartPortDrag();
+    };
+    window.addEventListener('pointermove', onPointerMove, true);
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerCancel, true);
+    window.addEventListener('blur', onWindowBlur, true);
+    document.documentElement.addEventListener('mouseleave', onMouseLeave, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    smartConnectionPointerCaptureCleanup = () => {
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerCancel, true);
+        window.removeEventListener('blur', onWindowBlur, true);
+        document.documentElement.removeEventListener('mouseleave', onMouseLeave, true);
+        document.removeEventListener('keydown', onKeyDown, true);
+    };
 }
 const QUICK_CONNECT_NODE_REGISTRY = Object.freeze([
     {type:'text', label:'文本', icon:'type', description:'手写 Prompt 或说明文字', create:(point, options) => createTextNodeAt(point, options)},
@@ -10523,6 +10628,7 @@ function bindNodeEvents(){
                 capturePendingUndo();
                 ensurePortDragPathElement();
                 updatePortDragVisual();
+                installSmartConnectionPointerCapture();
             });
             port.addEventListener('click', e => { e.stopPropagation(); });
             port.addEventListener('dblclick', e => { e.stopPropagation(); });
@@ -18452,33 +18558,8 @@ window.onmousemove = e => {
         return;
     }
     if(portDragState){
-        e.preventDefault();
-        const p = screenToWorld(e);
-        portDragState.currentWorld = p;
-        portDragState.moved = true;
-        const magnetic = smartConnectionMagneticCandidateAt(portDragState.magneticCandidates, e.clientX, e.clientY, portDragState.magnetic);
-        const hitEl = document.elementFromPoint(e.clientX, e.clientY);
-        const portEl = hitEl?.closest?.('.node-port');
-        const nodeEl = portEl?.closest?.('.image-node') || hitEl?.closest?.('.image-node');
-        let targetId = '', targetPort = '';
-        if(magnetic){
-            targetId = magnetic.targetId;
-            targetPort = magnetic.targetPort;
-        } else if(nodeEl && nodeEl.dataset.id && nodeEl.dataset.id !== portDragState.fromId){
-            targetId = nodeEl.dataset.id;
-            if(portEl){
-                targetPort = portEl.dataset.port;
-            } else {
-                const rect = nodeEl.getBoundingClientRect();
-                targetPort = (e.clientX - rect.left) < rect.width / 2 ? 'in' : 'out';
-            }
-            const compatible = (portDragState.fromPort === 'out' && targetPort === 'in') || (portDragState.fromPort === 'in' && targetPort === 'out');
-            if(!compatible){ targetId = ''; targetPort = ''; }
-        }
-        portDragState.hoverTargetId = targetId;
-        portDragState.hoverPort = targetPort;
-        portDragState.magnetic = magnetic;
-        updatePortDragVisual();
+        // pointermove capture 是主路径；仅在不支持 Pointer Events 的旧浏览器回退到 mousemove。
+        if(typeof PointerEvent === 'undefined') updateSmartConnectionPointer(e);
         return;
     }
     if(composerResizeState){
@@ -18751,11 +18832,7 @@ window.onmouseup = e => {
         return;
     }
     if(portDragState){
-        const drag = portDragState;
-        portDragState = null;
-        shell.classList.remove('port-dragging');
-        clearPortDragVisual();
-        handlePortDrop(drag, e);
+        finishSmartPortDrag(e);
         return;
     }
     if(composerResizeState){
