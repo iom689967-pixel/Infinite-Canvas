@@ -6231,13 +6231,21 @@ function createTextNode(x, y, options={}){
     };
     nodes.push(node);
     if(options.select !== false) selectedId = node.id;
-    render();
-    scheduleSave();
+    if(options.deferRender !== true){
+        render();
+        scheduleSave();
+    }
     return node;
 }
 function createTextNodeAt(point, options={}){
+    const anchorPort = options.anchorPort || '';
+    const centerX = anchorPort === 'in'
+        ? (point?.x || 0) + SMART_TEXT_DEFAULT_WIDTH / 2
+        : anchorPort === 'out'
+            ? (point?.x || 0) - SMART_TEXT_DEFAULT_WIDTH / 2
+            : (point?.x || 0);
     return createTextNode(
-        (point?.x || 0) - Math.round(SMART_TEXT_DEFAULT_WIDTH / 2),
+        centerX - Math.round(SMART_TEXT_DEFAULT_WIDTH / 2),
         (point?.y || 0) - Math.round(SMART_TEXT_DEFAULT_HEIGHT / 2),
         options
     );
@@ -6248,10 +6256,16 @@ function createGenerationNode(kind, point, options={}){
     const baseSettings = smartSettingsForNode({type:video ? 'smart-video-generation' : 'smart-image-generation'});
     baseSettings.engine = isApiLikeEngine(baseSettings.engine) ? baseSettings.engine : 'api';
     baseSettings.apiKind = video ? 'video' : 'image';
+    const anchorPort = options.anchorPort || '';
+    const centerX = anchorPort === 'in'
+        ? (point?.x || 0) + SMART_GENERATION_DEFAULT_WIDTH / 2
+        : anchorPort === 'out'
+            ? (point?.x || 0) - SMART_GENERATION_DEFAULT_WIDTH / 2
+            : (point?.x || 0);
     const node = {
         id:uid(video ? 'video-gen' : 'image-gen'),
         type:video ? 'smart-video-generation' : 'smart-image-generation',
-        x:(point?.x || 0) - Math.round(SMART_GENERATION_DEFAULT_WIDTH / 2),
+        x:centerX - Math.round(SMART_GENERATION_DEFAULT_WIDTH / 2),
         y:(point?.y || 0) - Math.round(SMART_GENERATION_DEFAULT_HEIGHT / 2),
         w:SMART_GENERATION_DEFAULT_WIDTH,
         h:SMART_GENERATION_DEFAULT_HEIGHT,
@@ -6262,8 +6276,10 @@ function createGenerationNode(kind, point, options={}){
     };
     nodes.push(node);
     if(options.select !== false) selectedId = node.id;
-    render();
-    scheduleSave();
+    if(options.deferRender !== true){
+        render();
+        scheduleSave();
+    }
     return node;
 }
 function createLoopNode(x, y, options={}){
@@ -6481,6 +6497,22 @@ function shellPoint(event){
     const rect = shell.getBoundingClientRect();
     return {x:event.clientX - rect.left, y:event.clientY - rect.top};
 }
+function quickConnectTemporaryConnectionSvg(){
+    const pending = pendingQuickConnection;
+    const source = pending ? nodes.find(node => node.id === pending.drag?.fromId) : null;
+    const anchor = pending?.worldPoint;
+    if(!source || !anchor) return '';
+    const sourceRect = nodeRect(source);
+    const fromOutput = pending.drag.fromPort === 'out';
+    const fx = fromOutput ? sourceRect.x + sourceRect.width : anchor.x;
+    const fy = fromOutput ? sourceRect.y + sourceRect.height / 2 : anchor.y;
+    const tx = fromOutput ? anchor.x : sourceRect.x;
+    const ty = fromOutput ? anchor.y : sourceRect.y + sourceRect.height / 2;
+    const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
+    const curve = `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`;
+    const color = 'rgba(100,116,139,0.62)';
+    return `<path class="quick-connect-temp conn-line" d="${curve}" stroke="${color}" stroke-width="1.9" fill="none"></path><circle class="quick-connect-temp quick-connect-temp-end conn-end" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle>`;
+}
 function renderConnections(){
     const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
     const cascadeKeys = cascadeConnectionKeys();
@@ -6551,7 +6583,7 @@ function renderConnections(){
         const width = kind === 'input' ? '1.9' : '1.6';
         return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
-    return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
+    return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}${quickConnectTemporaryConnectionSvg()}</svg>`;
 }
 function refreshConnectionLayer(){
     connectionLayerRaf = 0;
@@ -9844,11 +9876,15 @@ const QUICK_CONNECT_NODE_REGISTRY = Object.freeze([
     {type:'image-generation', label:'图片生成', icon:'image', description:'生成图片', create:(point, options) => createGenerationNode('image', point, options)},
     {type:'video-generation', label:'视频生成', icon:'video', description:'生成视频', create:(point, options) => createGenerationNode('video', point, options)}
 ]);
+function clearQuickConnectVisual(){
+    world.querySelectorAll('.quick-connect-temp').forEach(element => element.remove());
+}
 function closeQuickConnectMenu(options={}){
     const hadPending = Boolean(pendingQuickConnection);
     pendingQuickConnection = null;
     quickConnectMenu?.classList.remove('open');
     quickConnectMenu?.setAttribute('aria-hidden', 'true');
+    clearQuickConnectVisual();
     if(hadPending && options.discardUndo !== false) discardPendingUndo();
     if(hadPending && options.render !== false) render();
 }
@@ -9856,24 +9892,29 @@ function createQuickConnectedNode(type){
     const pending = pendingQuickConnection;
     const entry = QUICK_CONNECT_NODE_REGISTRY.find(item => item.type === type);
     if(!pending || !entry) return;
-    pendingQuickConnection = null;
     quickConnectMenu?.classList.remove('open');
     quickConnectMenu?.setAttribute('aria-hidden', 'true');
     const source = nodes.find(node => node.id === pending.drag.fromId);
     if(!source){
+        pendingQuickConnection = null;
+        clearQuickConnectVisual();
         discardPendingUndo();
         render();
         return;
     }
-    const newNode = entry.create(pending.worldPoint, {select:true, skipUndo:true});
+    const anchorPort = pending.drag.fromPort === 'out' ? 'in' : 'out';
+    const newNode = entry.create(pending.worldPoint, {select:true, skipUndo:true, deferRender:true, anchorPort});
     const fromId = pending.drag.fromPort === 'out' ? source.id : newNode.id;
     const toId = pending.drag.fromPort === 'out' ? newNode.id : source.id;
     if(!connectInputNode(fromId, toId)){
         nodes = nodes.filter(node => node.id !== newNode.id);
+        pendingQuickConnection = null;
+        clearQuickConnectVisual();
         discardPendingUndo();
         render();
         return;
     }
+    pendingQuickConnection = null;
     commitPendingUndo();
     render();
     scheduleSave();
@@ -9926,6 +9967,7 @@ function openQuickConnectMenu(drag, event){
     const top = Math.max(pad, Math.min(window.innerHeight - rect.height - pad, event.clientY + 10));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
+    refreshConnectionLayer();
     menu.querySelector('[data-quick-connect-type]')?.focus({preventScroll:true});
     refreshIcons();
 }
