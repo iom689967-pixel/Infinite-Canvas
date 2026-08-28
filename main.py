@@ -38,6 +38,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from providers.kie import (
+    KIE_BASE_URL,
+    KIE_MODEL_NAMES,
+    KIE_UI_MODELS,
+    KieAPIError,
+    KieClient,
+    KieTaskCancelled,
+    KieTaskError,
+    KieValidationError,
+    build_capability_schema as build_kie_capability_schema,
+    build_create_payload as build_kie_create_payload,
+    poll_task as poll_kie_task,
+)
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -314,7 +327,7 @@ JIMENG_LOGIN_SESSION = {
 }
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
-SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
+SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex", "kie"}
 SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses", "tudou-async"}
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.ai"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.ai/openapi/v2"
@@ -709,6 +722,8 @@ def provider_key_env(provider_id):
         return "RUNNINGHUB_API_KEY"
     if provider_id == "volcengine":
         return "ARK_API_KEY"
+    if provider_id == "kie":
+        return "KIE_API_KEY"
     return f"API_PROVIDER_{re.sub(r'[^A-Za-z0-9]', '_', provider_id).upper()}_KEY"
 
 def runninghub_wallet_key_env():
@@ -837,6 +852,21 @@ def default_api_providers():
             "volcengine_project_name": VOLCENGINE_DEFAULT_PROJECT_NAME,
             "volcengine_region": VOLCENGINE_DEFAULT_REGION,
         },
+        {
+            "id": "kie",
+            "name": "Kie",
+            "base_url": KIE_BASE_URL,
+            "protocol": "kie",
+            "image_request_mode": "openai",
+            "image_generation_endpoint": "",
+            "image_edit_endpoint": "",
+            "enabled": True,
+            "primary": False,
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "model_names": dict(KIE_MODEL_NAMES),
+        },
     ]
 
 def merge_default_api_providers(providers, inject_missing=True):
@@ -900,6 +930,28 @@ def merge_default_api_providers(providers, inject_missing=True):
             current["protocol"] = "volcengine"
             current["volcengine_project_name"] = str(current.get("volcengine_project_name") or VOLCENGINE_DEFAULT_PROJECT_NAME).strip() or VOLCENGINE_DEFAULT_PROJECT_NAME
             current["volcengine_region"] = str(current.get("volcengine_region") or VOLCENGINE_DEFAULT_REGION).strip() or VOLCENGINE_DEFAULT_REGION
+    # Kie 是受控内置平台：始终恢复官方 Base URL、协议和两模型白名单，
+    # 不允许运行时配置或浏览器保存动作扩展模型集合。
+    kie_default = next((d for d in default_api_providers() if d["id"] == "kie"), None)
+    if kie_default:
+        current = next((item for item in merged if item.get("id") == "kie"), None)
+        if not current:
+            merged.append(dict(kie_default))
+        else:
+            current.update({
+                "name": kie_default["name"],
+                "base_url": kie_default["base_url"],
+                "protocol": kie_default["protocol"],
+                "image_request_mode": kie_default["image_request_mode"],
+                "image_generation_endpoint": "",
+                "image_edit_endpoint": "",
+                "enabled": True,
+                "image_models": list(KIE_UI_MODELS),
+                "chat_models": [],
+                "video_models": [],
+                "model_names": dict(KIE_MODEL_NAMES),
+                "model_protocols": {},
+            })
     # 即梦 CLI 不再是强制保留的默认平台：仅在用户已添加了即梦协议的平台时，规范化其默认模型/地址。
     for current in merged:
         if not is_jimeng_provider(current):
@@ -1291,6 +1343,13 @@ def normalize_provider(item):
     if provider_id == "runninghub":
         protocol = "runninghub"
         base_url = base_url or RUNNINGHUB_DEFAULT_BASE_URL
+    if provider_id == "kie":
+        name = "Kie"
+        protocol = "kie"
+        base_url = KIE_BASE_URL
+        image_request_mode = "openai"
+        image_generation_endpoint = ""
+        image_edit_endpoint = ""
     locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
     if locked_rule:
         protocol = locked_rule["protocol"]
@@ -1298,7 +1357,7 @@ def normalize_provider(item):
     video_models = model_list_from_values(item.get("video_models") or [])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
-    return {
+    normalized = {
         "id": provider_id,
         "name": name,
         "base_url": base_url,
@@ -1320,6 +1379,16 @@ def normalize_provider(item):
         "volcengine_project_name": volc_project,
         "volcengine_region": volc_region,
     }
+    if provider_id == "kie":
+        normalized.update({
+            "enabled": True,
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "model_names": dict(KIE_MODEL_NAMES),
+            "model_protocols": {},
+        })
+    return normalized
 
 def load_api_providers():
     defaults = default_api_providers()
@@ -1433,6 +1502,10 @@ def public_provider(provider):
         "key_preview": mask_secret(key),
         "key_env": provider_key_env(provider["id"]),
     }
+    if provider.get("id") == "kie":
+        # Kie Key 只允许从 API/.env 读取；浏览器只知道是否已配置，
+        # 不返回完整值或尾号预览。
+        item["key_preview"] = ""
     if provider.get("id") == "runninghub":
         wallet_key = runninghub_wallet_key_value()
         item.update({
@@ -2801,6 +2874,7 @@ class OnlineImageRequest(BaseModel):
     quality: str = "auto"
     n: int = 1
     reference_images: List[AIReference] = []
+    output_format: str = ""
     operation: str = ""
     resolution_type: str = ""
 
@@ -2837,6 +2911,8 @@ class ImageTaskQueryRequest(BaseModel):
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
+CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -11169,8 +11245,145 @@ async def generate_runninghub_video(payload, provider):
         local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
         return {"videos": local_urls, "task_id": task_id, "raw": result}
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution=""):
+def is_kie_provider(provider):
+    return str((provider or {}).get("id") or "").strip().lower() == "kie" or provider_protocol(provider) == "kie"
+
+
+def kie_reference_rules(model):
+    schema = build_kie_capability_schema(model)
+    refs = next((field for field in schema.get("fields", []) if field.get("key") == "reference_images"), {})
+    return {
+        "max": int(refs.get("max") or 0),
+        "max_file_bytes": int(refs.get("max_file_bytes") or 0),
+        "formats": {str(value or "").upper() for value in (refs.get("formats") or [])},
+    }
+
+
+async def kie_public_reference_urls(model, reference_images):
+    rules = kie_reference_rules(model)
+    references = [ref for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")]
+    if len(references) > rules["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{KIE_MODEL_NAMES.get(model, model)} 最多支持 {rules['max']} 张参考图，当前收到 {len(references)} 张",
+        )
+    urls = []
+    for ref in references:
+        local_path = output_file_from_url(ref.get("url", ""))
+        if local_path:
+            size = os.path.getsize(local_path)
+            if rules["max_file_bytes"] and size > rules["max_file_bytes"]:
+                raise HTTPException(status_code=400, detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」超过 30MB")
+            try:
+                with Image.open(local_path) as image:
+                    image_format = str(image.format or "").upper()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」无法识别") from exc
+            if image_format == "JPG":
+                image_format = "JPEG"
+            if rules["formats"] and image_format not in rules["formats"]:
+                allowed = "、".join(sorted(rules["formats"]))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」格式为 {image_format or 'unknown'}；Kie 仅支持 {allowed}",
+                )
+        public_url = await openai_video_proxy_public_reference_url(ref)
+        if not str(public_url or "").startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=502,
+                detail=f"参考图「{ref.get('name') or '未命名图片'}」无法转换为 Kie 可访问的公网 URL",
+            )
+        urls.append(public_url)
+    return urls
+
+
+async def generate_kie_provider_image(
+    prompt,
+    model,
+    reference_images,
+    provider,
+    *,
+    aspect_ratio="",
+    resolution="",
+    output_format="",
+    cancel_event=None,
+    status_callback=None,
+):
+    try:
+        reference_urls = await kie_public_reference_urls(model, reference_images)
+        create_payload, request_meta = build_kie_create_payload(
+            model,
+            prompt,
+            reference_urls,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            output_format=output_format,
+        )
+        client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
+        # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
+        task_id, _create_raw = await client.create_task(create_payload)
+        result = await poll_kie_task(
+            client,
+            task_id,
+            timeout_seconds=float(os.getenv("KIE_TASK_TIMEOUT", "900")),
+            initial_interval=float(os.getenv("KIE_POLL_INITIAL_INTERVAL", "2.5")),
+            max_interval=float(os.getenv("KIE_POLL_MAX_INTERVAL", "12")),
+            cancel_event=cancel_event,
+            on_status=status_callback,
+        )
+        urls = result.get("resultUrls") or []
+        raw = {
+            "taskId": task_id,
+            "images": [{"url": url} for url in urls],
+            "kie_request": request_meta,
+        }
+        return {"type": "url", "value": urls[0]}, raw
+    except KieValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KieTaskCancelled as exc:
+        error = HTTPException(status_code=499, detail=str(exc))
+        setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+    except TimeoutError as exc:
+        error = HTTPException(status_code=504, detail=str(exc))
+        match = re.search(r"taskId=([^\s,]+)", str(exc))
+        if match:
+            setattr(error, "upstream_task_id", match.group(1))
+        raise error from exc
+    except KieTaskError as exc:
+        detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
+        error = HTTPException(status_code=502, detail=detail)
+        setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+    except KieAPIError as exc:
+        error_parts = [str(exc)]
+        if exc.status_code:
+            error_parts.append(f"HTTP {exc.status_code}")
+        if exc.code not in (None, ""):
+            error_parts.append(f"code={exc.code}")
+        detail = "；".join(error_parts)
+        if exc.status_code == 401:
+            detail = "KIE_API_KEY 无效或已过期；HTTP 401"
+        error = HTTPException(status_code=exc.status_code, detail=detail)
+        if exc.task_id:
+            setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+
+
+async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
     provider = get_api_provider(provider_id)
+    if is_kie_provider(provider):
+        return await generate_kie_provider_image(
+            prompt,
+            model,
+            reference_images,
+            provider,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            output_format=output_format,
+            cancel_event=cancel_event,
+            status_callback=status_callback,
+        )
     if is_tudou_provider(provider):
         model = tudou_image_model_for_request(model)
     if provider["id"] == "modelscope":
@@ -13240,10 +13453,11 @@ async def save_providers(payload: List[ApiProviderPayload]):
             raise HTTPException(status_code=400, detail=f"API 平台 ID 重复：{provider['id']}")
         providers.append(provider)
         key_env = provider_key_env(provider["id"])
-        if item.clear_key:
-            env_updates[key_env] = ""
-        elif item.api_key is not None and item.api_key.strip():
-            env_updates[key_env] = item.api_key.strip()
+        if provider["id"] != "kie":
+            if item.clear_key:
+                env_updates[key_env] = ""
+            elif item.api_key is not None and item.api_key.strip():
+                env_updates[key_env] = item.api_key.strip()
         if provider["id"] == "runninghub":
             wallet_env = runninghub_wallet_key_env()
             if item.clear_wallet_key:
@@ -13280,6 +13494,7 @@ async def save_providers(payload: List[ApiProviderPayload]):
         winner = primary_indices[-1]
         for i, p in enumerate(providers):
             p["primary"] = (i == winner)
+    providers = merge_default_api_providers(providers, inject_missing=False)
     save_api_providers(providers)
     runninghub_provider = next((item for item in providers if item.get("id") == "runninghub"), None)
     if runninghub_provider:
@@ -13837,6 +14052,17 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             "video_models": JIMENG_DEFAULT_VIDEO_MODELS,
             "all": [*JIMENG_DEFAULT_IMAGE_MODELS, *JIMENG_DEFAULT_VIDEO_MODELS],
         }
+    if protocol == "kie":
+        return {
+            "total": len(KIE_UI_MODELS),
+            "protocol": "kie",
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "all": list(KIE_UI_MODELS),
+            "model_names": dict(KIE_MODEL_NAMES),
+            "message": "Kie 使用服务端静态白名单，未请求上游模型列表。",
+        }
     if protocol == "runninghub":
         provider = {"id": "runninghub", "name": "RunningHub", "base_url": base_url or RUNNINGHUB_DEFAULT_BASE_URL, "protocol": "runninghub", "api_key": api_key}
         return await runninghub_models_payload(provider)
@@ -13949,6 +14175,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
 @app.post("/api/providers/fetch-models")
 async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
     """按页面当前表单值拉取模型，支持新增平台未保存时直接使用临时 Base URL / Key。"""
+    if str(getattr(payload, "provider_id", "") or "").strip().lower() == "kie":
+        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
     protocol = protocol_from_payload(payload)
     api_key = api_key_from_payload(payload, protocol)
     return await fetch_models_from_upstream(payload.base_url, api_key, protocol, payload.image_request_mode)
@@ -13957,6 +14185,8 @@ async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
 async def fetch_upstream_models(provider_id: str):
     """从已保存的上游 OpenAI 兼容接口拉取 /v1/models 列表，按名称智能分类为 image/chat/video。"""
     provider = get_api_provider_exact(provider_id)
+    if provider["id"] == "kie":
+        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
     if is_codex_provider(provider):
         return await fetch_models_from_upstream("", "", "codex", provider.get("image_request_mode") or "openai")
     if is_gemini_cli_provider(provider):
@@ -13968,7 +14198,7 @@ async def fetch_upstream_models(provider_id: str):
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
-async def build_online_image_result(payload: OnlineImageRequest):
+async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event=None, status_callback=None):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
@@ -13989,7 +14219,8 @@ async def build_online_image_result(payload: OnlineImageRequest):
         else:
             image_data, raw_item = await generate_ai_image(
                 payload.prompt, request_size, payload.quality, model, image_refs, provider["id"],
-                payload.aspect_ratio, payload.resolution,
+                payload.aspect_ratio, payload.resolution, payload.output_format,
+                cancel_event, status_callback,
             )
         try:
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
@@ -14002,6 +14233,18 @@ async def build_online_image_result(payload: OnlineImageRequest):
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
+        if provider.get("id") == "kie":
+            request_meta = raw_item.get("kie_request") if isinstance(raw_item, dict) else {}
+            for meta in local_items:
+                print(json.dumps({
+                    "event": "kie_image_dimensions",
+                    "provider": "kie",
+                    "model": request_meta.get("kie_model") or model,
+                    "requestedResolution": request_meta.get("requested_resolution") or str(payload.resolution or "").upper(),
+                    "requestedAspectRatio": request_meta.get("requested_aspect_ratio") or payload.aspect_ratio,
+                    "returnedImageWidth": meta.get("natural_w") or meta.get("width"),
+                    "returnedImageHeight": meta.get("natural_h") or meta.get("height"),
+                }, ensure_ascii=False), flush=True)
         return local_urls, local_items, raw_item
     try:
         generated = await asyncio.gather(*(generate_one() for _ in range(count)))
@@ -14033,7 +14276,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "provider_name": provider.get("name") or provider["id"],
         "task_id": extract_task_id(raw) if isinstance(raw, dict) else None,
         "request_id": raw.get("id") if isinstance(raw, dict) else None,
-        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
+        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "aspect_ratio": payload.aspect_ratio, "resolution": payload.resolution, "output_format": payload.output_format, "quality": payload.quality, "n": count, "reference_images": refs},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
     }
     save_to_history(result)
@@ -14463,8 +14706,24 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
             CANVAS_TASKS[task_id]["status"] = "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
-        result = await build_online_image_result(payload)
+        cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
+
+        def update_upstream_status(status, _raw):
+            normalized = "queued" if status in {"waiting", "queuing"} else "generating" if status == "generating" else status
+            with CANVAS_TASK_LOCK:
+                if task_id in CANVAS_TASKS and CANVAS_TASKS[task_id].get("status") != "canceled":
+                    CANVAS_TASKS[task_id]["status"] = normalized or "running"
+                    CANVAS_TASKS[task_id]["upstream_status"] = status
+                    CANVAS_TASKS[task_id]["updated_at"] = time.time()
+
+        result = await build_online_image_result(
+            payload,
+            cancel_event=cancel_event,
+            status_callback=update_upstream_status if payload.provider_id == "kie" else None,
+        )
         with CANVAS_TASK_LOCK:
+            if CANVAS_TASKS[task_id].get("status") == "canceled":
+                return
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
                 "result": result,
@@ -14485,22 +14744,49 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+    except asyncio.CancelledError:
+        with CANVAS_TASK_LOCK:
+            if task_id in CANVAS_TASKS:
+                CANVAS_TASKS[task_id].update({
+                    "status": "canceled",
+                    "error": "任务已取消",
+                    "updated_at": time.time(),
+                })
+        raise
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
-                "status": "failed",
+                "status": "canceled" if status_code == 499 else "failed",
                 "error": str(detail),
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
             })
+    finally:
+        CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
+        CANVAS_TASK_RUNNERS.pop(task_id, None)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    if payload.provider_id == "kie":
+        try:
+            # 在创建本地后台任务之前完成模型、比例、分辨率、格式和数量校验，
+            # 非法请求不会接触 Kie，也不会产生上游任务或费用。
+            build_kie_create_payload(
+                payload.model,
+                payload.prompt,
+                [ref.url for ref in payload.reference_images if ref.url],
+                aspect_ratio=payload.aspect_ratio,
+                resolution=payload.resolution,
+                output_format=payload.output_format,
+            )
+        except KieValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     task_id = f"canvas_img_{uuid.uuid4().hex}"
+    cancel_event = asyncio.Event()
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
             "id": task_id,
@@ -14513,7 +14799,9 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "provider_id": payload.provider_id,
             "model": payload.model,
         }
-    asyncio.create_task(run_canvas_image_task(task_id, payload))
+    CANVAS_TASK_CANCEL_EVENTS[task_id] = cancel_event
+    runner = asyncio.create_task(run_canvas_image_task(task_id, payload))
+    CANVAS_TASK_RUNNERS[task_id] = runner
     return {"task_id": task_id, "status": "queued"}
 
 @app.get("/api/canvas-image-tasks/{task_id}")
@@ -14523,6 +14811,23 @@ async def get_canvas_image_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="画布任务不存在，可能服务已重启或任务已过期")
     return task
+
+
+@app.delete("/api/canvas-image-tasks/{task_id}")
+async def cancel_canvas_image_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="画布任务不存在")
+        if task.get("status") in {"succeeded", "failed", "canceled"}:
+            return {"task_id": task_id, "status": task.get("status")}
+        task["status"] = "canceled"
+        task["error"] = "任务已取消"
+        task["updated_at"] = time.time()
+    cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
+    if cancel_event:
+        cancel_event.set()
+    return {"task_id": task_id, "status": "canceled"}
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
@@ -14633,6 +14938,17 @@ def build_image_param_fields(engine: str, provider: dict, model: str):
 async def image_params(provider_id: str = "", model: str = ""):
     providers = load_api_providers()
     provider = next((p for p in providers if p.get("id") == (provider_id or "").strip().lower()), None) or {}
+    if is_kie_provider(provider):
+        try:
+            schema = build_kie_capability_schema(model)
+        except KieValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "engine": "api",
+            "provider_id": "kie",
+            "submit": "/api/canvas-image-tasks",
+            **schema,
+        }
     if is_runninghub_provider(provider):
         engine = "runninghub"
     elif (provider_id or "").strip().lower() == "modelscope":

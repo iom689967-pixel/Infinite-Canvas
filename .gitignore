@@ -1,0 +1,3 @@
+API/.env
+__pycache__/
+*.py[cod]

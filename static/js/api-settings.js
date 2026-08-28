@@ -79,6 +79,8 @@ const MS_BUILTIN_IMAGE_MODELS = [
 ];
 const MS_DEFAULT_BASE_URL = 'https://api-inference.modelscope.cn/v1';
 const RH_DEFAULT_BASE_URL = 'https://www.runninghub.ai';
+const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai';
+const KIE_IMAGE_MODELS = ['gpt-image-2', 'nano-banana-pro'];
 const LINGJING_DEFAULT_BASE_URL = 'https://apistudio.vip';
 const LINGJING_REGISTER_URL = 'https://apistudio.vip/register?aff=g1CT';
 const VIP_GPT_DEFAULT_BASE_URL = 'https://www.vip-gpt.net';
@@ -416,7 +418,7 @@ function deriveIdFromName(name, existingId){
 function updateIdPreview(){
     const item = provider();
     if(!item) return;
-    const isBuiltin = item.id === 'comfly' || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng';
+    const isBuiltin = item.id === 'comfly' || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng' || item.id === 'kie';
     const idPreview = document.getElementById('idPreview');
     if(!idPreview) return;
     if(isBuiltin){
@@ -437,7 +439,7 @@ function visibleProviders(){
 function isFixedProvider(itemOrId){
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
     // 即梦 CLI 不再是固定平台：可删除、可排序，未添加则不存在。
-    return id === 'modelscope' || id === 'runninghub' || id === 'volcengine';
+    return id === 'modelscope' || id === 'runninghub' || id === 'volcengine' || id === 'kie';
 }
 function unique(values){
     const seen = new Set();
@@ -788,7 +790,7 @@ function syncEditor(){
     const item = provider();
     if(!item) return;
     const oldId = item.id;
-    const isBuiltin = item.id === 'comfly' || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng';
+    const isBuiltin = item.id === 'comfly' || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng' || item.id === 'kie';
     // 内置和自定义平台的 ID 都保持稳定；新建时若没有 ID 才生成一次。
     const nextId = isBuiltin ? item.id : deriveIdFromName(nameInput.value, item.id);
     item.id = nextId;
@@ -803,6 +805,8 @@ function syncEditor(){
         ? 'runninghub'
         : item.id === 'volcengine'
         ? 'volcengine'
+        : item.id === 'kie'
+        ? 'kie'
         : (protocolInput?.value || 'openai');
     item.base_url = CLI_PROTOCOLS.has(selectedProtocol)
         ? ''
@@ -828,7 +832,19 @@ function syncEditor(){
     item.rh_apps = normalizeRhEntries(item.rh_apps || [], 'app');
     item.rh_workflows = normalizeRhEntries(item.rh_workflows || [], 'workflow');
     const key = keyInput.value.trim();
-    if(key) item.api_key = key;
+    if(key && item.id !== 'kie') item.api_key = key;
+    if(item.id === 'kie'){
+        item.name = 'Kie';
+        item.base_url = KIE_DEFAULT_BASE_URL;
+        item.protocol = 'kie';
+        item.image_request_mode = 'openai';
+        item.image_edit_route = 'general';
+        item.image_models = [...KIE_IMAGE_MODELS];
+        item.chat_models = [];
+        item.video_models = [];
+        item.model_names = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
+        delete item.api_key;
+    }
     if(item.id === 'runninghub'){
         const freeKey = rhFreeKeyInput?.value.trim() || '';
         const walletKey = rhWalletKeyInput?.value.trim() || '';
@@ -2494,6 +2510,7 @@ function handleProviderDragEnd(){
 function renderEditor(){
     const item = provider();
     if(!item) return;
+    const isKie = item.id === 'kie';
     editorTitle.textContent = item.name || item.id;
     nameInput.value = item.name || '';
     idInput.value = item.id || '';
@@ -2501,6 +2518,9 @@ function renderEditor(){
     clearVerifyResult();
     baseInput.placeholder = EXAMPLE_BASE_URL;
     baseInput.value = item.base_url || '';
+    nameInput.disabled = isKie;
+    idInput.disabled = isKie;
+    baseInput.disabled = isKie;
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
     if(protocolInput){
@@ -2509,6 +2529,8 @@ function renderEditor(){
             ? 'runninghub'
             : item.id === 'volcengine'
             ? 'volcengine'
+            : item.id === 'kie'
+            ? 'openai'
             : API_PROTOCOLS.includes(protocolValue)
             ? protocolValue
             : 'openai';
@@ -2518,16 +2540,30 @@ function renderEditor(){
     if(imageRequestModeInput){
         const requestedMode = normalizeImageRequestMode(item.image_request_mode);
         imageRequestModeInput.value = requestedMode;
-        imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
     }
     if(imageEditRouteInput){
         imageEditRouteInput.value = normalizeImageEditRoute(item.image_edit_route);
-        imageEditRouteInput.disabled = item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        imageEditRouteInput.disabled = item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
     }
     keyInput.value = '';
     keyInput.placeholder = item.has_key ? `${tr('api.keepCurrentKey')} ${item.key_preview || ''}` : tr('api.enterKey');
     keyHint.textContent = item.has_key ? `${tr('api.keySaved')}${item.key_env || 'API/.env'}` : tr('api.noKey');
+    keyInput.disabled = isKie;
+    if(isKie){
+        item.name = 'Kie';
+        item.base_url = KIE_DEFAULT_BASE_URL;
+        item.protocol = 'kie';
+        item.image_models = [...KIE_IMAGE_MODELS];
+        item.chat_models = [];
+        item.video_models = [];
+        item.model_names = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
+        nameInput.value = item.name;
+        baseInput.value = item.base_url;
+        keyInput.placeholder = '请只在 API/.env 中配置 KIE_API_KEY';
+        keyHint.textContent = item.has_key ? 'KIE_API_KEY 已在 API/.env 配置' : 'KIE_API_KEY 尚未在 API/.env 配置';
+    }
     const isModelScope = item.id === 'modelscope';
     const isRunningHub = item.id === 'runninghub';
     const isVolcengine = item.id === 'volcengine' || String(protocolInput?.value || item.protocol || '').toLowerCase() === 'volcengine';
@@ -2626,6 +2662,13 @@ function renderEditor(){
     }
     const deleteBtn = document.getElementById('deleteBtn');
     if(deleteBtn) deleteBtn.style.display = isFixedProvider(item) ? 'none' : 'inline-flex';
+    const fetchModelsBtn = document.getElementById('fetchModelsBtn');
+    const openPickerBtn = document.getElementById('openPickerBtn');
+    const probeAsyncBtn = document.getElementById('probeAsyncBtn');
+    if(fetchModelsBtn){ fetchModelsBtn.disabled = isKie; fetchModelsBtn.title = isKie ? 'Kie 使用服务端固定模型白名单' : ''; }
+    if(openPickerBtn){ openPickerBtn.disabled = isKie || !lastFetchedAll.length; openPickerBtn.style.opacity = openPickerBtn.disabled ? '.5' : '1'; }
+    if(probeAsyncBtn){ probeAsyncBtn.disabled = isKie; probeAsyncBtn.title = isKie ? 'Kie 使用固定官方接口' : ''; }
+    document.querySelectorAll('.model-grid .ghost-btn').forEach(button => { button.disabled = isKie; });
     renderModels('image');
     renderModels('chat');
     renderModels('video');
@@ -3245,6 +3288,10 @@ function providerModelBadge(model, label){
 async function fetchModels(){
     const item = provider();
     if(!item) return;
+    if(item.id === 'kie'){
+        setStatus('Kie 固定使用 GPT Image 2 和 Nano Banana Pro，不从上游动态拉取模型。');
+        return;
+    }
     syncEditor();
     const btn = document.getElementById('fetchModelsBtn');
     const baseUrl = baseInput.value.trim();
@@ -3430,7 +3477,7 @@ async function clearKeyOnly(){
     const ok = await saveProviders();
     if(ok) keyInput.value = '';
 }
-const FIXED_PROTOCOL_PROVIDER_IDS = new Set(['modelscope', 'volcengine', 'runninghub']);
+const FIXED_PROTOCOL_PROVIDER_IDS = new Set(['modelscope', 'volcengine', 'runninghub', 'kie']);
 function providerSupportsModelProtocol(item){
     return Boolean(item) && !FIXED_PROTOCOL_PROVIDER_IDS.has(item.id);
 }
@@ -3461,10 +3508,10 @@ function renderModels(kind){
             <div class="model-row${showProtocol ? ' has-protocol' : ''}">
                 <div class="model-id-field">
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
-                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)">
+                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)" ${item?.id === 'kie' ? 'disabled' : ''}>
                 </div>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
-                <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除" ${item?.id === 'kie' ? 'disabled' : ''}><i data-lucide="trash-2" class="w-4 h-4"></i></button>
             </div>
         `;
     }).join('');
@@ -3674,6 +3721,7 @@ async function clearVolcengineAssetKeys(){
 }
 function addModel(kind){
     const item = provider();
+    if(item?.id === 'kie') return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     item[key] = [...(item[key] || []), ''];
     renderModels(kind);
@@ -3686,6 +3734,7 @@ function modelProtocolStillUsed(item, name){
 }
 function updateModel(kind, index, value){
     const item = provider();
+    if(item?.id === 'kie') return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     const oldName = String(item[key][index] || '').trim();
     const newName = String(value || '').trim();
@@ -3727,6 +3776,7 @@ function updateModelProtocol(kind, index, value){
 }
 function removeModel(kind, index){
     const item = provider();
+    if(item?.id === 'kie') return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     const removed = String(item[key][index] || '').trim();
     item[key].splice(index, 1);

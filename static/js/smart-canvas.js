@@ -189,6 +189,9 @@ let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
+const activeSmartTaskControllers = new Map();
+const kieCapabilityCache = new Map();
+const kieCapabilityLoading = new Set();
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -347,7 +350,9 @@ let settings = {
     provider_id:'',
     model:'',
     ratio:'square',
+    aspectRatio:'',
     resolution:'4k',
+    outputFormat:'png',
     customRatio:'',
     customRatioWidth:'',
     customRatioHeight:'',
@@ -2338,6 +2343,66 @@ function toggleZoomPreview(){
 function imageProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine' && (p.image_models || []).length);
 }
+function isKieProviderId(providerId){
+    return String(providerId || '').trim().toLowerCase() === 'kie';
+}
+function kieCapabilityKey(providerId=settings.provider_id, model=settings.model){
+    return `${String(providerId || '').trim().toLowerCase()}:${String(model || '').trim()}`;
+}
+function currentKieCapability(sourceSettings=settings){
+    if(!isKieProviderId(sourceSettings?.provider_id) || !sourceSettings?.model) return null;
+    return kieCapabilityCache.get(kieCapabilityKey(sourceSettings.provider_id, sourceSettings.model)) || null;
+}
+function kieCapabilityField(schema, key){
+    return (schema?.fields || []).find(field => field?.key === key) || null;
+}
+function kieFieldValues(field){
+    return (field?.options || []).map(option => String(option?.value ?? '')).filter(Boolean);
+}
+function normalizeKieSettings(schema, sourceSettings=settings){
+    if(!schema || !sourceSettings) return;
+    const ratioField = kieCapabilityField(schema, 'aspect_ratio');
+    const resolutionField = kieCapabilityField(schema, 'resolution');
+    const formatField = kieCapabilityField(schema, 'output_format');
+    const resolutions = kieFieldValues(resolutionField);
+    const requestedResolution = String(sourceSettings.resolution || '').toUpperCase();
+    sourceSettings.resolution = resolutions.includes(requestedResolution) ? requestedResolution : String(resolutionField?.default || resolutions[0] || '1K');
+    const ratios = kieFieldValues(ratioField);
+    const excluded = resolutionField?.aspect_ratio_exclusions?.[sourceSettings.resolution] || [];
+    const allowedRatios = ratios.filter(value => !excluded.includes(value));
+    sourceSettings.aspectRatio = allowedRatios.includes(sourceSettings.aspectRatio)
+        ? sourceSettings.aspectRatio
+        : String(ratioField?.default && allowedRatios.includes(ratioField.default) ? ratioField.default : (allowedRatios[0] || 'auto'));
+    if(formatField){
+        const formats = kieFieldValues(formatField);
+        sourceSettings.outputFormat = formats.includes(sourceSettings.outputFormat)
+            ? sourceSettings.outputFormat
+            : String(formatField.default || formats[0] || 'png');
+    } else {
+        sourceSettings.outputFormat = '';
+    }
+}
+async function ensureKieCapability(providerId=settings.provider_id, model=settings.model){
+    if(!isKieProviderId(providerId) || !model) return null;
+    const key = kieCapabilityKey(providerId, model);
+    if(kieCapabilityCache.has(key)) return kieCapabilityCache.get(key);
+    if(kieCapabilityLoading.has(key)) return null;
+    kieCapabilityLoading.add(key);
+    try {
+        const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
+        if(!response.ok) throw new Error(await response.text());
+        const schema = await response.json();
+        kieCapabilityCache.set(key, schema);
+        if(settings.provider_id === providerId && settings.model === model) normalizeKieSettings(schema, settings);
+        scheduleDynamicParamsRefresh(0);
+        return schema;
+    } catch(error){
+        toast((error?.message || 'Kie 参数加载失败').slice(0, 160));
+        return null;
+    } finally {
+        kieCapabilityLoading.delete(key);
+    }
+}
 function volcengineProvider(){
     return (apiProviders || []).find(p => p.id === 'volcengine' && p.enabled !== false) || {
         id:'volcengine',
@@ -2982,6 +3047,18 @@ function renderApiParams(){
     if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
     const models = filterJimengImageModels(providerImageModels(settings.provider_id));
     if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    if(isKieProviderId(settings.provider_id)){
+        const schema = currentKieCapability();
+        if(!schema) ensureKieCapability(settings.provider_id, settings.model);
+        else normalizeKieSettings(schema, settings);
+        dynamicParams.innerHTML = `
+            ${renderProviderControl(providers)}
+            ${renderModelControl(models)}
+            ${schema ? renderKieParams(schema) : '<div class="muted-note">正在读取 Kie 模型参数…</div>'}
+            ${renderCountVisualControl()}
+        `;
+        return;
+    }
     // 切换平台/模型时保留用户已选的分辨率（记忆），normalizeApiSizeSettings 只会修正非法的 auto。
     normalizeApiSizeSettings('');
     const outpaintLocked = settings.outpaintResolutionLocked === true;
@@ -3330,15 +3407,47 @@ function renderProviderControl(providers){
     </div>`;
 }
 function renderModelControl(models){
+    const provider = apiProviderById(settings.provider_id);
+    const labelFor = model => provider?.model_names?.[model] || model;
     return `<div class="smart-control model-control">
-        <button class="smart-pill" type="button"><i data-lucide="sparkles"></i><span class="sub">${escapeHtml(settings.model || tr('smart.model'))}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="sparkles"></i><span class="sub">${escapeHtml(labelFor(settings.model) || tr('smart.model'))}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.imageModel'))}</div>
             <div class="model-list">
-                ${models.map(m => `<button type="button" class="direct-option ${m === settings.model ? 'active' : ''}" data-smart-param="model" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(m)}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noImageModel'))}</div>`}
+                ${models.map(m => `<button type="button" class="direct-option ${m === settings.model ? 'active' : ''}" data-smart-param="model" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(labelFor(m))}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noImageModel'))}</div>`}
             </div>
         </div>
     </div>`;
+}
+function renderKieSelectControl(schema, fieldKey, settingKey, icon){
+    const field = kieCapabilityField(schema, fieldKey);
+    if(!field) return '';
+    const resolutionField = kieCapabilityField(schema, 'resolution');
+    const exclusions = resolutionField?.aspect_ratio_exclusions || {};
+    const current = String(settings[settingKey] || field.default || '');
+    const options = (field.options || []).map(option => {
+        const value = String(option?.value ?? '');
+        const disabled = fieldKey === 'aspect_ratio'
+            ? (exclusions[String(settings.resolution || '').toUpperCase()] || []).includes(value)
+            : fieldKey === 'resolution'
+                ? (exclusions[value] || []).includes(String(settings.aspectRatio || ''))
+                : false;
+        return `<button type="button" class="direct-option ${value === current ? 'active' : ''}" data-smart-param="${escapeAttr(settingKey)}" data-smart-value="${escapeAttr(value)}" ${disabled ? 'disabled' : ''}><span>${escapeHtml(option?.label || value)}</span></button>`;
+    }).join('');
+    return `<div class="smart-control kie-${escapeAttr(fieldKey)}-control">
+        <button class="smart-pill" type="button"><i data-lucide="${escapeAttr(icon)}"></i><span>${escapeHtml(field.label)} · ${escapeHtml(current)}</span><i data-lucide="chevron-down" class="pill-caret"></i></button>
+        <div class="smart-popover compact-popover"><div class="smart-popover-title">${escapeHtml(field.label)}</div><div class="model-list">${options}</div></div>
+    </div>`;
+}
+function renderKieParams(schema){
+    const refs = kieCapabilityField(schema, 'reference_images');
+    const max = Number(refs?.max || schema?.reference_image_limit || 0);
+    return `
+        ${renderKieSelectControl(schema, 'aspect_ratio', 'aspectRatio', 'scan')}
+        ${renderKieSelectControl(schema, 'resolution', 'resolution', 'monitor')}
+        ${renderKieSelectControl(schema, 'output_format', 'outputFormat', 'file-image')}
+        <div class="smart-control kie-reference-limit-control"><button class="smart-pill" type="button" title="${escapeAttr((refs?.formats || []).join(' / '))}"><i data-lucide="images"></i><span>参考图 ≤ ${max}</span></button></div>
+    `;
 }
 function msModelLabel(key){
     if(key === 'custom') return tr('smart.custom');
@@ -4163,9 +4272,22 @@ function smartComfyRandomValue(field){
 }
 function setDynamicSetting(key, value){
     const numericKeys = new Set(['count','width','height','videoDuration','enhanceStrength','enhanceUpscaleRes','editUpscaleRes','customRatioWidth','customRatioHeight','customWidth','customHeight','msCustomRatioWidth','msCustomRatioHeight','msCustomWidth','msCustomHeight']);
-    const layoutKeys = new Set(['provider_id','model','resolution','ratio','msgenModel','msCustomModel','msResolution','msRatio','videoProvider','videoModel','videoAspect','videoResolution','comfyMode','comfyWorkflow','quality','count','enhanceUpscaleRes','editUpscaleRes','jimengUpscaleRes','rhConfigKey','rhPayment','rhInstanceType']);
+    const layoutKeys = new Set(['provider_id','model','resolution','ratio','aspectRatio','outputFormat','msgenModel','msCustomModel','msResolution','msRatio','videoProvider','videoModel','videoAspect','videoResolution','comfyMode','comfyWorkflow','quality','count','enhanceUpscaleRes','editUpscaleRes','jimengUpscaleRes','rhConfigKey','rhPayment','rhInstanceType']);
     settings[key] = numericKeys.has(key) && value !== '' ? Number(value) : value;
-    if(key === 'provider_id') settings.model = '';
+    if(key === 'provider_id'){
+        settings.model = '';
+        if(isKieProviderId(value)){
+            settings.aspectRatio = '';
+            settings.resolution = '';
+            settings.outputFormat = '';
+        }
+    }
+    if(key === 'model' && isKieProviderId(settings.provider_id)){
+        settings.aspectRatio = '';
+        settings.resolution = '';
+        settings.outputFormat = '';
+        ensureKieCapability(settings.provider_id, value);
+    }
     if(key === 'videoProvider') settings.videoModel = '';
     if(key === 'videoMultimodal') settings._videoMultimodalUserSet = true;
     if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
@@ -4176,6 +4298,9 @@ function setDynamicSetting(key, value){
         else if(!settings.ratio) settings.ratio = 'square';
     }
     if(key === 'ratio') applySourceRatioToSettings('');
+    if(isKieProviderId(settings.provider_id) && ['aspectRatio','resolution','outputFormat'].includes(key)){
+        normalizeKieSettings(currentKieCapability(), settings);
+    }
     if(key === 'msResolution'){
         if(settings.msResolution === 'custom') settings.msRatio = '';
         else if(!settings.msRatio) settings.msRatio = 'square';
@@ -8505,6 +8630,8 @@ function nodeBodyHtml(node, layout){
     }
     if(node.pending && imgs.length === 0){
         const count = Math.max(1, Number(node.pending) || 1);
+        const statusLabel = smartPendingStatusLabel(node);
+        if(count <= 1 && statusLabel) return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px"><div class="jimeng-pending-overlay"><div class="jimeng-pending-spinner"><i data-lucide="loader-2"></i></div><div class="jimeng-pending-text">${escapeHtml(statusLabel)}</div><div class="jimeng-pending-sub">删除节点或关闭页面会停止本地轮询</div></div></div>`;
         if(count <= 1) return `<div class="loading-cell single" style="width:${layout.width}px;height:${layout.height}px"></div>`;
         const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(count))));
         const rows = Math.ceil(count / cols);
@@ -8662,7 +8789,7 @@ async function runJimengUpscale(node, index){
         });
         if(!task.task_id) throw new Error(tr('smart.errRunFailed'));
         const live = liveSmartNode(target) || target;
-        live.pendingTasks = [{taskId:task.task_id, kind:'image', providerId, model:''}];
+        live.pendingTasks = [{taskId:task.task_id, kind:'image', providerId, model:'', status:'queued'}];
         live.pending = 1;
         live.running = false;
         render();
@@ -10709,6 +10836,7 @@ function deleteNode(id){
     nodes.forEach(node => {
         if(isHistoryGroupNode(node) && node.historyFor === id) deleteIds.add(node.id);
     });
+    nodes.filter(node => deleteIds.has(node.id)).forEach(cancelSmartTasksForNode);
     nodes = nodes.filter(node => !deleteIds.has(node.id));
     if(canvas) canvas.connections = (canvas.connections || []).filter(c => !deleteIds.has(c.from) && !deleteIds.has(c.to));
     nodes.forEach(node => {
@@ -10727,6 +10855,7 @@ function clearNodeMediaBeforeDelete(id){
     const hadMedia = Boolean((node.images || []).length || node.pending);
     if(!hadMedia) return false;
     pushUndo();
+    cancelSmartTasksForNode(node);
     node.images = [];
     node.pending = 0;
     node.running = false;
@@ -16425,7 +16554,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 delete history.h;
                 outputSlot.images = [];
             }
-            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model}));
+            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model, status:'queued'}));
             outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
@@ -16878,7 +17007,7 @@ async function runGeneration(){
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model}));
+            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, status:'queued'}));
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
@@ -16996,16 +17125,25 @@ function comfyFieldKind(field){
 async function runApiGeneration(prompt, refs, runSettings=settings){
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
+    const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
+    if(isKieProviderId(runSettings.provider_id) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
+    if(kieSchema) normalizeKieSettings(kieSchema, runSettings);
+    const imageRefs = imageRefsOnly(refs);
+    const kieRefLimit = Number(kieCapabilityField(kieSchema, 'reference_images')?.max || kieSchema?.reference_image_limit || 0);
+    if(kieSchema && imageRefs.length > kieRefLimit){
+        throw new Error(`${kieSchema.label || runSettings.model} 最多支持 ${kieRefLimit} 张参考图，当前有 ${imageRefs.length} 张`);
+    }
     const payload = {
         prompt,
         provider_id:runSettings.provider_id,
         model:runSettings.model,
         size:sizeForRun(runSettings),
-        aspect_ratio:API_RATIO_VALUES[runSettings.ratio] || (runSettings.ratio === 'custom' ? String(runSettings.customRatio || '').trim() : ''),
-        resolution:['1k','2k','4k'].includes(runSettings.resolution) ? runSettings.resolution : '',
+        aspect_ratio:kieSchema ? runSettings.aspectRatio : (API_RATIO_VALUES[runSettings.ratio] || (runSettings.ratio === 'custom' ? String(runSettings.customRatio || '').trim() : '')),
+        resolution:kieSchema ? String(runSettings.resolution || '').toUpperCase() : (['1k','2k','4k'].includes(runSettings.resolution) ? runSettings.resolution : ''),
+        output_format:kieSchema ? String(runSettings.outputFormat || '') : '',
         quality:runSettings.quality || 'auto',
         n:1,
-        reference_images:imageRefsOnly(refs).slice(0, SMART_REFERENCE_IMAGE_MAX)
+        reference_images:kieSchema ? imageRefs : imageRefs.slice(0, SMART_REFERENCE_IMAGE_MAX)
     };
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw new Error(await r.text());
@@ -17579,6 +17717,56 @@ function smartPendingTasks(node){
     if(!node || !Array.isArray(node.pendingTasks)) return [];
     return node.pendingTasks.filter(task => task && task.taskId);
 }
+function smartPendingStatusLabel(node){
+    const statuses = smartPendingTasks(node).map(task => String(task.status || '').toLowerCase());
+    if(statuses.includes('generating') || statuses.includes('running')) return 'Kie 正在生成';
+    if(statuses.includes('waiting')) return 'Kie 等待中';
+    if(statuses.includes('queued') || statuses.includes('queuing')) return 'Kie 排队中';
+    return '';
+}
+function updateSmartPendingTaskStatus(taskId, status){
+    let changed = false;
+    nodes.forEach(node => {
+        smartPendingTasks(node).forEach(task => {
+            if(task.taskId !== taskId || task.status === status) return;
+            task.status = status;
+            changed = true;
+        });
+    });
+    if(changed){
+        render();
+        scheduleSave();
+    }
+}
+class SmartTaskCancelledSignal extends Error {
+    constructor(){
+        super('任务已取消');
+        this.smartTaskCancelled = true;
+    }
+}
+function cancelSmartCanvasTask(taskId){
+    if(!taskId) return;
+    const controller = activeSmartTaskControllers.get(taskId);
+    if(controller) controller.abort();
+    activeSmartTaskControllers.delete(taskId);
+    fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {method:'DELETE', keepalive:true}).catch(() => {});
+}
+function cancelSmartTasksForNode(node){
+    smartPendingTasks(node).forEach(task => cancelSmartCanvasTask(task.taskId));
+}
+window.addEventListener('beforeunload', () => {
+    [...activeSmartTaskControllers.keys()].forEach(cancelSmartCanvasTask);
+});
+function smartTaskDelay(ms, signal){
+    return new Promise((resolve, reject) => {
+        if(signal?.aborted) return reject(new SmartTaskCancelledSignal());
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(new SmartTaskCancelledSignal());
+        }, {once:true});
+    });
+}
 class JimengPendingSignal extends Error {
     constructor(info){
         const data = info || {};
@@ -17802,14 +17990,23 @@ function resumeJimengPendingNodes(){
 async function pollSmartCanvasTask(taskId){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
+    const controller = new AbortController();
+    activeSmartTaskControllers.set(taskId, controller);
     const promise = (async () => {
         for(let i = 0; i < 900; i++){
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`).then(async r => {
-                if(!r.ok) throw new Error(await r.text());
-                return r.json();
-            });
+            await smartTaskDelay(2000, controller.signal);
+            let response;
+            try {
+                response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {signal:controller.signal});
+            } catch(error){
+                if(controller.signal.aborted) throw new SmartTaskCancelledSignal();
+                throw error;
+            }
+            if(!response.ok) throw new Error(await response.text());
+            const task = await response.json();
+            updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status);
             if(task.status === 'succeeded') return task.result || {};
+            if(task.status === 'canceled') throw new SmartTaskCancelledSignal();
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
@@ -17824,6 +18021,7 @@ async function pollSmartCanvasTask(taskId){
         return await promise;
     } finally {
         activeSmartTaskPolls.delete(taskId);
+        activeSmartTaskControllers.delete(taskId);
     }
 }
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
@@ -17885,6 +18083,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             render();
             scheduleSave();
         } catch(e) {
+            if(e && e.smartTaskCancelled) return;
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);
