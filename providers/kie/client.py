@@ -1,5 +1,6 @@
 """Minimal server-side client for Kie Market image jobs."""
 
+import json
 import urllib.parse
 
 import httpx
@@ -36,6 +37,8 @@ class KieClient:
         self.api_key = api_key
         self.base_url = str(base_url or KIE_BASE_URL).strip().rstrip("/")
         self._http_client = http_client
+        self.last_http_status = None
+        self.last_request_url = ""
 
     def headers(self):
         return {
@@ -50,8 +53,11 @@ class KieClient:
             timeout=httpx.Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0),
             follow_redirects=True,
         )
+        request_url = f"{self.base_url}{path}"
+        self.last_request_url = request_url
         try:
-            response = await client.request(method, f"{self.base_url}{path}", headers=self.headers(), **kwargs)
+            response = await client.request(method, request_url, headers=self.headers(), **kwargs)
+            self.last_http_status = response.status_code
         except httpx.HTTPError as exc:
             raise KieAPIError(f"Kie 网络请求失败：{exc}", status_code=502) from exc
         finally:
@@ -81,6 +87,12 @@ class KieClient:
         task_id = str(data.get("taskId") or "").strip()
         if not task_id:
             raise KieAPIError("Kie 创建任务成功但没有返回 data.taskId", raw=raw)
+        print(json.dumps({
+            "event": "kie_create_task",
+            "httpStatus": self.last_http_status,
+            "requestUrl": self.last_request_url,
+            "taskId": task_id,
+        }, ensure_ascii=False), flush=True)
         return task_id, raw
 
     async def query_task(self, task_id):
@@ -88,4 +100,11 @@ class KieClient:
         if not task_id:
             raise KieAPIError("Kie taskId 不能为空", status_code=400)
         query = urllib.parse.urlencode({"taskId": task_id})
-        return await self._request_json("GET", f"/api/v1/jobs/recordInfo?{query}")
+        raw = await self._request_json("GET", f"/api/v1/jobs/recordInfo?{query}")
+        print(json.dumps({
+            "event": "kie_query_task",
+            "httpStatus": self.last_http_status,
+            "requestUrl": self.last_request_url,
+            "taskId": task_id,
+        }, ensure_ascii=False), flush=True)
+        return raw

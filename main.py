@@ -51,6 +51,11 @@ from providers.kie import (
     build_create_payload as build_kie_create_payload,
     poll_task as poll_kie_task,
 )
+from providers.kie.tasks import (
+    parse_result_urls as parse_kie_result_urls,
+    task_failure as kie_task_failure,
+    task_status as kie_task_status,
+)
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -14637,6 +14642,71 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             raise HTTPException(status_code=exc.response.status_code, detail=f"查询 RunningHub 任务失败：{text[:300]}") from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
+    if is_kie_provider(provider):
+        try:
+            kie_client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
+            raw = await kie_client.query_task(task_id)
+            status = kie_task_status(raw)
+            if status == "success":
+                remote_urls = parse_kie_result_urls(raw, task_id)
+                local_urls = []
+                local_items = []
+                for remote_url in remote_urls:
+                    source_item = {"type": "url", "value": remote_url}
+                    local_url = await save_ai_image_to_output(source_item, prefix="online_")
+                    if local_url:
+                        local_urls.append(local_url)
+                        local_items.append(image_output_meta(local_url, source_item))
+                result = {
+                    "status": "succeeded",
+                    "prompt": "",
+                    "images": local_urls,
+                    "image_items": local_items,
+                    "timestamp": time.time(),
+                    "type": "online",
+                    "model": "",
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "task_id": task_id,
+                    "request_id": "",
+                    "params": {"provider_id": provider["id"]},
+                    "raw": raw,
+                }
+                save_to_history(result)
+                if GLOBAL_LOOP:
+                    asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
+                return result
+            if status == "fail":
+                failure = kie_task_failure(raw, task_id)
+                return {
+                    "status": "failed",
+                    "task_id": task_id,
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "error": str(failure),
+                    "fail_code": failure.fail_code,
+                    "raw": raw,
+                }
+            if status in {"waiting", "queuing", "generating"}:
+                return {
+                    "status": "running",
+                    "upstream_status": status,
+                    "task_id": task_id,
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "message": f"Kie 任务状态：{status}",
+                    "raw": raw,
+                }
+            raise HTTPException(status_code=502, detail=f"Kie 返回未知任务状态：{status or '(empty)'}")
+        except KieAPIError as exc:
+            detail_parts = [str(exc)]
+            if exc.status_code:
+                detail_parts.append(f"HTTP {exc.status_code}")
+            if exc.code not in (None, ""):
+                detail_parts.append(f"code={exc.code}")
+            raise HTTPException(status_code=exc.status_code, detail="；".join(detail_parts)) from exc
+        except KieTaskError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:

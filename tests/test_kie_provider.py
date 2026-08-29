@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -180,6 +181,92 @@ class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.CANVAS_TASKS.pop(task_id, None)
             main.CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
+
+    async def test_recovery_query_dispatches_to_kie_adapter(self):
+        import main
+
+        queried = []
+
+        class RecoveryClient:
+            def __init__(self, api_key, base_url):
+                self.api_key = api_key
+                self.base_url = base_url
+
+            async def query_task(self, task_id):
+                queried.append((self.base_url, task_id))
+                return {"code": 200, "data": {"state": "generating"}}
+
+        payload = main.ImageTaskQueryRequest(provider_id="kie", task_id="kie-task-1")
+        with patch.object(main, "KieClient", RecoveryClient), patch.object(
+            main,
+            "fetch_image_task_payload",
+            AsyncMock(side_effect=AssertionError("Kie must not use the legacy task endpoint")),
+        ):
+            result = await main.query_image_task(payload)
+
+        self.assertEqual(queried, [("https://api.kie.ai", "kie-task-1")])
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["upstream_status"], "generating")
+
+    async def test_recovery_query_parses_kie_result_json(self):
+        import main
+
+        class RecoveryClient:
+            def __init__(self, api_key, base_url):
+                self.base_url = base_url
+
+            async def query_task(self, _task_id):
+                return {
+                    "code": 200,
+                    "data": {
+                        "state": "success",
+                        "resultJson": json.dumps({"resultUrls": ["https://example.test/result.png"]}),
+                    },
+                }
+
+        payload = main.ImageTaskQueryRequest(provider_id="kie", task_id="kie-task-2")
+        with patch.object(main, "KieClient", RecoveryClient), patch.object(
+            main,
+            "save_ai_image_to_output",
+            AsyncMock(return_value="/assets/output/recovered.png"),
+        ) as save_image, patch.object(main, "image_output_meta", return_value={"url": "/assets/output/recovered.png"}), patch.object(
+            main,
+            "save_to_history",
+        ), patch.object(main, "GLOBAL_LOOP", None), patch.object(
+            main,
+            "fetch_image_task_payload",
+            AsyncMock(side_effect=AssertionError("Kie must not use the legacy task endpoint")),
+        ):
+            result = await main.query_image_task(payload)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["images"], ["/assets/output/recovered.png"])
+        save_image.assert_awaited_once_with(
+            {"type": "url", "value": "https://example.test/result.png"},
+            prefix="online_",
+        )
+
+    async def test_recovery_query_parses_kie_fail_code_and_message(self):
+        import main
+
+        class RecoveryClient:
+            def __init__(self, api_key, base_url):
+                self.base_url = base_url
+
+            async def query_task(self, _task_id):
+                return {"code": 200, "data": {"state": "fail", "failCode": "E42", "failMsg": "bad input"}}
+
+        payload = main.ImageTaskQueryRequest(provider_id="kie", task_id="kie-task-3")
+        with patch.object(main, "KieClient", RecoveryClient), patch.object(
+            main,
+            "fetch_image_task_payload",
+            AsyncMock(side_effect=AssertionError("Kie must not use the legacy task endpoint")),
+        ):
+            result = await main.query_image_task(payload)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["fail_code"], "E42")
+        self.assertEqual(result["error"], "bad input")
 
 
 if __name__ == "__main__":

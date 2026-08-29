@@ -72,6 +72,8 @@ async def poll_task(
     deadline = time.monotonic() + max(1.0, float(timeout_seconds or 900))
     interval = max(0.05, float(initial_interval or 2.5))
     last_payload = {}
+    first_query = True
+    last_logged_status = ""
     while time.monotonic() < deadline:
         if cancel_event is not None and cancel_event.is_set():
             raise KieTaskCancelled("Kie 任务轮询已取消", task_id=task_id, raw=last_payload)
@@ -83,15 +85,31 @@ async def poll_task(
         except KieAPIError:
             raise
         status = task_status(last_payload)
+        if first_query or status != last_logged_status:
+            print(json.dumps({
+                "event": "kie_task_state",
+                "taskId": task_id,
+                "state": status,
+                "firstQuery": first_query,
+            }, ensure_ascii=False), flush=True)
+            first_query = False
+            last_logged_status = status
         if on_status is not None:
             value = on_status(status, last_payload)
             if hasattr(value, "__await__"):
                 await value
         if status == KIE_SUCCESS_STATUS:
+            result_urls = parse_result_urls(last_payload, task_id)
+            print(json.dumps({
+                "event": "kie_task_result",
+                "taskId": task_id,
+                "finalState": status,
+                "resultUrlsCount": len(result_urls),
+            }, ensure_ascii=False), flush=True)
             return {
                 "taskId": task_id,
                 "status": status,
-                "resultUrls": parse_result_urls(last_payload, task_id),
+                "resultUrls": result_urls,
                 "raw": last_payload,
             }
         if status == KIE_FAILED_STATUS:
