@@ -13537,6 +13537,8 @@ class TestConnectionPayload(BaseModel):
 
 def protocol_from_payload(payload):
     provider_id = str(getattr(payload, "provider_id", "") or "").strip().lower()
+    if provider_id == "kie":
+        return "kie"
     if provider_id == "volcengine":
         return "volcengine"
     if provider_id == "runninghub":
@@ -13582,6 +13584,90 @@ def upstream_model_headers(api_key: str, protocol: str):
     if protocol == "runninghub":
         return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
     return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
+
+def kie_settings_model_payload(**extra):
+    payload = {
+        "protocol": "kie",
+        "image_request_mode": "kie",
+        "model_count": len(KIE_UI_MODELS),
+        "total": len(KIE_UI_MODELS),
+        "image_models": list(KIE_UI_MODELS),
+        "chat_models": [],
+        "video_models": [],
+        "all": list(KIE_UI_MODELS),
+        "model_names": dict(KIE_MODEL_NAMES),
+    }
+    payload.update(extra)
+    return payload
+
+async def validate_kie_settings(payload: TestConnectionPayload, *, check_reachability: bool):
+    """Validate the built-in Kie settings without calling an authenticated or paid job endpoint."""
+    requested_base_url = str(payload.base_url or "").strip().rstrip("/")
+    base_url_ok = requested_base_url == KIE_BASE_URL
+    api_key = provider_env_key_value("kie")
+    key_configured = bool(api_key)
+    whitelist_ok = tuple(KIE_UI_MODELS) == ("gpt-image-2", "nano-banana-pro")
+    if whitelist_ok:
+        try:
+            whitelist_ok = all(bool(build_kie_capability_schema(model)) for model in KIE_UI_MODELS)
+        except Exception:
+            whitelist_ok = False
+
+    client_initialized = False
+    if key_configured and base_url_ok:
+        try:
+            KieClient(api_key, base_url=KIE_BASE_URL)
+            client_initialized = True
+        except Exception:
+            client_initialized = False
+
+    checks = {
+        "base_url": base_url_ok,
+        "key_configured": key_configured,
+        "client_initialized": client_initialized,
+        "whitelist": whitelist_ok,
+    }
+
+    if check_reachability:
+        if not base_url_ok:
+            return kie_settings_model_payload(
+                ok=False,
+                status=400,
+                status_code=400,
+                message=f"Kie 请求地址必须为 {KIE_BASE_URL}",
+                checks=checks,
+            )
+        try:
+            # Only contact the public root URL. No key is sent and no task is created.
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(KIE_BASE_URL, headers={"Accept": "text/html,application/json"})
+            reachable = response.status_code < 500
+            checks["reachable"] = reachable
+            return kie_settings_model_payload(
+                ok=reachable,
+                status=response.status_code,
+                status_code=response.status_code,
+                message="Kie 官方地址可访问" if reachable else f"Kie 官方地址返回 HTTP {response.status_code}",
+                checks=checks,
+            )
+        except httpx.HTTPError as exc:
+            checks["reachable"] = False
+            return kie_settings_model_payload(
+                ok=False,
+                status=0,
+                status_code=0,
+                message=f"Kie 官方地址不可访问：{str(exc)[:200]}",
+                checks=checks,
+            )
+
+    ok = base_url_ok and key_configured and client_initialized and whitelist_ok
+    return kie_settings_model_payload(
+        ok=ok,
+        status=200 if ok else 400,
+        status_code=200 if ok else 400,
+        message="Kie 内置协议配置验证通过（未创建生图任务）" if ok else "Kie 内置协议配置不完整（未创建生图任务）",
+        checks=checks,
+    )
 
 def volcengine_default_model_payload(status=200, message="", raw=None):
     return {
@@ -13759,6 +13845,8 @@ def apply_agnes_model_defaults(base_url, grouped, ids):
 async def test_provider_connection(payload: TestConnectionPayload):
     """测试请求地址是否可用：调上游 /v1/models。验证通过时同时把模型清单按类别返回，避免再调一次拉取接口。"""
     protocol = protocol_from_payload(payload)
+    if protocol == "kie":
+        return await validate_kie_settings(payload, check_reachability=True)
     if protocol == "codex":
         status = await codex_status()
         payload_models = codex_models_payload(raw={"status": status})
@@ -13874,6 +13962,8 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
     收到 400 Invalid task ID = 端点存在且 Key 有效；401/403 = Key 无效；404/连接失败 = 不支持异步端点。"""
     base_url = (payload.base_url or "").strip().rstrip("/")
     protocol = protocol_from_payload(payload)
+    if protocol == "kie":
+        return await validate_kie_settings(payload, check_reachability=False)
     if protocol == "codex":
         status = await codex_status()
         return {

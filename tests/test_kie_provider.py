@@ -148,6 +148,67 @@ class KieClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
+    async def test_api_settings_protocol_validation_is_static_and_non_paid(self):
+        import main
+
+        payload = main.TestConnectionPayload(
+            provider_id="kie",
+            base_url="https://api.kie.ai",
+            protocol="openai",
+            image_request_mode="openai",
+        )
+        with patch.object(main, "provider_env_key_value", return_value="test-secret"), patch.object(
+            main.httpx,
+            "AsyncClient",
+            side_effect=AssertionError("Kie protocol validation must not make an upstream request"),
+        ):
+            result = await main.probe_async_endpoint(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["protocol"], "kie")
+        self.assertEqual(result["image_request_mode"], "kie")
+        self.assertEqual(result["model_count"], 2)
+        self.assertEqual(result["model_names"], {
+            "gpt-image-2": "GPT Image 2",
+            "nano-banana-pro": "Nano Banana Pro",
+        })
+        self.assertNotIn("Ark", result["message"])
+        self.assertNotIn("OpenAI", result["message"])
+
+    async def test_api_settings_address_validation_only_contacts_kie_root(self):
+        import main
+
+        calls = []
+
+        class AddressClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                return type("AddressResponse", (), {"status_code": 404})()
+
+        payload = main.TestConnectionPayload(
+            provider_id="kie",
+            base_url="https://api.kie.ai",
+            protocol="openai",
+        )
+        with patch.object(main, "provider_env_key_value", return_value="test-secret"), patch.object(
+            main.httpx,
+            "AsyncClient",
+            return_value=AddressClient(),
+        ):
+            result = await main.test_provider_connection(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["protocol"], "kie")
+        self.assertEqual(result["model_count"], 2)
+        self.assertEqual(calls, [("https://api.kie.ai", {"headers": {"Accept": "text/html,application/json"}})])
+        self.assertNotIn("Authorization", calls[0][1]["headers"])
+
     async def test_server_normalizes_kie_to_static_whitelist(self):
         import main
 

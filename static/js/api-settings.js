@@ -81,6 +81,7 @@ const MS_DEFAULT_BASE_URL = 'https://api-inference.modelscope.cn/v1';
 const RH_DEFAULT_BASE_URL = 'https://www.runninghub.ai';
 const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai';
 const KIE_IMAGE_MODELS = ['gpt-image-2', 'nano-banana-pro'];
+const KIE_MODEL_NAMES = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
 const LINGJING_DEFAULT_BASE_URL = 'https://apistudio.vip';
 const LINGJING_REGISTER_URL = 'https://apistudio.vip/register?aff=g1CT';
 const VIP_GPT_DEFAULT_BASE_URL = 'https://www.vip-gpt.net';
@@ -95,7 +96,7 @@ const CODEX_DEFAULT_CHAT_MODELS = ['gpt-5.5'];
 const GEMINI_CLI_DEFAULT_IMAGE_MODELS = ['auto'];
 const GEMINI_CLI_DEFAULT_CHAT_MODELS = ['auto'];
 const CLI_PROTOCOLS = new Set(['jimeng', 'codex', 'gemini-cli']);
-const API_PROTOCOLS = ['openai', 'apimart', 'gemini', 'volcengine', 'runninghub', 'jimeng', 'codex', 'gemini-cli'];
+const API_PROTOCOLS = ['openai', 'apimart', 'gemini', 'volcengine', 'runninghub', 'jimeng', 'codex', 'gemini-cli', 'kie'];
 const CLI_PROVIDER_PRESETS = {
     jimeng:{id:'jimeng', name:'即梦 CLI', protocol:'jimeng'},
     codex:{id:'codex', name:'GPT CLI', protocol:'codex'},
@@ -842,7 +843,7 @@ function syncEditor(){
         item.image_models = [...KIE_IMAGE_MODELS];
         item.chat_models = [];
         item.video_models = [];
-        item.model_names = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
+        item.model_names = {...KIE_MODEL_NAMES};
         delete item.api_key;
     }
     if(item.id === 'runninghub'){
@@ -867,7 +868,7 @@ function ensureRunningHubLists(item){
 }
 function updateProtocolFromInput(){
     const item = provider();
-    if(!item || !protocolInput || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine') return;
+    if(!item || !protocolInput || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'kie') return;
     if(applyLockedRecommendedProtocol(item)){
         protocolInput.value = item.protocol;
         if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
@@ -2523,6 +2524,7 @@ function renderEditor(){
     baseInput.disabled = isKie;
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
+    syncKieSelectOptions(isKie);
     if(protocolInput){
         const protocolValue = String(item.protocol || 'openai').toLowerCase();
         protocolInput.value = item.id === 'runninghub'
@@ -2530,7 +2532,7 @@ function renderEditor(){
             : item.id === 'volcengine'
             ? 'volcengine'
             : item.id === 'kie'
-            ? 'openai'
+            ? 'kie'
             : API_PROTOCOLS.includes(protocolValue)
             ? protocolValue
             : 'openai';
@@ -2538,7 +2540,7 @@ function renderEditor(){
         protocolInput.title = lockedApi ? '推荐平台使用固定协议' : (protocolInput.disabled ? '内置平台使用固定协议' : '');
     }
     if(imageRequestModeInput){
-        const requestedMode = normalizeImageRequestMode(item.image_request_mode);
+        const requestedMode = isKie ? 'kie' : normalizeImageRequestMode(item.image_request_mode);
         imageRequestModeInput.value = requestedMode;
         imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
@@ -2551,6 +2553,8 @@ function renderEditor(){
     keyInput.placeholder = item.has_key ? `${tr('api.keepCurrentKey')} ${item.key_preview || ''}` : tr('api.enterKey');
     keyHint.textContent = item.has_key ? `${tr('api.keySaved')}${item.key_env || 'API/.env'}` : tr('api.noKey');
     keyInput.disabled = isKie;
+    const keyActions = keyInput.closest('.key-input-line')?.querySelector('.key-actions');
+    if(keyActions) keyActions.style.display = isKie ? 'none' : '';
     if(isKie){
         item.name = 'Kie';
         item.base_url = KIE_DEFAULT_BASE_URL;
@@ -2558,7 +2562,7 @@ function renderEditor(){
         item.image_models = [...KIE_IMAGE_MODELS];
         item.chat_models = [];
         item.video_models = [];
-        item.model_names = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
+        item.model_names = {...KIE_MODEL_NAMES};
         nameInput.value = item.name;
         baseInput.value = item.base_url;
         keyInput.placeholder = '请只在 API/.env 中配置 KIE_API_KEY';
@@ -2665,9 +2669,16 @@ function renderEditor(){
     const fetchModelsBtn = document.getElementById('fetchModelsBtn');
     const openPickerBtn = document.getElementById('openPickerBtn');
     const probeAsyncBtn = document.getElementById('probeAsyncBtn');
-    if(fetchModelsBtn){ fetchModelsBtn.disabled = isKie; fetchModelsBtn.title = isKie ? 'Kie 使用服务端固定模型白名单' : ''; }
+    const modelsDesc = document.querySelector('#modelsHead .block-desc');
+    if(modelsDesc) modelsDesc.textContent = isKie ? '服务端固定模型白名单，不请求上游 /v1/models。' : (tr('api.modelsDesc') || '从上游 API 自动拉取所有可用模型并按类型分类（image / chat / video）');
+    if(fetchModelsBtn){
+        fetchModelsBtn.disabled = isKie;
+        fetchModelsBtn.title = isKie ? 'Kie 使用服务端固定模型白名单' : '';
+        const label = fetchModelsBtn.querySelector('span');
+        if(label) label.textContent = isKie ? `可用模型：${KIE_IMAGE_MODELS.length}` : (tr('api.fetchModels') || '拉取模型');
+    }
     if(openPickerBtn){ openPickerBtn.disabled = isKie || !lastFetchedAll.length; openPickerBtn.style.opacity = openPickerBtn.disabled ? '.5' : '1'; }
-    if(probeAsyncBtn){ probeAsyncBtn.disabled = isKie; probeAsyncBtn.title = isKie ? 'Kie 使用固定官方接口' : ''; }
+    if(probeAsyncBtn){ probeAsyncBtn.disabled = false; probeAsyncBtn.title = isKie ? '无付费验证 Kie 固定协议与本地配置' : ''; }
     document.querySelectorAll('.model-grid .ghost-btn').forEach(button => { button.disabled = isKie; });
     renderModels('image');
     renderModels('chat');
@@ -2937,6 +2948,25 @@ function currentProviderApiKey(item){
     }
     return keyInput.value.trim();
 }
+function syncKieSelectOptions(isKie){
+    const syncOption = (select, value, label) => {
+        if(!select) return;
+        if(select.dataset.kieOriginalOptions === undefined){
+            select.dataset.kieOriginalOptions = select.innerHTML;
+        }
+        if(isKie){
+            select.innerHTML = '';
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            select.appendChild(option);
+        } else {
+            select.innerHTML = select.dataset.kieOriginalOptions;
+        }
+    };
+    syncOption(protocolInput, 'kie', 'Kie 异步任务');
+    syncOption(imageRequestModeInput, 'kie', 'Kie Image');
+}
 function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'tudou-async'].includes(mode) ? mode : 'openai';
@@ -2946,6 +2976,7 @@ function normalizeImageEditRoute(value){
     return ['general', 'auto', 'chat'].includes(route) ? route : 'general';
 }
 function imageRequestModeLabel(mode){
+    if(String(mode || '').trim().toLowerCase() === 'kie') return 'Kie Image';
     const normalized = normalizeImageRequestMode(mode);
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
@@ -2964,6 +2995,11 @@ function isRunningHubContext(item, baseUrl=''){
 function applyDetectedImageRequestMode(mode){
     const item = provider();
     if(!item || !imageRequestModeInput) return false;
+    if(item.id === 'kie'){
+        syncKieSelectOptions(true);
+        imageRequestModeInput.value = 'kie';
+        return false;
+    }
     if(applyLockedRecommendedProtocol(item)){
         if(protocolInput) protocolInput.value = item.protocol;
         imageRequestModeInput.value = item.image_request_mode;
@@ -2979,6 +3015,13 @@ function applyDetectedProtocol(protocol){
     const item = provider();
     const detected = String(protocol || '').toLowerCase();
     if(!item || !protocolInput || !API_PROTOCOLS.includes(detected)) return false;
+    if(item.id === 'kie'){
+        syncKieSelectOptions(true);
+        protocolInput.value = 'kie';
+        item.protocol = 'kie';
+        if(imageRequestModeInput) imageRequestModeInput.value = 'kie';
+        return false;
+    }
     if(applyLockedRecommendedProtocol(item)){
         protocolInput.value = item.protocol;
         if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
@@ -3030,6 +3073,10 @@ function runninghubModelSourceNote(data){
 async function probeAsync(){
     const item = provider();
     if(!item) return;
+    if(item.id === 'kie'){
+        await verifyKieSettings('protocol');
+        return;
+    }
     const btn = document.getElementById('probeAsyncBtn');
     const baseUrl = baseInput.value.trim();
     let isTudouHost = false;
@@ -3130,6 +3177,10 @@ async function probeAsync(){
 async function testConnection(){
     const item = provider();
     if(!item) return;
+    if(item.id === 'kie'){
+        await verifyKieSettings('address');
+        return;
+    }
     const btn = document.getElementById('testUrlBtn');
     const baseUrl = baseInput.value.trim();
     const isJimeng = (protocolInput?.value || '') === 'jimeng';
@@ -3197,6 +3248,55 @@ async function testConnection(){
 let lastFetchedAll = [];          // 全部模型 id 列表
 let lastFetchedSuggestion = null; // 后端自动分类建议
 let lastFetchedModelNames = {};   // {模型 id: 展示名}
+
+async function verifyKieSettings(kind){
+    const isAddress = kind === 'address';
+    const btn = document.getElementById(isAddress ? 'testUrlBtn' : 'probeAsyncBtn');
+    const idleLabel = isAddress ? (tr('api.testUrl') || '验证地址') : '验证协议';
+    if(btn){
+        btn.disabled = true;
+        const label = btn.querySelector('span');
+        if(label) label.textContent = '验证中...';
+    }
+    showVerifyResult(`<span style="color:var(--muted);font-size:11px;font-weight:700">正在执行 Kie 无付费验证...</span>`);
+    try {
+        const endpoint = isAddress ? '/api/providers/test-connection' : '/api/providers/probe-async';
+        const data = await fetch(endpoint, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                base_url:KIE_DEFAULT_BASE_URL,
+                api_key:'',
+                provider_id:'kie',
+                protocol:'kie',
+                image_request_mode:'kie'
+            })
+        }).then(async response => {
+            const payload = await response.json();
+            if(!response.ok) throw new Error(payload.detail || 'Kie 验证失败');
+            return payload;
+        });
+        setFetchedModelState(data);
+        const count = Number(data.model_count ?? data.total ?? KIE_IMAGE_MODELS.length);
+        const checks = data.checks || {};
+        const checksText = isAddress
+            ? `固定地址：${checks.base_url === true ? '正确' : '异常'}`
+            : `API Key：${checks.key_configured === true ? '已配置' : '未配置'} · Client：${checks.client_initialized === true ? '可初始化' : '失败'} · 白名单：${checks.whitelist === true ? '存在' : '异常'}`;
+        const color = data.ok === true ? '#15803d' : '#b45309';
+        const icon = data.ok === true ? '✓' : '⚠';
+        showVerifyResult(`<div style="font-size:11px;font-weight:800;color:${color}">${icon} ${escapeHtml(data.message || 'Kie 验证完成')}</div><div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:3px">协议：<strong style="color:var(--text)">Kie 异步任务</strong> · 图片协议：<strong style="color:var(--text)">Kie Image</strong> · 可用模型：<strong style="color:var(--text)">${count}</strong></div><div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:3px">${escapeHtml(checksText)}</div>`);
+        setStatus(`Kie 固定白名单 · 可用模型：${count}`);
+    } catch(e){
+        showVerifyResult(`<div style="font-size:11px;font-weight:800;color:#b45309">⚠ ${escapeHtml(e.message || String(e))}</div>`);
+    } finally {
+        if(btn){
+            btn.disabled = false;
+            const label = btn.querySelector('span');
+            if(label) label.textContent = idleLabel;
+            refreshIcons();
+        }
+    }
+}
 
 function setFetchedModelState(data){
     lastFetchedAll = Array.isArray(data?.all) ? data.all : [];
@@ -3267,6 +3367,7 @@ function runningHubReadableModelName(model, item){
     return raw;
 }
 function modelDisplayName(model, item){
+    if(item?.id === 'kie') return KIE_MODEL_NAMES[String(model || '')] || '';
     return isRunningHubLike(item) ? runningHubReadableModelName(model, item) : String(model || '');
 }
 function providerModelBadge(model, label){
@@ -3289,7 +3390,8 @@ async function fetchModels(){
     const item = provider();
     if(!item) return;
     if(item.id === 'kie'){
-        setStatus('Kie 固定使用 GPT Image 2 和 Nano Banana Pro，不从上游动态拉取模型。');
+        setFetchedModelState({all:[...KIE_IMAGE_MODELS], image_models:[...KIE_IMAGE_MODELS], model_names:{...KIE_MODEL_NAMES}});
+        setStatus(`Kie 固定使用 GPT Image 2 和 Nano Banana Pro · 可用模型：${KIE_IMAGE_MODELS.length}`);
         return;
     }
     syncEditor();
@@ -3499,6 +3601,16 @@ function renderModels(kind){
     const models = item?.[key] || [];
     if(!models.length){
         list.innerHTML = `<div class="empty">${tr('api.noModels')}</div>`;
+        return;
+    }
+    if(item?.id === 'kie'){
+        list.innerHTML = models.map(model => `
+            <div class="model-row">
+                <div class="model-id-field">
+                    <div class="model-display-name">${escapeHtml(modelDisplayName(model, item))}</div>
+                </div>
+            </div>
+        `).join('');
         return;
     }
     const showProtocol = kind !== 'video' && providerSupportsModelProtocol(item);
