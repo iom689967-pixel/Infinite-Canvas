@@ -17133,13 +17133,14 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     if(kieSchema && imageRefs.length > kieRefLimit){
         throw new Error(`${kieSchema.label || runSettings.model} 最多支持 ${kieRefLimit} 张参考图，当前有 ${imageRefs.length} 张`);
     }
+    const apiResolution = String(runSettings.resolution || '').trim().toLowerCase();
     const payload = {
         prompt,
         provider_id:runSettings.provider_id,
         model:runSettings.model,
         size:sizeForRun(runSettings),
         aspect_ratio:kieSchema ? runSettings.aspectRatio : (API_RATIO_VALUES[runSettings.ratio] || (runSettings.ratio === 'custom' ? String(runSettings.customRatio || '').trim() : '')),
-        resolution:kieSchema ? String(runSettings.resolution || '').toUpperCase() : (['1k','2k','4k'].includes(runSettings.resolution) ? runSettings.resolution : ''),
+        resolution:kieSchema ? String(runSettings.resolution || '').toUpperCase() : (['1k','2k','4k'].includes(apiResolution) ? apiResolution : ''),
         output_format:kieSchema ? String(runSettings.outputFormat || '') : '',
         quality:runSettings.quality || 'auto',
         n:1,
