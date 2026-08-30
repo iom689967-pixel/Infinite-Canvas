@@ -56,6 +56,7 @@ from providers.kie.tasks import (
     task_failure as kie_task_failure,
     task_status as kie_task_status,
 )
+from providers.kie.uploads import KieReferenceError, prepare_kie_references
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -11272,34 +11273,27 @@ async def kie_public_reference_urls(model, reference_images):
             status_code=400,
             detail=f"{KIE_MODEL_NAMES.get(model, model)} 最多支持 {rules['max']} 张参考图，当前收到 {len(references)} 张",
         )
-    urls = []
-    for ref in references:
-        local_path = output_file_from_url(ref.get("url", ""))
-        if local_path:
-            size = os.path.getsize(local_path)
-            if rules["max_file_bytes"] and size > rules["max_file_bytes"]:
-                raise HTTPException(status_code=400, detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」超过 30MB")
-            try:
-                with Image.open(local_path) as image:
-                    image_format = str(image.format or "").upper()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」无法识别") from exc
-            if image_format == "JPG":
-                image_format = "JPEG"
-            if rules["formats"] and image_format not in rules["formats"]:
-                allowed = "、".join(sorted(rules["formats"]))
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"参考图「{ref.get('name') or os.path.basename(local_path)}」格式为 {image_format or 'unknown'}；Kie 仅支持 {allowed}",
-                )
-        public_url = await openai_video_proxy_public_reference_url(ref)
-        if not str(public_url or "").startswith(("http://", "https://")):
-            raise HTTPException(
-                status_code=502,
-                detail=f"参考图「{ref.get('name') or '未命名图片'}」无法转换为 Kie 可访问的公网 URL",
-            )
-        urls.append(public_url)
-    return urls
+    def resolve_local_path(value):
+        text = str(value or "").strip()
+        parsed = urllib.parse.urlsplit(text)
+        if parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}:
+            text = urllib.parse.unquote(parsed.path or "")
+        elif parsed.scheme == "file":
+            text = urllib.parse.unquote(parsed.path or "")
+        path = output_file_from_url(text)
+        if path:
+            return path
+        return text if os.path.isabs(text) and os.path.isfile(text) else ""
+
+    try:
+        return await prepare_kie_references(
+            provider_env_key_value("kie"),
+            references,
+            resolve_local_path=resolve_local_path,
+            max_bytes=rules["max_file_bytes"] or 30 * 1024 * 1024,
+        )
+    except KieReferenceError as exc:
+        raise HTTPException(status_code=400 if exc.stage != "kie-read" else 502, detail=str(exc)) from exc
 
 
 async def generate_kie_provider_image(
@@ -11314,8 +11308,9 @@ async def generate_kie_provider_image(
     cancel_event=None,
     status_callback=None,
 ):
+    reference_audits = []
     try:
-        reference_urls = await kie_public_reference_urls(model, reference_images)
+        reference_urls, reference_audits = await kie_public_reference_urls(model, reference_images)
         create_payload, request_meta = build_kie_create_payload(
             model,
             prompt,
@@ -11324,6 +11319,11 @@ async def generate_kie_provider_image(
             resolution=resolution,
             output_format=output_format,
         )
+        print(json.dumps({
+            "event": "kie_create_request",
+            "payload": create_payload,
+            "referenceAudits": reference_audits,
+        }, ensure_ascii=False), flush=True)
         client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
         # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
         task_id, _create_raw = await client.create_task(create_payload)
@@ -11341,6 +11341,7 @@ async def generate_kie_provider_image(
             "taskId": task_id,
             "images": [{"url": url} for url in urls],
             "kie_request": request_meta,
+            "kie_reference_audits": reference_audits,
         }
         return {"type": "url", "value": urls[0]}, raw
     except KieValidationError as exc:
@@ -11357,6 +11358,13 @@ async def generate_kie_provider_image(
         raise error from exc
     except KieTaskError as exc:
         detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
+        if reference_audits and any(token in str(exc).lower() for token in ("image info", "invalid image", "image format", "read image")):
+            refs = "；".join(
+                f"第{item['index']}张参考图「{item['filename']}」Kie读取失败，"
+                f"预检 HTTP {item['verify_http_status']}，Content-Type {item['verify_content_type']}"
+                for item in reference_audits
+            )
+            detail = f"{detail}；{refs}"
         error = HTTPException(status_code=502, detail=detail)
         setattr(error, "upstream_task_id", exc.task_id)
         raise error from exc
