@@ -125,6 +125,36 @@ def normalize_output_format(value, capability):
     return output_format
 
 
+def build_routed_model_input(kie_model, prompt, references, *, aspect_ratio, resolution, output_format=""):
+    """Map each Kie Market route to its own documented reference-image field.
+
+    GPT Image 1.5 remains an internal adapter route and is not added to the
+    browser/UI whitelist.
+    """
+    if kie_model in {"gpt-image-2-image-to-image", "gpt-image/1.5-image-to-image"}:
+        return {
+            "prompt": prompt,
+            "input_urls": list(references),
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        }
+    if kie_model == "gpt-image-2-text-to-image":
+        return {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        }
+    if kie_model == "nano-banana-pro":
+        return {
+            "prompt": prompt,
+            "image_input": list(references),
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "output_format": output_format,
+        }
+    raise KieValidationError(f"未定义 Kie 模型路由字段：{kie_model}")
+
+
 def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", resolution="", output_format=""):
     capability = capability_for(model)
     prompt = str(prompt or "").strip()
@@ -143,22 +173,23 @@ def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", re
 
     if model == GPT_IMAGE_2:
         kie_model = "gpt-image-2-image-to-image" if references else "gpt-image-2-text-to-image"
-        model_input = {
-            "prompt": prompt,
-            "aspect_ratio": ratio,
-            "resolution": resolution,
-        }
-        if references:
-            model_input["input_urls"] = references
+        model_input = build_routed_model_input(
+            kie_model,
+            prompt,
+            references,
+            aspect_ratio=ratio,
+            resolution=resolution,
+        )
     else:
         kie_model = "nano-banana-pro"
-        model_input = {
-            "prompt": prompt,
-            "image_input": references,
-            "aspect_ratio": ratio,
-            "resolution": resolution,
-            "output_format": output_format,
-        }
+        model_input = build_routed_model_input(
+            kie_model,
+            prompt,
+            references,
+            aspect_ratio=ratio,
+            resolution=resolution,
+            output_format=output_format,
+        )
     return {
         "model": kie_model,
         "input": model_input,

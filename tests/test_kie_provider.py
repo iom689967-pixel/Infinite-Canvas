@@ -1,9 +1,11 @@
 import asyncio
 import json
 import unittest
+from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from PIL import Image
 
 from providers.kie.client import KieAPIError, KieClient
 from providers.kie.models import (
@@ -13,7 +15,9 @@ from providers.kie.models import (
     KieValidationError,
     build_capability_schema,
     build_create_payload,
+    build_routed_model_input,
 )
+from providers.kie.uploads import KieReferenceError, classify_reference_url, normalize_image_bytes
 from providers.kie.tasks import KieTaskCancelled, KieTaskError, parse_result_urls, poll_task
 
 
@@ -71,6 +75,46 @@ class KieModelTests(unittest.TestCase):
         self.assertEqual(payload["model"], "nano-banana-pro")
         self.assertEqual(payload["input"]["image_input"], [])
         self.assertEqual(payload["input"]["output_format"], "jpg")
+
+    def test_internal_gpt_image_15_route_uses_input_urls_without_ui_exposure(self):
+        model_input = build_routed_model_input(
+            "gpt-image/1.5-image-to-image",
+            "edit",
+            ["https://example.test/ref.png"],
+            aspect_ratio="1:1",
+            resolution="1K",
+        )
+        self.assertEqual(model_input["input_urls"], ["https://example.test/ref.png"])
+        self.assertNotIn("gpt-image/1.5-image-to-image", KIE_UI_MODELS)
+
+    def test_reference_source_classification_and_rgb_8bit_normalization(self):
+        self.assertEqual(classify_reference_url("blob:https://canvas.test/id"), "blob")
+        self.assertEqual(classify_reference_url("data:image/png;base64,AA=="), "data:image/base64")
+        self.assertEqual(classify_reference_url("http://127.0.0.1:3000/assets/a.png"), "127.0.0.1/localhost URL")
+        self.assertEqual(classify_reference_url("/assets/input/a.png"), "local canvas URL")
+        self.assertEqual(classify_reference_url("/Users/test/a.png"), "local file path")
+        self.assertEqual(classify_reference_url("https://example.test/a.png"), "public HTTPS URL")
+
+        source = BytesIO()
+        Image.new("RGBA", (3, 2), (10, 20, 30, 128)).save(source, format="PNG")
+        content, meta = normalize_image_bytes(
+            source.getvalue(), index=1, filename="rgba.png", max_bytes=1024 * 1024
+        )
+        with Image.open(BytesIO(content)) as normalized:
+            self.assertEqual(normalized.mode, "RGB")
+            self.assertEqual(normalized.format, "PNG")
+        self.assertEqual(meta["bits_per_channel"], 8)
+        self.assertGreater(meta["bytes"], 0)
+
+    def test_invalid_or_truncated_image_reports_reference_context(self):
+        with self.assertRaises(KieReferenceError) as failure:
+            normalize_image_bytes(b"not-an-image", index=2, filename="bad.png", max_bytes=1024)
+        message = str(failure.exception)
+        self.assertIn("第2张参考图", message)
+        self.assertIn("bad.png", message)
+        self.assertIn("上传失败", message)
+        self.assertIn("HTTP 未取得", message)
+        self.assertIn("Content-Type 未取得", message)
 
     def test_illegal_model_ratio_and_reference_count_fail_before_request(self):
         with self.assertRaises(KieValidationError):
@@ -148,6 +192,47 @@ class KieClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_only_pipeline_builds_text_route_without_upload_or_paid_network(self):
+        import main
+
+        created = []
+
+        class CaptureClient:
+            def __init__(self, api_key, base_url):
+                self.api_key = api_key
+                self.base_url = base_url
+
+            async def create_task(self, payload):
+                created.append(payload)
+                return "mock-task", {"code": 200, "data": {"taskId": "mock-task"}}
+
+        with patch.object(main, "prepare_kie_references", AsyncMock(return_value=([], []))) as prepare, patch.object(
+            main, "provider_env_key_value", return_value="test-secret"
+        ), patch.object(main, "KieClient", CaptureClient), patch.object(
+            main,
+            "poll_kie_task",
+            AsyncMock(return_value={"resultUrls": ["https://example.test/text.png"]}),
+        ):
+            image, _raw = await main.generate_kie_provider_image(
+                "minimal studio product image",
+                GPT_IMAGE_2,
+                [],
+                {"id": "kie"},
+                aspect_ratio="1:1",
+                resolution="1K",
+            )
+
+        prepare.assert_awaited_once()
+        self.assertEqual(image["value"], "https://example.test/text.png")
+        self.assertEqual(created, [{
+            "model": "gpt-image-2-text-to-image",
+            "input": {
+                "prompt": "minimal studio product image",
+                "aspect_ratio": "1:1",
+                "resolution": "1K",
+            },
+        }])
+
     async def test_api_settings_protocol_validation_is_static_and_non_paid(self):
         import main
 
