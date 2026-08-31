@@ -14,6 +14,38 @@ html[data-studio-scale="off"].studio-scale-managed .log-panel,
 html[data-studio-scale="off"].studio-scale-managed .asset-manager-panel {
     zoom: var(--studio-ui-scale, 1);
 }
+
+/* 画布参考选择模式：仅叠加交互层，不改变来源节点本身的透明度。 */
+.generator-image-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.canvas-reference-entry{display:inline-flex;align-items:center;gap:5px;height:25px;padding:0 9px;border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;color:#2563eb;font-size:10px;font-weight:700;cursor:pointer}
+.canvas-reference-entry:hover{background:#dbeafe;border-color:#93c5fd}
+.canvas-reference-entry svg{width:12px;height:12px}
+.canvas-reference-banner{position:fixed;z-index:10050;top:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;justify-content:space-between;gap:28px;min-width:470px;padding:10px 12px 10px 16px;border:1px solid rgba(147,197,253,.85);border-radius:14px;background:linear-gradient(135deg,#2563eb,#1d4ed8);box-shadow:0 14px 36px rgba(30,64,175,.3);color:#fff;font-size:13px}
+.canvas-reference-banner-title,.canvas-reference-banner-actions,.canvas-reference-banner button{display:flex;align-items:center;gap:8px}
+.canvas-reference-banner-title svg{width:17px;height:17px}
+.canvas-reference-banner-title strong{padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.18);font-size:11px}
+.canvas-reference-banner button{height:30px;padding:0 11px;border:1px solid rgba(255,255,255,.42);border-radius:9px;background:#fff;color:#1d4ed8;font-size:11px;font-weight:800;cursor:pointer}
+.canvas-reference-banner button:disabled{opacity:.55;cursor:not-allowed}
+.canvas-reference-banner button svg{width:13px;height:13px}
+.canvas-reference-banner .canvas-reference-close{justify-content:center;width:30px;padding:0;border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.12);color:#fff;font-size:20px;font-weight:400}
+.canvas-reference-picker-active #board{cursor:default}
+.canvas-reference-picker-active .node .port,.canvas-reference-picker-active .node .resize-handle{pointer-events:none}
+.canvas-reference-target{outline:2px dashed #3b82f6!important;outline-offset:5px}
+.canvas-reference-candidate{position:relative!important;cursor:pointer!important;isolation:isolate}
+.canvas-reference-candidate>.canvas-reference-overlay{position:absolute;z-index:14;inset:0;display:flex;align-items:flex-start;justify-content:flex-end;padding:8px;border:2px solid rgba(96,165,250,.7);border-radius:inherit;background:rgba(15,23,42,.24);pointer-events:none;box-sizing:border-box}
+.canvas-reference-candidate:hover>.canvas-reference-overlay{border-color:#60a5fa;background:rgba(37,99,235,.24)}
+.canvas-reference-selected>.canvas-reference-overlay{border:3px solid #2563eb;background:rgba(15,23,42,.46);box-shadow:inset 0 0 0 1px rgba(255,255,255,.55)}
+.canvas-reference-disabled{cursor:not-allowed!important}
+.canvas-reference-disabled>.canvas-reference-overlay{border-color:rgba(148,163,184,.75);background:rgba(15,23,42,.56)}
+.canvas-reference-order,.canvas-reference-pick-hint{display:grid;place-items:center;min-width:26px;height:26px;padding:0 7px;border-radius:999px;background:#2563eb;color:#fff;font-size:12px;font-weight:900;box-shadow:0 4px 12px rgba(15,23,42,.28)}
+.canvas-reference-pick-hint{min-width:auto;height:22px;background:rgba(15,23,42,.72);font-size:10px}
+.canvas-reference-input{position:relative;padding-right:45px!important;border-color:#bfdbfe!important;background:#eff6ff!important}
+.canvas-reference-input.invalid{border-color:#fecaca!important;background:#fff1f2!important}
+.canvas-reference-source-badge{position:absolute;right:22px;top:4px;padding:1px 5px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-size:8px;font-weight:800}
+.canvas-reference-input-remove{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:18px;height:18px;padding:0;border:0;border-radius:999px;background:#fff;color:#64748b;font-size:15px;line-height:1;cursor:pointer}
+.canvas-reference-input-remove:hover{background:#fee2e2;color:#dc2626}
+html.dark .canvas-reference-entry,body.dark .canvas-reference-entry,.theme-dark .canvas-reference-entry{border-color:#1d4ed8;background:rgba(30,64,175,.28);color:#93c5fd}
+html.dark .canvas-reference-input,body.dark .canvas-reference-input,.theme-dark .canvas-reference-input{border-color:#1e40af!important;background:rgba(30,58,138,.2)!important}
 .topbar { position:absolute; top:22px; left:24px; right:24px; z-index:30; display:flex; align-items:flex-start; justify-content:space-between; gap:14px; pointer-events:none; }
 .panel { pointer-events:auto; background:var(--panel); border:1px solid var(--line); border-radius:24px; box-shadow:0 16px 44px var(--shadow); backdrop-filter:blur(16px); }
 .library { width:310px; max-height:calc(100vh - 44px); padding:14px; display:flex; flex-direction:column; gap:12px; }

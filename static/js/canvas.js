@@ -477,7 +477,10 @@ const activeCanvasTaskPolls = new Set();
 let hoveredConnectionId = '';
 let lastMouseBoard = {x: 0, y: 0};
 let undoStack = [];
+let redoStack = [];
 const UNDO_MAX = 30;
+let canvasReferencePicker = null;
+const canvasReferenceCapabilityCache = new Map();
 const cascadeRunningIds = new Set();
 const cascadeStopIds = new Set();
 const cascadeSerialIds = new Set(); // 记录以串行循环模式启动的运行，用于停止按钮
@@ -1941,6 +1944,8 @@ async function createCanvas(){
         canvas.logs = canvas.logs || [];
         nodes = canvas.nodes || [];
         connections = canvas.connections || [];
+        undoStack = [];
+        redoStack = [];
         viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
         canvas.viewport = {...viewport};
         resetTransientRunState(nodes);
@@ -2071,6 +2076,7 @@ async function setCanvasTitle(id, title){
     }
 }
 async function openCanvas(id){
+    if(canvasReferencePicker) cancelCanvasReferencePicker();
     setStatus('Opening...');
     try {
         const res = await fetch(`/api/canvases/${id}`);
@@ -2251,12 +2257,15 @@ function handleCanvasUpdatedMessage(data){
     setStatus('Syncing...');
 }
 async function returnToCanvasManager(){
+    if(canvasReferencePicker) cancelCanvasReferencePicker();
     clearTimeout(saveTimer);
     if(canvas && localCanvasDirty) await saveCanvas();
     stopCanvasRemotePolling();
     canvas = null;
     nodes = [];
     connections = [];
+    undoStack = [];
+    redoStack = [];
     selected.clear();
     viewport = {x: -1800, y: -1000, scale: 1};
     setCanvasMode(false);
@@ -2760,7 +2769,7 @@ function renderMsGenBody(node){
     const ordered = orderedSources(node, inputSources);
     const mediaInputs = ordered.filter(src => src.refs?.some(ref => ['image','video','audio'].includes(mediaKindForRef(ref))));
     const promptInputs = ordered.filter(src => src.prompt && !src.refs?.length);
-    const referenceImages = ordered.flatMap(src => src.refs || []);
+    const referenceImages = mediaInputs.flatMap(src => src.refs || []);
     const isCustomMs = modelKey === 'custom';
     const msUsesImages = Boolean(msModel.supportsImage || msModel.acceptsImage);
     node.msCustomModel = node.msCustomModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo';
@@ -5981,6 +5990,7 @@ function render(){
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
     refreshOutputTimer();
+    if(canvasReferencePicker) applyCanvasReferencePickerVisuals();
 }
 function refreshNodes(ids=[]){
     const uniqueIds = [...new Set((ids || []).filter(Boolean))];
@@ -6012,6 +6022,7 @@ function refreshNodes(ids=[]){
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
     refreshOutputTimer();
+    if(canvasReferencePicker) applyCanvasReferencePickerVisuals();
 }
 function refreshRunNodes(node, out=null){
     refreshNodes([node?.id, out?.id]);
@@ -8467,13 +8478,14 @@ function renderGeneratorBody(node){
     wrap.className = 'generator-body';
     const inputSources = generatorSources(node);
     const ordered = orderedSources(node, inputSources);
-    const mediaInputs = ordered.filter(src => src.refs?.some(ref => ['image','video','audio'].includes(mediaKindForRef(ref))));
+    const canvasInputs = canvasReferenceSources(node);
+    const mediaInputs = [...ordered.filter(src => src.refs?.some(ref => ['image','video','audio'].includes(mediaKindForRef(ref)))), ...canvasInputs];
     const promptInputs = ordered.filter(src => src.prompt && !src.refs?.length);
     sanitizeImageNodeProviderModel(node);
     normalizeApiNodeSizeChoice(node);
     wrap.innerHTML = `
         <div class="prompt-list mb-3"></div>
-        <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">${tr('canvas.images')}</div>
+        <div class="generator-image-heading"><div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">${tr('canvas.images')}</div><button class="canvas-reference-entry" type="button"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button></div>
         <div class="input-list"></div>
         <div class="gen-settings">
             <div class="gen-settings-row">
@@ -8773,6 +8785,7 @@ function renderGeneratorBody(node){
     const list = wrap.querySelector('.input-list');
     renderImageInputList(list, node, mediaInputs);
     renderPromptPreview(wrap.querySelector('.prompt-list'), promptInputs);
+    wrap.querySelector('.canvas-reference-entry').onclick = e => { e.preventDefault(); e.stopPropagation(); beginCanvasReferencePicker(node.id); };
     wrap.querySelector('.gen-btn').onclick = e => { e.stopPropagation(); runCanvasGenerate(node.id); };
     bindCascadeButtons(wrap, node.id);
     return wrap;
@@ -9587,11 +9600,12 @@ function renderImageInputList(list, node, imageInputs, emptyText=null){
     list.innerHTML = imageInputs.length ? '' : `<div class="text-[11px] text-gray-300 py-2">${escapeHtml(emptyText || tr('canvas.inputImagesEmpty'))}</div>`;
     imageInputs.forEach((src, i) => {
         const item = document.createElement('div');
-        item.className = 'input-item';
+        item.className = `input-item ${src.canvasReference ? 'canvas-reference-input' : ''} ${src.invalid ? 'invalid' : ''}`;
         item.draggable = true;
         item.dataset.sourceId = src.id;
         const previewHtml = src.preview && !isMissingAssetUrl(src.preview) ? canvasPreviewImgHtml(src.preview, 256) : (src.preview ? missingAssetHtml(src.preview, true) : '<i data-lucide="image" class="w-6 h-6 text-slate-400"></i>');
-        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(src.label)}</span>`;
+        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(src.label)}</span>${src.canvasReference ? '<span class="canvas-reference-source-badge">画布</span>' : ''}${src.canvasReference ? `<button class="canvas-reference-input-remove" type="button" title="删除画布参考" aria-label="删除画布参考" data-canvas-reference-remove="${escapeAttr(src.canvasReferenceId || '')}">×</button>` : ''}`;
+        if(src.error) item.title = src.error;
         item.ondragstart = e => {
             e.stopPropagation();
             internalDrag = true;
@@ -9603,9 +9617,16 @@ function renderImageInputList(list, node, imageInputs, emptyText=null){
         item.ondrop = e => {
             e.preventDefault();
             e.stopPropagation();
-            reorderInput(node, e.dataTransfer.getData('application/x-canvas-input'), src.id);
+            const movedId = e.dataTransfer.getData('application/x-canvas-input');
+            if(movedId.startsWith('canvas-reference:') && src.canvasReference) reorderCanvasReference(node, movedId.slice('canvas-reference:'.length), src.canvasReferenceId);
+            else reorderInput(node, movedId, src.id);
             internalDrag = false;
         };
+        item.querySelector('[data-canvas-reference-remove]')?.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            removeCanvasReference(node, event.currentTarget.dataset.canvasReferenceRemove || '');
+        });
         list.appendChild(item);
     });
     refreshIcons();
@@ -11288,6 +11309,457 @@ function generatedImageRefs(node){
             return clean;
         });
 }
+function stableCanvasReferenceUrl(url=''){
+    const raw = canvasOriginalMediaUrl(String(url || '').trim());
+    if(!raw || /^(blob:|data:)/i.test(raw)) return '';
+    if(/(?:kie\.ai\/.*(?:temp|upload)|[?&](?:expires|signature|token)=)/i.test(raw)) return '';
+    return raw;
+}
+function canvasReferenceStableKey(ref={}){
+    if(ref.sha256) return `sha256:${String(ref.sha256).toLowerCase()}`;
+    if(ref.assetId) return `asset:${ref.assetId}:${Number(ref.assetIndex || 0)}`;
+    if(ref.sourceNodeId) return `node:${ref.sourceNodeId}:${Number(ref.assetIndex || 0)}`;
+    const url = stableCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ref.url || '');
+    return url ? `url:${url}` : '';
+}
+function canvasReferenceDisplayName(ref={}, fallback='参考图'){
+    return ref.fileName || ref.name || canvasFileNameFromUrl(ref.assetPath || ref.originalUrl || ref.url || '') || fallback;
+}
+function normalizeCanvasReferenceRecord(ref={}, order=0){
+    const sourceNodeId = String(ref.sourceNodeId || '');
+    const assetIndex = Math.max(0, Number(ref.assetIndex || 0) || 0);
+    const stableUrl = stableCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ref.url || '');
+    const record = {
+        id:String(ref.id || uid('canvas-ref')),
+        sourceNodeId,
+        assetId:String(ref.assetId || ''),
+        assetIndex,
+        assetPath:stableUrl.startsWith('/') ? stableUrl : '',
+        originalUrl:/^https?:\/\//i.test(stableUrl) ? stableUrl : '',
+        fileName:canvasReferenceDisplayName(ref),
+        sha256:String(ref.sha256 || ''),
+        order:Number.isFinite(Number(order)) ? Number(order) : 0,
+        materializedEdgeId:String(ref.materializedEdgeId || '')
+    };
+    if(!record.assetPath && !record.originalUrl && stableUrl) record.assetPath = stableUrl;
+    return record;
+}
+function canvasReferenceItemFromNode(sourceNode, assetIndex=0){
+    if(!sourceNode) return null;
+    const index = Math.max(0, Number(assetIndex || 0) || 0);
+    if(sourceNode.type === 'image'){
+        if(index !== 0 || !sourceNode.url || mediaKindForNode(sourceNode) !== 'image') return null;
+        return {url:sourceNode.url, name:sourceNode.name || 'image', kind:'image', sha256:sourceNode.sha256 || ''};
+    }
+    if(sourceNode.type === 'output'){
+        const item = (sourceNode.images || [])[index];
+        const url = outputUrlValue(item);
+        if(!url || mediaKindForOutputItem(item) !== 'image') return null;
+        return {url, name:item?.name || outputImageName(url), kind:'image', sha256:item?.sha256 || ''};
+    }
+    if(CANVAS_MEDIA_OUTPUT_TYPES.includes(sourceNode.type)){
+        const item = (sourceNode.generatedOutputs || [])[index];
+        const url = outputUrlValue(item);
+        if(!url || mediaKindForOutputItem(item) !== 'image') return null;
+        return {url, name:item?.name || outputImageName(url), kind:'image', sha256:item?.sha256 || ''};
+    }
+    return null;
+}
+function resolvedCanvasReference(targetNode, ref, displayIndex=0){
+    const sourceNode = nodes.find(node => node.id === ref?.sourceNodeId);
+    if(!sourceNode) throw new Error(`第 ${displayIndex + 1} 张参考图「${canvasReferenceDisplayName(ref)}」的来源节点已删除`);
+    if(sourceNode.id === targetNode.id) throw new Error(`第 ${displayIndex + 1} 张参考图不能来自当前生成节点自身`);
+    if(wouldCreateGeneratorCycle(sourceNode.id, targetNode.id)) throw new Error(`第 ${displayIndex + 1} 张参考图会形成环路，请移除后再生成`);
+    const item = canvasReferenceItemFromNode(sourceNode, ref.assetIndex);
+    if(!item?.url) throw new Error(`第 ${displayIndex + 1} 张参考图「${canvasReferenceDisplayName(ref)}」已失效或不是图片`);
+    return {
+        ...item,
+        nodeId:sourceNode.id,
+        imageIndex:Number(ref.assetIndex || 0),
+        canvasReferenceId:ref.id,
+        canvasReferenceKey:canvasReferenceStableKey({...ref, url:item.url})
+    };
+}
+function canvasReferenceSources(node){
+    return (Array.isArray(node?.canvasReferences) ? node.canvasReferences : [])
+        .slice()
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+        .map((ref, index) => {
+            try {
+                const item = resolvedCanvasReference(node, ref, index);
+                return {
+                    id:`canvas-reference:${ref.id}`,
+                    type:'canvasReference',
+                    label:canvasReferenceDisplayName(ref, `画布参考 ${index + 1}`),
+                    preview:item.url,
+                    refs:[item],
+                    prompt:'',
+                    canvasReference:true,
+                    canvasReferenceId:ref.id
+                };
+            } catch(error){
+                return {
+                    id:`canvas-reference:${ref.id}`,
+                    type:'canvasReference',
+                    label:`${canvasReferenceDisplayName(ref, `画布参考 ${index + 1}`)} · 已失效`,
+                    preview:stableCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ''),
+                    refs:[],
+                    prompt:'',
+                    canvasReference:true,
+                    canvasReferenceId:ref.id,
+                    invalid:true,
+                    error:error.message || String(error)
+                };
+            }
+        });
+}
+function uniqueCanvasReferenceImages(refs=[]){
+    const seen = new Set();
+    return imageRefsOnly(refs).filter(ref => {
+        const key = ref.canvasReferenceKey
+            || (ref.nodeId ? `node:${ref.nodeId}:${Number(ref.imageIndex || 0)}` : '')
+            || (ref.sha256 ? `sha256:${String(ref.sha256).toLowerCase()}` : '')
+            || `url:${canvasOriginalMediaUrl(ref.url || '')}`;
+        if(!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+async function canvasReferenceLimitForNode(node, {refresh=false}={}){
+    const providerId = resolveImageProviderId(node?.apiProvider || 'comfly');
+    const model = resolveImageModel(node?.model || '');
+    const key = `${providerId}:${model}`;
+    if(!refresh && canvasReferenceCapabilityCache.has(key)) return canvasReferenceCapabilityCache.get(key);
+    let limit = CANVAS_REFERENCE_IMAGE_MAX;
+    try {
+        const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
+        if(response.ok){
+            const schema = await response.json();
+            const refField = (schema?.fields || []).find(field => field?.key === 'reference_images');
+            const discovered = Number(refField?.max || schema?.reference_image_limit || 0);
+            if(discovered > 0) limit = discovered;
+        }
+    } catch(error) {}
+    canvasReferenceCapabilityCache.set(key, limit);
+    return limit;
+}
+function removeCanvasReference(node, referenceId, {undo=true}={}){
+    if(!node || !referenceId) return false;
+    const refs = Array.isArray(node.canvasReferences) ? node.canvasReferences : [];
+    if(!refs.some(ref => ref.id === referenceId)) return false;
+    if(undo) pushUndo();
+    node.canvasReferences = refs.filter(ref => ref.id !== referenceId).map((ref, order) => ({...ref, order}));
+    connections = connections.filter(connection => {
+        if(connection.to !== node.id || connection.data?.origin !== 'canvas-reference') return true;
+        const ids = connection.data?.assetIds || [];
+        return !ids.includes(referenceId);
+    });
+    render();
+    scheduleSave();
+    return true;
+}
+function reorderCanvasReference(node, movedId, targetId){
+    const refs = Array.isArray(node?.canvasReferences) ? node.canvasReferences.slice() : [];
+    const from = refs.findIndex(ref => ref.id === movedId);
+    const to = refs.findIndex(ref => ref.id === targetId);
+    if(from < 0 || to < 0 || from === to) return false;
+    pushUndo();
+    refs.splice(to, 0, refs.splice(from, 1)[0]);
+    node.canvasReferences = refs.map((ref, order) => ({...ref, order}));
+    render();
+    scheduleSave();
+    return true;
+}
+async function materializeCanvasReferenceEdges(targetNodeId){
+    const targetNode = nodes.find(node => node.id === targetNodeId);
+    if(!targetNode) throw new Error('画布参考目标节点已删除');
+    const stored = (Array.isArray(targetNode.canvasReferences) ? targetNode.canvasReferences : [])
+        .slice()
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+    const resolved = stored.map((ref, index) => ({ref, item:resolvedCanvasReference(targetNode, ref, index)}));
+    const uniqueResolved = [];
+    const seen = new Set();
+    resolved.forEach(entry => {
+        const key = entry.item.canvasReferenceKey || canvasReferenceStableKey({...entry.ref, url:entry.item.url});
+        if(!key || seen.has(key)) return;
+        seen.add(key);
+        uniqueResolved.push(entry);
+    });
+    const limit = await canvasReferenceLimitForNode(targetNode);
+    if(uniqueResolved.length > limit){
+        throw new Error(`${resolveImageModel(targetNode.model)} 最多支持 ${limit} 张参考图，当前选择了 ${uniqueResolved.length} 张`);
+    }
+    const existingAuto = connections.filter(connection => connection.to === targetNode.id && connection.data?.origin === 'canvas-reference');
+    const grouped = new Map();
+    uniqueResolved.forEach(entry => {
+        if(!grouped.has(entry.ref.sourceNodeId)) grouped.set(entry.ref.sourceNodeId, []);
+        grouped.get(entry.ref.sourceNodeId).push(entry);
+    });
+    const currentSignature = JSON.stringify(existingAuto.map(connection => ({
+        from:connection.from,
+        ids:connection.data?.assetIds || [],
+        indexes:connection.data?.assetIndexes || []
+    })).sort((a, b) => a.from.localeCompare(b.from)));
+    const nextSignature = JSON.stringify([...grouped.entries()].map(([from, entries]) => ({
+        from,
+        ids:entries.map(entry => entry.ref.id),
+        indexes:entries.map(entry => Number(entry.ref.assetIndex || 0))
+    })).sort((a, b) => a.from.localeCompare(b.from)));
+    if(currentSignature !== nextSignature){
+        pushUndo();
+        connections = connections.filter(connection => !(connection.to === targetNode.id && connection.data?.origin === 'canvas-reference'));
+        grouped.forEach((entries, sourceNodeId) => {
+            const anchors = centeredConnectionAnchors(sourceNodeId, targetNode.id);
+            const connection = {
+                id:uid('c'),
+                from:sourceNodeId,
+                to:targetNode.id,
+                ...anchors,
+                data:{
+                    origin:'canvas-reference',
+                    targetNodeId:targetNode.id,
+                    assetIds:entries.map(entry => entry.ref.id),
+                    assetIndexes:entries.map(entry => Number(entry.ref.assetIndex || 0))
+                }
+            };
+            connections.push(connection);
+            entries.forEach(entry => { entry.ref.materializedEdgeId = connection.id; });
+        });
+        targetNode.canvasReferences = stored.map((ref, order) => ({...ref, order}));
+        renderLinks();
+        scheduleSave();
+    }
+    return uniqueResolved.map(entry => entry.item);
+}
+function canvasReferenceCandidateFromElement(element){
+    const holder = element?.closest?.('[data-canvas-ref-source-node][data-canvas-ref-asset-index]');
+    if(!holder) return null;
+    const sourceNode = nodes.find(node => node.id === holder.dataset.canvasRefSourceNode);
+    const assetIndex = Number(holder.dataset.canvasRefAssetIndex || 0);
+    const item = canvasReferenceItemFromNode(sourceNode, assetIndex);
+    if(!sourceNode || !item?.url) return null;
+    return {sourceNode, assetIndex, item, holder};
+}
+function canvasReferenceRecordFromCandidate(candidate, order=0){
+    const stableUrl = stableCanvasReferenceUrl(candidate.item.url);
+    return normalizeCanvasReferenceRecord({
+        id:uid('canvas-ref'),
+        sourceNodeId:candidate.sourceNode.id,
+        assetIndex:candidate.assetIndex,
+        assetPath:stableUrl,
+        originalUrl:stableUrl,
+        fileName:candidate.item.name || outputImageName(candidate.item.url),
+        sha256:candidate.item.sha256 || ''
+    }, order);
+}
+function canvasReferencePickerTarget(){
+    return canvasReferencePicker ? nodes.find(node => node.id === canvasReferencePicker.targetNodeId) : null;
+}
+function canvasReferencePickerKey(sourceNodeId, assetIndex=0){
+    return `node:${sourceNodeId}:${Number(assetIndex || 0)}`;
+}
+function canvasReferencePickerRefs(){
+    return canvasReferencePicker?.refs || [];
+}
+function canvasReferencePickerEligibility(candidate){
+    const target = canvasReferencePickerTarget();
+    if(!target || !candidate?.sourceNode || !candidate?.item?.url) return {ok:false, reason:'这张图片当前不可用'};
+    if(candidate.sourceNode.id === target.id) return {ok:false, reason:'不能选择当前生成节点自身的图片'};
+    if(wouldCreateGeneratorCycle(candidate.sourceNode.id, target.id)) return {ok:false, reason:'该图片位于目标节点下游，选择后会形成环路'};
+    return {ok:true, reason:''};
+}
+function clearCanvasReferencePickerVisuals(){
+    nodesEl?.querySelectorAll?.('.canvas-reference-candidate,.canvas-reference-selected,.canvas-reference-disabled,.canvas-reference-target').forEach(element => {
+        element.classList.remove('canvas-reference-candidate', 'canvas-reference-selected', 'canvas-reference-disabled', 'canvas-reference-target');
+        delete element.dataset.canvasRefSourceNode;
+        delete element.dataset.canvasRefAssetIndex;
+        delete element.dataset.canvasRefDisabledReason;
+        if(element.dataset.canvasRefOriginalTitle !== undefined){
+            element.title = element.dataset.canvasRefOriginalTitle;
+            delete element.dataset.canvasRefOriginalTitle;
+        }
+    });
+    nodesEl?.querySelectorAll?.('.canvas-reference-overlay').forEach(element => element.remove());
+}
+function markCanvasReferenceCandidate(holder, sourceNode, assetIndex){
+    if(!holder || !sourceNode) return;
+    holder.dataset.canvasRefSourceNode = sourceNode.id;
+    holder.dataset.canvasRefAssetIndex = String(assetIndex);
+    holder.classList.add('canvas-reference-candidate');
+    const candidate = canvasReferenceCandidateFromElement(holder);
+    const eligibility = canvasReferencePickerEligibility(candidate);
+    const key = canvasReferencePickerKey(sourceNode.id, assetIndex);
+    const selectedIndex = canvasReferencePickerRefs().findIndex(ref => canvasReferencePickerKey(ref.sourceNodeId, ref.assetIndex) === key);
+    if(!eligibility.ok){
+        holder.classList.add('canvas-reference-disabled');
+        holder.dataset.canvasRefDisabledReason = eligibility.reason;
+        holder.dataset.canvasRefOriginalTitle = holder.title || '';
+        holder.title = eligibility.reason;
+    }
+    if(selectedIndex >= 0) holder.classList.add('canvas-reference-selected');
+    const overlay = document.createElement('span');
+    overlay.className = 'canvas-reference-overlay';
+    overlay.innerHTML = selectedIndex >= 0
+        ? `<span class="canvas-reference-order">${selectedIndex + 1}</span>`
+        : `<span class="canvas-reference-pick-hint">${eligibility.ok ? '选择' : '不可选'}</span>`;
+    holder.appendChild(overlay);
+}
+function applyCanvasReferencePickerVisuals(){
+    if(!canvasReferencePicker || !nodesEl) return;
+    clearCanvasReferencePickerVisuals();
+    const targetEl = nodesEl.querySelector(`.node[data-id="${CSS.escape(canvasReferencePicker.targetNodeId)}"]`);
+    targetEl?.classList.add('canvas-reference-target');
+    nodes.forEach(node => {
+        const nodeEl = nodesEl.querySelector(`.node[data-id="${CSS.escape(node.id)}"]`);
+        if(!nodeEl) return;
+        if(node.type === 'image' && node.url && mediaKindForNode(node) === 'image'){
+            markCanvasReferenceCandidate(nodeEl.querySelector('.image-preview-wrap'), node, 0);
+            return;
+        }
+        if(node.type === 'output'){
+            const imageItems = (node.images || []).map((item, index) => ({item, index})).filter(entry => mediaKindForOutputItem(entry.item) === 'image' && outputUrlValue(entry.item));
+            const wraps = [...nodeEl.querySelectorAll('.output-img-wrap[data-output-url]')].filter(wrap => !wrap.classList.contains('loading-wrap'));
+            imageItems.forEach((entry, position) => markCanvasReferenceCandidate(wraps[position], node, entry.index));
+        }
+    });
+    updateCanvasReferencePickerBanner();
+}
+function updateCanvasReferencePickerBanner(){
+    const picker = canvasReferencePicker;
+    if(!picker?.banner) return;
+    const count = picker.refs.length;
+    picker.banner.querySelector('[data-canvas-reference-count]').textContent = `${count} / ${picker.limit}`;
+    const returnButton = picker.banner.querySelector('[data-canvas-reference-return]');
+    if(returnButton) returnButton.disabled = count > picker.limit;
+}
+function toggleCanvasReferenceCandidate(candidate){
+    if(!canvasReferencePicker || !candidate) return;
+    const eligibility = canvasReferencePickerEligibility(candidate);
+    if(!eligibility.ok){
+        showErrorModal(eligibility.reason, '无法选择参考图');
+        return;
+    }
+    const key = canvasReferencePickerKey(candidate.sourceNode.id, candidate.assetIndex);
+    const index = canvasReferencePicker.refs.findIndex(ref => canvasReferencePickerKey(ref.sourceNodeId, ref.assetIndex) === key);
+    if(index >= 0){
+        canvasReferencePicker.refs.splice(index, 1);
+    } else {
+        if(canvasReferencePicker.refs.length >= canvasReferencePicker.limit){
+            showErrorModal(`${resolveImageModel(canvasReferencePickerTarget()?.model)} 最多支持 ${canvasReferencePicker.limit} 张参考图`, '参考图已达上限');
+            return;
+        }
+        canvasReferencePicker.refs.push(canvasReferenceRecordFromCandidate(candidate, canvasReferencePicker.refs.length));
+    }
+    canvasReferencePicker.refs = canvasReferencePicker.refs.map((ref, order) => ({...ref, order}));
+    applyCanvasReferencePickerVisuals();
+}
+function canvasReferencePickerMouseDown(event){
+    if(!canvasReferencePicker || !board?.contains(event.target)) return;
+    if(event.button === 1){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        startBoardPan(event);
+        return;
+    }
+    if(event.button === 2) return;
+    if(event.button !== 0) return;
+    if(isSpacePanKeyDown){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        startBoardPan(event, {spacePan:true});
+        return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+}
+function canvasReferencePickerClick(event){
+    if(!canvasReferencePicker || !board?.contains(event.target) || event.button !== 0 || isSpacePanKeyDown) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const candidate = canvasReferenceCandidateFromElement(event.target);
+    if(candidate) toggleCanvasReferenceCandidate(candidate);
+}
+function focusCanvasReferenceTarget(targetNodeId){
+    const target = nodes.find(node => node.id === targetNodeId);
+    if(!target || !board) return;
+    const rect = nodeRect(target);
+    const scale = Math.max(.45, Math.min(1.35, Number(viewport.scale || 1)));
+    world.style.transition = 'transform 240ms cubic-bezier(.2,.8,.2,1)';
+    viewport.scale = scale;
+    viewport.x = board.clientWidth / 2 - rect.cx * scale;
+    viewport.y = board.clientHeight / 2 - rect.cy * scale;
+    selected.clear();
+    selected.add(target.id);
+    applyViewport();
+    refreshSelectionVisuals();
+    setTimeout(() => { world.style.transition = ''; }, 280);
+    scheduleViewportSave();
+}
+function finishCanvasReferencePicker({commit=false, returnToTarget=false}={}){
+    const picker = canvasReferencePicker;
+    if(!picker) return false;
+    const target = nodes.find(node => node.id === picker.targetNodeId);
+    if(commit && target){
+        if(picker.refs.length > picker.limit){
+            showErrorModal(`${resolveImageModel(target.model)} 最多支持 ${picker.limit} 张参考图`, '参考图超出上限');
+            return false;
+        }
+        pushUndo();
+        connections = connections.filter(connection => !(connection.to === target.id && connection.data?.origin === 'canvas-reference'));
+        target.canvasReferences = picker.refs.map((ref, order) => ({...normalizeCanvasReferenceRecord(ref, order), materializedEdgeId:''}));
+    }
+    picker.observer?.disconnect?.();
+    picker.banner?.remove();
+    document.removeEventListener('mousedown', canvasReferencePickerMouseDown, true);
+    document.removeEventListener('click', canvasReferencePickerClick, true);
+    document.body.classList.remove('canvas-reference-picker-active');
+    clearCanvasReferencePickerVisuals();
+    canvasReferencePicker = null;
+    render();
+    if(commit){
+        scheduleSave();
+        if(returnToTarget && target) focusCanvasReferenceTarget(target.id);
+    }
+    return true;
+}
+function cancelCanvasReferencePicker(){
+    return finishCanvasReferencePicker({commit:false, returnToTarget:false});
+}
+function commitCanvasReferencePicker(){
+    return finishCanvasReferencePicker({commit:true, returnToTarget:true});
+}
+async function beginCanvasReferencePicker(targetNodeId){
+    const target = nodes.find(node => node.id === targetNodeId);
+    if(!target || target.type !== 'generator') return;
+    if(canvasReferencePicker) cancelCanvasReferencePicker();
+    const banner = document.createElement('div');
+    banner.className = 'canvas-reference-banner';
+    banner.innerHTML = `<div class="canvas-reference-banner-title"><i data-lucide="images"></i><span>从画布选择参考</span><strong data-canvas-reference-count>0 / ${CANVAS_REFERENCE_IMAGE_MAX}</strong></div><div class="canvas-reference-banner-actions"><button type="button" data-canvas-reference-return><i data-lucide="corner-down-left"></i><span>返回节点</span></button><button type="button" class="canvas-reference-close" data-canvas-reference-close aria-label="关闭">×</button></div>`;
+    document.body.appendChild(banner);
+    canvasReferencePicker = {
+        targetNodeId,
+        refs:(Array.isArray(target.canvasReferences) ? target.canvasReferences : []).map((ref, order) => normalizeCanvasReferenceRecord(ref, order)),
+        limit:CANVAS_REFERENCE_IMAGE_MAX,
+        banner,
+        observer:null
+    };
+    banner.querySelector('[data-canvas-reference-return]').onclick = event => { event.preventDefault(); commitCanvasReferencePicker(); };
+    banner.querySelector('[data-canvas-reference-close]').onclick = event => { event.preventDefault(); cancelCanvasReferencePicker(); };
+    document.addEventListener('mousedown', canvasReferencePickerMouseDown, true);
+    document.addEventListener('click', canvasReferencePickerClick, true);
+    document.body.classList.add('canvas-reference-picker-active');
+    canvasReferencePicker.observer = new MutationObserver(() => {
+        if(!canvasReferencePicker) return;
+        if(document.querySelector('.modal.open')) cancelCanvasReferencePicker();
+    });
+    canvasReferencePicker.observer.observe(document.body, {subtree:true, attributes:true, attributeFilter:['class']});
+    applyCanvasReferencePickerVisuals();
+    refreshIcons();
+    const limit = await canvasReferenceLimitForNode(target);
+    if(!canvasReferencePicker || canvasReferencePicker.targetNodeId !== targetNodeId) return;
+    canvasReferencePicker.limit = limit;
+    updateCanvasReferencePickerBanner();
+}
 function mediaRefsFromNode(node){
     if(!node) return [];
     if(node.type === 'image' && node.url){
@@ -11312,7 +11784,7 @@ function mediaRefsFromNode(node){
     return [];
 }
 function generatorSources(gen){
-    return connections.filter(c => c.to === gen.id).map(c => nodes.find(n => n.id === c.from)).filter(Boolean).map(n => {
+    return connections.filter(c => c.to === gen.id && c.data?.origin !== 'canvas-reference').map(c => nodes.find(n => n.id === c.from)).filter(Boolean).map(n => {
         if(n.type === 'output' && (n.images||[]).length){
             // 从 output 节点取最新一张图当作 reference 给下游
             const reversed = [...n.images].map((item, index) => ({item, index})).reverse();
@@ -11436,9 +11908,9 @@ function refreshGeneratorInputViews(){
         const el = nodesEl.querySelector(`.node[data-id="${gen.id}"]`);
         if(!el) return;
         const sources = orderedSources(gen, generatorSources(gen));
-        const imageInputs = sources
+        const imageInputs = [...sources
             .map(src => ({...src, refs:imageRefsOnly(src.refs || [])}))
-            .filter(src => src.refs?.length);
+            .filter(src => src.refs?.length), ...canvasReferenceSources(gen)];
         renderPromptPreview(el.querySelector('.prompt-list'), sources.filter(src => src.prompt && !src.refs?.length));
         if(gen.type === 'generator') renderImageInputList(el.querySelector('.input-list'), gen, imageInputs);
         if(gen.type === 'midjourney') renderImageInputList(el.querySelector('.mj-input-list'), gen, imageInputs);
@@ -11467,10 +11939,25 @@ async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    let canvasRefs = [];
+    try {
+        canvasRefs = await materializeCanvasReferenceEdges(gen.id);
+    } catch(error) {
+        if(opts.cascade) throw error;
+        showErrorModal(error.message || String(error), '画布参考不可用');
+        return;
+    }
     const sources = orderedSources(gen, generatorSources(gen));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
+    const refs = uniqueCanvasReferenceImages([...sources.flatMap(s => s.refs || []), ...canvasRefs]);
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
+    const referenceLimit = await canvasReferenceLimitForNode(gen);
+    if(refs.length > referenceLimit){
+        const error = new Error(`${resolveImageModel(gen.model)} 最多支持 ${referenceLimit} 张参考图，当前有 ${refs.length} 张`);
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, '参考图超出上限');
+        return;
+    }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
@@ -11481,7 +11968,7 @@ async function runGenerator(genId, opts={}){
         size:await generatorSizeForRun(gen, refs),
         aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
         resolution:gen.resolution || '',
-        reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
+        reference_images:refs
     };
     const quality = normalizedImageQuality(gen.quality);
     if(quality) payload.quality = quality;
@@ -13392,6 +13879,7 @@ async function runLLMChat(nodeId){
 
 function deleteNode(id, event){
     event?.stopPropagation();
+    if(canvasReferencePicker?.targetNodeId === id) cancelCanvasReferencePicker();
     pushUndo();
     destroyLTXEditor(nodes.find(n => n.id === id));
     nodes = nodes.filter(n => n.id !== id);
@@ -13433,7 +13921,13 @@ function deleteConnection(id, event){
     event?.preventDefault();
     event?.stopPropagation();
     pushUndo();
+    const removed = connections.find(c => c.id === id);
     connections = connections.filter(c => c.id !== id);
+    if(removed?.data?.origin === 'canvas-reference'){
+        const target = nodes.find(node => node.id === removed.to);
+        const assetIds = new Set(removed.data?.assetIds || []);
+        if(target) target.canvasReferences = (target.canvasReferences || []).filter(ref => !assetIds.has(ref.id) && ref.materializedEdgeId !== id).map((ref, order) => ({...ref, order}));
+    }
     selectedConnections.delete(id);
     if(hoveredConnectionId === id) hoveredConnectionId = '';
     syncGeneratorInputs();
@@ -14973,10 +15467,25 @@ function pushUndo(){
     if(!canvas) return;
     undoStack.push({nodes:JSON.parse(JSON.stringify(serializableCanvasNodes())), connections:JSON.parse(JSON.stringify(connections))});
     if(undoStack.length > UNDO_MAX) undoStack.shift();
+    redoStack = [];
 }
 function performUndo(){
     if(!canvas || !undoStack.length) return;
+    redoStack.push({nodes:JSON.parse(JSON.stringify(serializableCanvasNodes())), connections:JSON.parse(JSON.stringify(connections))});
+    if(redoStack.length > UNDO_MAX) redoStack.shift();
     const state = undoStack.pop();
+    nodes = state.nodes;
+    connections = state.connections;
+    selected.clear();
+    selectedConnections.clear();
+    render();
+    scheduleSave();
+}
+function performRedo(){
+    if(!canvas || !redoStack.length) return;
+    undoStack.push({nodes:JSON.parse(JSON.stringify(serializableCanvasNodes())), connections:JSON.parse(JSON.stringify(connections))});
+    if(undoStack.length > UNDO_MAX) undoStack.shift();
+    const state = redoStack.pop();
     nodes = state.nodes;
     connections = state.connections;
     selected.clear();
@@ -16345,7 +16854,7 @@ function suppressNextCanvasContextMenuOnce(){
     suppressCanvasContextMenuTimer = setTimeout(clearCanvasContextMenuSuppression, 500);
 }
 function beginRightBoardPan(e){
-    if(!canvas || zoomPreviewState || e.button !== 2 || !isCanvasBackgroundTarget(e.target)) return false;
+    if(!canvas || zoomPreviewState || e.button !== 2 || (!canvasReferencePicker && !isCanvasBackgroundTarget(e.target))) return false;
     if(selectDrag || dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || tempLink) return false;
     clearCanvasContextMenuSuppression();
     rightBoardPan = {
@@ -16556,6 +17065,18 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     if(!canvas) return;
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && canvasReferencePicker){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cancelCanvasReferencePicker();
+        setSpacePanKey(false);
+        return;
+    }
+    if(canvasReferencePicker && (e.key === 'Delete' || e.key === 'Backspace')){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+    }
     if(e.key === 'Escape' && suppressNextCanvasContextMenu) clearCanvasContextMenuSuppression();
     if(e.key === 'Escape' && rightBoardPan){
         e.preventDefault();
@@ -16629,7 +17150,15 @@ window.addEventListener('keydown', e => {
     if((e.ctrlKey || e.metaKey) && key === 'z') {
         const tag = document.activeElement?.tagName;
         if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
-        e.preventDefault(); performUndo();
+        e.preventDefault();
+        if(e.shiftKey) performRedo();
+        else performUndo();
+    }
+    if((e.ctrlKey || e.metaKey) && key === 'y') {
+        const tag = document.activeElement?.tagName;
+        if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
+        e.preventDefault();
+        performRedo();
     }
     if(e.key === 'Delete' || e.key === 'Backspace') {
         const tag = document.activeElement?.tagName;
@@ -16648,7 +17177,7 @@ window.addEventListener('keyup', e => {
         if(shouldEndSpacePan) endDrag(e);
     }
 });
-window.addEventListener('blur', () => { isRKeyDown = false; setSpacePanKey(false); setKnifeMode(false); });
+window.addEventListener('blur', () => { isRKeyDown = false; setSpacePanKey(false); setKnifeMode(false); if(canvasReferencePicker) cancelCanvasReferencePicker(); });
 window.addEventListener('blur', () => {
     if(selectDrag) cancelSelection();
     if(dragNode || resizeNode || llmPaneDrag || dragBoard || minimapDrag || knifeActive) endDrag();

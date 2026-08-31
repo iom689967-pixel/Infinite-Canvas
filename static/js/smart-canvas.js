@@ -121,6 +121,8 @@ let mentionAnchorEl = null;
 let mentionInsertMode = 'token';
 let panState = null;
 let rightPanState = null;
+let smartCanvasReferencePicker = null;
+const smartCanvasReferenceCapabilityCache = new Map();
 let suppressNextSmartContextMenu = false;
 let suppressSmartContextMenuTimer = null;
 const RIGHT_PAN_DRAG_THRESHOLD = 5;
@@ -200,6 +202,7 @@ let suppressNodeClickUntil = 0;
 let textSelectionGuard = null;
 const UNDO_LIMIT = 40;
 const undoStack = [];
+const redoStack = [];
 let undoSuppressed = false;
 let pendingUndoSnapshot = null;
 let runningHubWorkflowCache = {};
@@ -232,6 +235,7 @@ function commitPendingUndo(){
     if(pendingUndoSnapshot){
         undoStack.push(pendingUndoSnapshot);
         if(undoStack.length > UNDO_LIMIT) undoStack.shift();
+        redoStack.length = 0;
         pendingUndoSnapshot = null;
     }
 }
@@ -250,9 +254,12 @@ function pushUndo(){
     if(!canvas) return;
     undoStack.push(snapshotForUndo());
     if(undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0;
 }
 function performUndo(){
     if(!undoStack.length){ toast(tr('smart.toastNoUndo')); return; }
+    redoStack.push(snapshotForUndo());
+    if(redoStack.length > UNDO_LIMIT) redoStack.shift();
     const snap = undoStack.pop();
     undoSuppressed = true;
     nodes = snap.nodes;
@@ -266,6 +273,24 @@ function performUndo(){
     scheduleSave();
     undoSuppressed = false;
     toast(tr('smart.toastUndone'));
+}
+function performRedo(){
+    if(!redoStack.length){ toast(tr('smart.toastNoUndo')); return; }
+    undoStack.push(snapshotForUndo());
+    if(undoStack.length > UNDO_LIMIT) undoStack.shift();
+    const snap = redoStack.pop();
+    undoSuppressed = true;
+    nodes = snap.nodes;
+    if(canvas) canvas.connections = snap.connections;
+    selectedId = snap.selectedId;
+    selectedIds = snap.selectedIds;
+    selectedImage = snap.selectedImage;
+    activeComposerSubject = null;
+    lastComposerNodeId = '';
+    render();
+    scheduleSave();
+    undoSuppressed = false;
+    toast('已重做');
 }
 let comfyWorkflowCache = {};
 let cropState = null;
@@ -6208,11 +6233,14 @@ function migrateSmartGroupImageMembers(){
 }
 async function loadCanvas(){
     if(!canvasId) return;
+    if(smartCanvasReferencePicker) cancelSmartCanvasReferencePicker();
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`);
         if(!res.ok) return;
         const data = await res.json();
         canvas = data.canvas;
+        undoStack.length = 0;
+        redoStack.length = 0;
         rememberCanvasListProject(canvas.project || 'default');
         canvasUsesConnections = Object.prototype.hasOwnProperty.call(canvas || {}, 'connections');
         document.title = canvas.title || tr('canvas.smartCanvas');
@@ -9001,6 +9029,7 @@ function render(){
     syncSmartSelectedImageResolution(world);
     measureSmartNodeImages();
     refreshRunTimerPills();
+    if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
     return;
     world.innerHTML = '';
     if(composerEl) world.appendChild(composerEl);
@@ -9040,6 +9069,7 @@ function render(){
     if(window.lucide) lucide.createIcons();
     measureSmartNodeImages();
     refreshRunTimerPills();
+    if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
 }
 function measureSmartNodeImages(){
     world.querySelectorAll('.image-node img,.image-node video').forEach(imgEl => {
@@ -10831,6 +10861,7 @@ function setDropHighlight(targetId){
     if(el) el.classList.add('drop-target');
 }
 function deleteNode(id){
+    if(smartCanvasReferencePicker?.targetNodeId === id) cancelSmartCanvasReferencePicker();
     pushUndo();
     const deleteIds = new Set([id]);
     nodes.forEach(node => {
@@ -10895,6 +10926,10 @@ function disconnectConnections(spec){
     canvas.connections = canvas.connections.filter((_, i) => !set.has(i));
     removed.forEach(conn => {
         const toNode = nodes.find(n => n.id === conn.to);
+        if(conn.data?.origin === 'canvas-reference' && toNode){
+            const assetIds = new Set(conn.data?.assetIds || []);
+            toNode.canvasReferences = (toNode.canvasReferences || []).filter(ref => !assetIds.has(ref.id) && ref.materializedEdgeId !== conn.id).map((ref, order) => ({...ref, order}));
+        }
         if(toNode && Array.isArray(toNode.inputNodeIds)){
             toNode.inputNodeIds = toNode.inputNodeIds.filter(id => id !== conn.from);
         }
@@ -10941,6 +10976,10 @@ function finishConnectionErase(){
     canvas.connections = canvas.connections.filter((_, i) => !set.has(i));
     removed.forEach(conn => {
         const toNode = nodes.find(n => n.id === conn.to);
+        if(conn.data?.origin === 'canvas-reference' && toNode){
+            const assetIds = new Set(conn.data?.assetIds || []);
+            toNode.canvasReferences = (toNode.canvasReferences || []).filter(ref => !assetIds.has(ref.id) && ref.materializedEdgeId !== conn.id).map((ref, order) => ({...ref, order}));
+        }
         if(toNode && Array.isArray(toNode.inputNodeIds)){
             toNode.inputNodeIds = toNode.inputNodeIds.filter(id => id !== conn.from);
         }
@@ -13864,6 +13903,7 @@ function renderInputThumbsRow(node){
     syncJimengVideoModelPillForRefs();
     const dedup = node ? visibleReferenceImagesFor(node) : [];
     const manualRefKeys = new Set(manualReferenceImagesFor(node).map(img => inputRefKey(img)));
+    const canvasRefKeys = new Set(smartCanvasReferenceImagesFor(node).filter(img => img?.url).map(img => inputRefKey(img)));
     const addActive = mentionInsertMode === 'manual-ref';
     // 仅当参考图集合/状态真正变化时才重建缩略图 DOM。否则每敲一个字都重建并重新解码所有图片，
     // 参考图多时会让输入框打字明显卡顿。
@@ -13871,6 +13911,7 @@ function renderInputThumbsRow(node){
         node: node?.id || '',
         items: dedup.map(img => `${inputRefKey(img)}@${img.url || ''}`),
         manual: [...manualRefKeys],
+        canvas: [...canvasRefKeys],
         add: addActive,
         mode: node ? smartImageMode(node) : ''
     });
@@ -13878,7 +13919,10 @@ function renderInputThumbsRow(node){
     inputThumbsRow.dataset.thumbsSig = thumbsSignature;
     inputThumbsRow.classList.toggle('has-items', Boolean(node));
     if(!node){ inputThumbsRow.innerHTML = ''; return; }
-    const addButton = `<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
+    const nodeSettings = smartSettingsForNode(node);
+    const showCanvasReference = isSmartRunnableNode(node) && isApiLikeEngine(nodeSettings.engine) && nodeSettings.apiKind !== 'video';
+    const canvasButton = showCanvasReference ? `<button class="input-thumb-add canvas-reference-entry" type="button" data-input-canvas-reference title="从画布选择参考" aria-label="从画布选择参考"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button>` : '';
+    const addButton = `${canvasButton}<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
     if(!dedup.length){
         inputThumbsRow.innerHTML = `<div class="input-thumb-list empty"></div><div class="input-thumb-actions">${addButton}</div>`;
         bindInputThumbReferenceActions();
@@ -13903,16 +13947,29 @@ function renderInputThumbsRow(node){
         const sourceUrl = img.originalLocalUrl || img.url || '';
         const key = inputRefKey(img);
         const removable = manualRefKeys.has(key);
-        const removeBtn = removable ? `<button class="input-thumb-remove" type="button" data-input-remove-reference="${escapeHtml(inputRefKey(img))}" title="删除参考图" aria-label="删除参考图">×</button>` : '';
-        return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${removeBtn}</div>`;
+        const canvasRef = canvasRefKeys.has(key);
+        const removeBtn = removable
+            ? `<button class="input-thumb-remove" type="button" data-input-remove-reference="${escapeHtml(inputRefKey(img))}" title="删除参考图" aria-label="删除参考图">×</button>`
+            : canvasRef
+                ? `<button class="input-thumb-remove" type="button" data-input-remove-canvas-reference="${escapeAttr(img.canvasReferenceId || '')}" title="删除画布参考" aria-label="删除画布参考">×</button>`
+                : '';
+        return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''} ${canvasRef ? 'input-canvas-reference' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${canvasRef ? '画布参考' : title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${canvasRef ? '<span class="canvas-reference-source-badge">画布</span>' : ''}${removeBtn}</div>`;
     }).join('');
     inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div><div class="input-thumb-actions">${addButton}</div>`;
     bindSmartPreviewImageFallbacks(inputThumbsRow);
-    bindInputThumbsDrag(node, dedup, manualRefKeys);
+    bindInputThumbsDrag(node, dedup, manualRefKeys, canvasRefKeys);
     bindInputThumbReferenceActions();
     refreshIcons();
 }
 function bindInputThumbReferenceActions(){
+    inputThumbsRow?.querySelectorAll('[data-input-canvas-reference]').forEach(btn => {
+        btn.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const node = selectedNode();
+            if(node) beginSmartCanvasReferencePicker(node.id);
+        });
+    });
     inputThumbsRow?.querySelectorAll('[data-input-add-reference]').forEach(btn => {
         btn.addEventListener('click', event => {
             event.preventDefault();
@@ -13927,8 +13984,16 @@ function bindInputThumbReferenceActions(){
             removeManualReferenceFromSelectedNode(btn.dataset.inputRemoveReference || '');
         });
     });
+    inputThumbsRow?.querySelectorAll('[data-input-remove-canvas-reference]').forEach(btn => {
+        btn.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const node = selectedNode();
+            if(node) removeSmartCanvasReference(node, btn.dataset.inputRemoveCanvasReference || '');
+        });
+    });
 }
-function bindInputThumbsDrag(node, items, manualRefKeys=new Set()){
+function bindInputThumbsDrag(node, items, manualRefKeys=new Set(), canvasRefKeys=new Set()){
     if(!inputThumbsRow) return;
     let thumbDragIndex = -1;
     inputThumbsRow.querySelectorAll('.input-thumb').forEach(el => {
@@ -13936,8 +14001,9 @@ function bindInputThumbsDrag(node, items, manualRefKeys=new Set()){
         const item = items[index];
         const key = inputRefKey(item);
         const canReorderManual = items.length > 1 && manualRefKeys.has(key);
+        const canReorderCanvas = items.length > 1 && canvasRefKeys.has(key);
         const canReorderSource = items.length > 1 && Boolean(item?.nodeId);
-        el.draggable = canReorderManual || canReorderSource;
+        el.draggable = canReorderManual || canReorderCanvas || canReorderSource;
         el.addEventListener('click', e => {
             e.preventDefault();
             e.stopPropagation();
@@ -13949,6 +14015,7 @@ function bindInputThumbsDrag(node, items, manualRefKeys=new Set()){
             el.classList.add('dragging');
             e.dataTransfer.effectAllowed = 'move';
             if(canReorderManual) e.dataTransfer.setData('application/x-smart-manual-ref', key);
+            else if(canReorderCanvas) e.dataTransfer.setData('application/x-smart-canvas-ref', item.canvasReferenceId || '');
             else e.dataTransfer.setData('application/x-smart-input-thumb', String(index));
         });
         el.addEventListener('dragend', e => {
@@ -13958,6 +14025,18 @@ function bindInputThumbsDrag(node, items, manualRefKeys=new Set()){
             el.classList.remove('dragging');
         });
         el.addEventListener('dragover', e => {
+            const canvasFromId = e.dataTransfer.getData('application/x-smart-canvas-ref');
+            if(canvasFromId){
+                if(!canvasRefKeys.has(key) || canvasFromId === item.canvasReferenceId) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'move';
+                clearInputThumbDropMarkers();
+                const placement = inputThumbDropPlacement(el, e);
+                el.dataset.dropPlacement = placement;
+                el.classList.add(placement === 'before' ? 'drop-before' : 'drop-after');
+                return;
+            }
             const manualFromKey = e.dataTransfer.getData('application/x-smart-manual-ref');
             if(manualFromKey){
                 if(!manualRefKeys.has(key) || manualFromKey === key) return;
@@ -13987,6 +14066,16 @@ function bindInputThumbsDrag(node, items, manualRefKeys=new Set()){
             el.classList.remove('drop-before', 'drop-after');
         });
         el.addEventListener('drop', e => {
+            const canvasFromId = e.dataTransfer.getData('application/x-smart-canvas-ref');
+            if(canvasFromId){
+                if(!canvasRefKeys.has(key) || canvasFromId === item.canvasReferenceId) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const placement = inputThumbDropPlacement(el, e);
+                clearInputThumbDropMarkers();
+                reorderSmartCanvasReference(node, canvasFromId, item.canvasReferenceId || '', placement);
+                return;
+            }
             const manualFromKey = e.dataTransfer.getData('application/x-smart-manual-ref');
             if(manualFromKey){
                 if(!manualRefKeys.has(key) || manualFromKey === key) return;
@@ -14699,6 +14788,7 @@ function upstreamNodesForKinds(node, kinds=['input']){
     const allowed = new Set(kinds);
     const ids = new Set();
     (canvas?.connections || []).forEach(conn => {
+        if(conn.data?.origin === 'canvas-reference') return;
         if(conn.to === node.id && allowed.has(conn.kind || 'flow')) ids.add(conn.from);
     });
     if(!canvasUsesConnections && allowed.has('input')){
@@ -14747,6 +14837,410 @@ function imagesForNode(node){
         }));
     }
     return (node?.images || []).map((img, index) => ({...imageForDisplay(img), nodeId:node.id, imageIndex:index}));
+}
+function stableSmartCanvasReferenceUrl(url=''){
+    const raw = smartOriginalMediaUrl(String(url || '').trim());
+    if(!raw || /^(blob:|data:)/i.test(raw)) return '';
+    if(/(?:kie\.ai\/.*(?:temp|upload)|[?&](?:expires|signature|token)=)/i.test(raw)) return '';
+    return raw;
+}
+function smartCanvasReferenceFileName(ref={}, fallback='参考图'){
+    if(ref.fileName || ref.name) return ref.fileName || ref.name;
+    try {
+        const parsed = new URL(ref.assetPath || ref.originalUrl || ref.url || '', window.location.href);
+        return decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || fallback);
+    } catch(error){
+        return fallback;
+    }
+}
+function smartCanvasReferenceKey(ref={}){
+    if(ref.sha256) return `sha256:${String(ref.sha256).toLowerCase()}`;
+    if(ref.assetId) return `asset:${ref.assetId}:${Number(ref.assetIndex || 0)}`;
+    if(ref.sourceNodeId) return `node:${ref.sourceNodeId}:${Number(ref.assetIndex || 0)}`;
+    const url = stableSmartCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ref.url || '');
+    return url ? `url:${url}` : '';
+}
+function normalizeSmartCanvasReference(ref={}, order=0){
+    const stableUrl = stableSmartCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ref.url || '');
+    return {
+        id:String(ref.id || uid('smart-canvas-ref')),
+        sourceNodeId:String(ref.sourceNodeId || ''),
+        assetId:String(ref.assetId || ''),
+        assetIndex:Math.max(0, Number(ref.assetIndex || 0) || 0),
+        assetPath:stableUrl.startsWith('/') ? stableUrl : '',
+        originalUrl:/^https?:\/\//i.test(stableUrl) ? stableUrl : '',
+        fileName:smartCanvasReferenceFileName(ref),
+        sha256:String(ref.sha256 || ''),
+        order:Number.isFinite(Number(order)) ? Number(order) : 0,
+        materializedEdgeId:String(ref.materializedEdgeId || '')
+    };
+}
+function smartCanvasReferenceItemFromNode(sourceNode, assetIndex=0){
+    if(!sourceNode) return null;
+    const index = Math.max(0, Number(assetIndex || 0) || 0);
+    const image = (sourceNode.images || [])[index];
+    if(!image?.url || mediaKindForItem(image) !== 'image') return null;
+    return {...imageForDisplay(image), nodeId:sourceNode.id, imageIndex:index};
+}
+function wouldCreateSmartCanvasReferenceCycle(fromId, toId){
+    if(!fromId || !toId || fromId === toId) return true;
+    const seen = new Set();
+    const walk = id => {
+        if(id === fromId) return true;
+        if(seen.has(id)) return false;
+        seen.add(id);
+        return (canvas?.connections || []).filter(connection => connection.from === id && ['input','flow'].includes(connection.kind || 'flow')).some(connection => walk(connection.to));
+    };
+    return walk(toId);
+}
+function resolvedSmartCanvasReference(targetNode, ref, displayIndex=0){
+    const sourceNode = nodes.find(node => node.id === ref?.sourceNodeId);
+    if(!sourceNode) throw new Error(`第 ${displayIndex + 1} 张参考图「${smartCanvasReferenceFileName(ref)}」的来源节点已删除`);
+    if(sourceNode.id === targetNode.id) throw new Error(`第 ${displayIndex + 1} 张参考图不能来自当前生成节点自身`);
+    if(wouldCreateSmartCanvasReferenceCycle(sourceNode.id, targetNode.id)) throw new Error(`第 ${displayIndex + 1} 张参考图会形成环路，请移除后再生成`);
+    const item = smartCanvasReferenceItemFromNode(sourceNode, ref.assetIndex);
+    if(!item?.url) throw new Error(`第 ${displayIndex + 1} 张参考图「${smartCanvasReferenceFileName(ref)}」已失效或不是图片`);
+    return {
+        ...item,
+        canvasReference:true,
+        canvasReferenceId:ref.id,
+        canvasReferenceKey:smartCanvasReferenceKey({...ref, url:item.url}),
+        name:ref.fileName || item.name || `图${displayIndex + 1}`
+    };
+}
+function smartCanvasReferenceImagesFor(node){
+    return (Array.isArray(node?.canvasReferences) ? node.canvasReferences : [])
+        .slice()
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+        .map((ref, index) => {
+            try { return resolvedSmartCanvasReference(node, ref, index); }
+            catch(error) {
+                return {
+                    url:stableSmartCanvasReferenceUrl(ref.assetPath || ref.originalUrl || ''),
+                    nodeId:ref.sourceNodeId || '',
+                    imageIndex:Number(ref.assetIndex || 0),
+                    name:`${smartCanvasReferenceFileName(ref, `图${index + 1}`)} · 已失效`,
+                    kind:'image',
+                    canvasReference:true,
+                    canvasReferenceId:ref.id,
+                    canvasReferenceError:error.message || String(error)
+                };
+            }
+        });
+}
+async function smartCanvasReferenceLimitFor(node, runSettings=null){
+    const sourceSettings = runSettings || smartSettingsForNode(node);
+    const providerId = sourceSettings?.provider_id || '';
+    const model = sourceSettings?.model || '';
+    const key = `${providerId}:${model}`;
+    if(smartCanvasReferenceCapabilityCache.has(key)) return smartCanvasReferenceCapabilityCache.get(key);
+    let limit = SMART_REFERENCE_IMAGE_MAX;
+    try {
+        let schema = isKieProviderId(providerId) ? (currentKieCapability(sourceSettings) || await ensureKieCapability(providerId, model)) : null;
+        if(!schema && providerId && model){
+            const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
+            if(response.ok) schema = await response.json();
+        }
+        const refField = (schema?.fields || []).find(field => field?.key === 'reference_images');
+        const discovered = Number(refField?.max || schema?.reference_image_limit || 0);
+        if(discovered > 0) limit = discovered;
+    } catch(error) {}
+    smartCanvasReferenceCapabilityCache.set(key, limit);
+    return limit;
+}
+function removeSmartCanvasReference(node, referenceId, {undo=true}={}){
+    if(!node || !referenceId || !(node.canvasReferences || []).some(ref => ref.id === referenceId)) return false;
+    if(undo) pushUndo();
+    node.canvasReferences = (node.canvasReferences || []).filter(ref => ref.id !== referenceId).map((ref, order) => ({...ref, order}));
+    if(canvas) canvas.connections = (canvas.connections || []).filter(connection => {
+        if(connection.to !== node.id || connection.data?.origin !== 'canvas-reference') return true;
+        return !(connection.data?.assetIds || []).includes(referenceId);
+    });
+    if(inputThumbsRow) delete inputThumbsRow.dataset.thumbsSig;
+    render();
+    scheduleSave();
+    return true;
+}
+function reorderSmartCanvasReference(node, movedId, targetId, placement='before'){
+    const refs = Array.isArray(node?.canvasReferences) ? node.canvasReferences.slice() : [];
+    const from = refs.findIndex(ref => ref.id === movedId);
+    const target = refs.findIndex(ref => ref.id === targetId);
+    if(from < 0 || target < 0 || from === target) return false;
+    pushUndo();
+    const [moved] = refs.splice(from, 1);
+    let insertAt = refs.findIndex(ref => ref.id === targetId);
+    if(placement === 'after') insertAt += 1;
+    refs.splice(insertAt, 0, moved);
+    node.canvasReferences = refs.map((ref, order) => ({...ref, order}));
+    if(inputThumbsRow) delete inputThumbsRow.dataset.thumbsSig;
+    renderInputThumbsRow(node);
+    scheduleSave();
+    return true;
+}
+async function materializeSmartCanvasReferenceEdges(targetNodeId, runSettings=null){
+    const targetNode = nodes.find(node => node.id === targetNodeId);
+    if(!targetNode) throw new Error('画布参考目标节点已删除');
+    const stored = (Array.isArray(targetNode.canvasReferences) ? targetNode.canvasReferences : [])
+        .slice()
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+    const resolved = stored.map((ref, index) => ({ref, item:resolvedSmartCanvasReference(targetNode, ref, index)}));
+    const uniqueResolved = [];
+    const seen = new Set();
+    resolved.forEach(entry => {
+        const key = entry.item.canvasReferenceKey || smartCanvasReferenceKey({...entry.ref, url:entry.item.url});
+        if(!key || seen.has(key)) return;
+        seen.add(key);
+        uniqueResolved.push(entry);
+    });
+    const limit = await smartCanvasReferenceLimitFor(targetNode, runSettings);
+    if(uniqueResolved.length > limit) throw new Error(`${runSettings?.model || '当前模型'} 最多支持 ${limit} 张参考图，当前选择了 ${uniqueResolved.length} 张`);
+    const existingAuto = (canvas?.connections || []).filter(connection => connection.to === targetNode.id && connection.data?.origin === 'canvas-reference');
+    const grouped = new Map();
+    uniqueResolved.forEach(entry => {
+        if(!grouped.has(entry.ref.sourceNodeId)) grouped.set(entry.ref.sourceNodeId, []);
+        grouped.get(entry.ref.sourceNodeId).push(entry);
+    });
+    const signature = list => JSON.stringify(list.map(connection => ({
+        from:connection.from,
+        ids:connection.data?.assetIds || [],
+        indexes:connection.data?.assetIndexes || []
+    })).sort((a, b) => a.from.localeCompare(b.from)));
+    const nextShape = [...grouped.entries()].map(([from, entries]) => ({
+        from,
+        data:{assetIds:entries.map(entry => entry.ref.id), assetIndexes:entries.map(entry => Number(entry.ref.assetIndex || 0))}
+    }));
+    if(signature(existingAuto) !== signature(nextShape)){
+        pushUndo();
+        canvas.connections = (canvas.connections || []).filter(connection => !(connection.to === targetNode.id && connection.data?.origin === 'canvas-reference'));
+        grouped.forEach((entries, sourceNodeId) => {
+            const edgeId = uid('smart-canvas-ref-edge');
+            const connection = {
+                id:edgeId,
+                from:sourceNodeId,
+                to:targetNode.id,
+                kind:'input',
+                ...centeredSmartConnectionAnchors(sourceNodeId, targetNode.id),
+                data:{
+                    origin:'canvas-reference',
+                    targetNodeId:targetNode.id,
+                    assetIds:entries.map(entry => entry.ref.id),
+                    assetIndexes:entries.map(entry => Number(entry.ref.assetIndex || 0))
+                }
+            };
+            canvas.connections.push(connection);
+            entries.forEach(entry => { entry.ref.materializedEdgeId = edgeId; });
+        });
+        targetNode.canvasReferences = stored.map((ref, order) => ({...ref, order}));
+        scheduleSave();
+    }
+    return uniqueResolved.map(entry => entry.item);
+}
+function smartCanvasReferencePickerTarget(){
+    return smartCanvasReferencePicker ? nodes.find(node => node.id === smartCanvasReferencePicker.targetNodeId) : null;
+}
+function smartCanvasReferenceCandidateFromElement(element){
+    const holder = element?.closest?.('.image-node .image-wrap[data-image-index],.image-node .thumb-item[data-image-index]');
+    if(!holder) return null;
+    const container = holder.closest('.image-node[data-id]');
+    const sourceNodeId = holder.dataset.refNodeId || container?.dataset?.id || '';
+    const assetIndex = Number(holder.dataset.refImageIndex ?? holder.dataset.imageIndex ?? 0);
+    const sourceNode = nodes.find(node => node.id === sourceNodeId);
+    const item = smartCanvasReferenceItemFromNode(sourceNode, assetIndex);
+    if(!sourceNode || !item?.url) return null;
+    return {holder, sourceNode, assetIndex, item};
+}
+function smartCanvasReferencePickerEligibility(candidate){
+    const target = smartCanvasReferencePickerTarget();
+    if(!target || !candidate?.sourceNode || !candidate?.item?.url) return {ok:false, reason:'这张图片当前不可用'};
+    if(candidate.sourceNode.id === target.id) return {ok:false, reason:'不能选择当前生成节点自身的图片'};
+    if(wouldCreateSmartCanvasReferenceCycle(candidate.sourceNode.id, target.id)) return {ok:false, reason:'该图片位于目标节点下游，选择后会形成环路'};
+    return {ok:true, reason:''};
+}
+function smartCanvasReferenceRecordFromCandidate(candidate, order=0){
+    const stableUrl = stableSmartCanvasReferenceUrl(candidate.item.url);
+    return normalizeSmartCanvasReference({
+        id:uid('smart-canvas-ref'),
+        sourceNodeId:candidate.sourceNode.id,
+        assetIndex:candidate.assetIndex,
+        assetPath:stableUrl,
+        originalUrl:stableUrl,
+        fileName:candidate.item.name || smartCanvasReferenceFileName({url:candidate.item.url}),
+        sha256:candidate.item.sha256 || ''
+    }, order);
+}
+function clearSmartCanvasReferencePickerVisuals(){
+    world?.querySelectorAll?.('.canvas-reference-candidate,.canvas-reference-selected,.canvas-reference-disabled,.canvas-reference-target').forEach(element => {
+        element.classList.remove('canvas-reference-candidate', 'canvas-reference-selected', 'canvas-reference-disabled', 'canvas-reference-target');
+        delete element.dataset.canvasRefDisabledReason;
+        if(element.dataset.canvasRefOriginalTitle !== undefined){
+            element.title = element.dataset.canvasRefOriginalTitle;
+            delete element.dataset.canvasRefOriginalTitle;
+        }
+    });
+    world?.querySelectorAll?.('.canvas-reference-overlay').forEach(element => element.remove());
+}
+function applySmartCanvasReferencePickerVisuals(){
+    if(!smartCanvasReferencePicker || !world) return;
+    clearSmartCanvasReferencePickerVisuals();
+    world.querySelector(`.image-node[data-id="${CSS.escape(smartCanvasReferencePicker.targetNodeId)}"]`)?.classList.add('canvas-reference-target');
+    world.querySelectorAll('.image-node .image-wrap[data-image-index],.image-node .thumb-item[data-image-index]').forEach(holder => {
+        const candidate = smartCanvasReferenceCandidateFromElement(holder);
+        if(!candidate || mediaKindForItem(candidate.item) !== 'image') return;
+        const eligibility = smartCanvasReferencePickerEligibility(candidate);
+        const key = `node:${candidate.sourceNode.id}:${candidate.assetIndex}`;
+        const selectedIndex = smartCanvasReferencePicker.refs.findIndex(ref => smartCanvasReferenceKey(ref) === key);
+        holder.classList.add('canvas-reference-candidate');
+        if(!eligibility.ok){
+            holder.classList.add('canvas-reference-disabled');
+            holder.dataset.canvasRefDisabledReason = eligibility.reason;
+            holder.dataset.canvasRefOriginalTitle = holder.title || '';
+            holder.title = eligibility.reason;
+        }
+        if(selectedIndex >= 0) holder.classList.add('canvas-reference-selected');
+        const overlay = document.createElement('span');
+        overlay.className = 'canvas-reference-overlay';
+        overlay.innerHTML = selectedIndex >= 0
+            ? `<span class="canvas-reference-order">${selectedIndex + 1}</span>`
+            : `<span class="canvas-reference-pick-hint">${eligibility.ok ? '选择' : '不可选'}</span>`;
+        holder.appendChild(overlay);
+    });
+    updateSmartCanvasReferencePickerBanner();
+}
+function updateSmartCanvasReferencePickerBanner(){
+    const picker = smartCanvasReferencePicker;
+    if(!picker?.banner) return;
+    picker.banner.querySelector('[data-canvas-reference-count]').textContent = `${picker.refs.length} / ${picker.limit}`;
+    picker.banner.querySelector('[data-canvas-reference-return]').disabled = picker.refs.length > picker.limit;
+}
+function toggleSmartCanvasReferenceCandidate(candidate){
+    if(!smartCanvasReferencePicker || !candidate) return;
+    const eligibility = smartCanvasReferencePickerEligibility(candidate);
+    if(!eligibility.ok){ toast(eligibility.reason); return; }
+    const key = `node:${candidate.sourceNode.id}:${candidate.assetIndex}`;
+    const index = smartCanvasReferencePicker.refs.findIndex(ref => smartCanvasReferenceKey(ref) === key);
+    if(index >= 0) smartCanvasReferencePicker.refs.splice(index, 1);
+    else {
+        if(smartCanvasReferencePicker.refs.length >= smartCanvasReferencePicker.limit){
+            toast(`${smartCanvasReferencePicker.runSettings?.model || '当前模型'} 最多支持 ${smartCanvasReferencePicker.limit} 张参考图`);
+            return;
+        }
+        smartCanvasReferencePicker.refs.push(smartCanvasReferenceRecordFromCandidate(candidate, smartCanvasReferencePicker.refs.length));
+    }
+    smartCanvasReferencePicker.refs = smartCanvasReferencePicker.refs.map((ref, order) => ({...ref, order}));
+    applySmartCanvasReferencePickerVisuals();
+}
+function smartCanvasReferencePickerMouseDown(event){
+    if(!smartCanvasReferencePicker || !shell?.contains(event.target)) return;
+    if(event.button === 1){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        startSmartPan(event);
+        return;
+    }
+    if(event.button === 2) return;
+    if(event.button !== 0) return;
+    if(isSpacePanKeyDown){
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        startSmartPan(event, {spacePan:true});
+        return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+}
+function smartCanvasReferencePickerClick(event){
+    if(!smartCanvasReferencePicker || !shell?.contains(event.target) || event.button !== 0 || isSpacePanKeyDown) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const candidate = smartCanvasReferenceCandidateFromElement(event.target);
+    if(candidate) toggleSmartCanvasReferenceCandidate(candidate);
+}
+function focusSmartCanvasReferenceTarget(targetNodeId){
+    const target = nodes.find(node => node.id === targetNodeId);
+    if(!target || !shell) return;
+    const rect = nodeRect(target);
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    const scale = Math.max(.45, Math.min(1.35, Number(viewport.scale || 1)));
+    world.style.transition = 'transform 240ms cubic-bezier(.2,.8,.2,1)';
+    viewport.scale = scale;
+    viewport.x = shell.clientWidth / 2 - cx * scale;
+    viewport.y = shell.clientHeight / 2 - cy * scale;
+    selectedId = target.id;
+    selectedIds = [];
+    selectedImage = {nodeId:'', index:-1};
+    applyViewport();
+    render();
+    setTimeout(() => { world.style.transition = ''; }, 280);
+    scheduleSave();
+}
+function finishSmartCanvasReferencePicker({commit=false, returnToTarget=false}={}){
+    const picker = smartCanvasReferencePicker;
+    if(!picker) return false;
+    const target = nodes.find(node => node.id === picker.targetNodeId);
+    if(commit && target){
+        if(picker.refs.length > picker.limit){ toast(`${picker.runSettings?.model || '当前模型'} 最多支持 ${picker.limit} 张参考图`); return false; }
+        pushUndo();
+        canvas.connections = (canvas.connections || []).filter(connection => !(connection.to === target.id && connection.data?.origin === 'canvas-reference'));
+        target.canvasReferences = picker.refs.map((ref, order) => ({...normalizeSmartCanvasReference(ref, order), materializedEdgeId:''}));
+    }
+    picker.observer?.disconnect?.();
+    picker.banner?.remove();
+    document.removeEventListener('mousedown', smartCanvasReferencePickerMouseDown, true);
+    document.removeEventListener('click', smartCanvasReferencePickerClick, true);
+    document.body.classList.remove('canvas-reference-picker-active');
+    clearSmartCanvasReferencePickerVisuals();
+    smartCanvasReferencePicker = null;
+    render();
+    if(commit){
+        scheduleSave();
+        if(returnToTarget && target) focusSmartCanvasReferenceTarget(target.id);
+    }
+    return true;
+}
+function cancelSmartCanvasReferencePicker(){
+    return finishSmartCanvasReferencePicker({commit:false, returnToTarget:false});
+}
+function commitSmartCanvasReferencePicker(){
+    return finishSmartCanvasReferencePicker({commit:true, returnToTarget:true});
+}
+async function beginSmartCanvasReferencePicker(targetNodeId){
+    const target = nodes.find(node => node.id === targetNodeId);
+    if(!target || !isSmartRunnableNode(target)) return;
+    if(smartCanvasReferencePicker) cancelSmartCanvasReferencePicker();
+    const runSettings = smartSettingsForNode(target);
+    if(!isApiLikeEngine(runSettings.engine) || runSettings.apiKind === 'video'){
+        toast('画布参考仅用于 API 图片生成模式');
+        return;
+    }
+    const banner = document.createElement('div');
+    banner.className = 'canvas-reference-banner';
+    banner.innerHTML = `<div class="canvas-reference-banner-title"><i data-lucide="images"></i><span>从画布选择参考</span><strong data-canvas-reference-count>0 / ${SMART_REFERENCE_IMAGE_MAX}</strong></div><div class="canvas-reference-banner-actions"><button type="button" data-canvas-reference-return><i data-lucide="corner-down-left"></i><span>返回节点</span></button><button type="button" class="canvas-reference-close" data-canvas-reference-close aria-label="关闭">×</button></div>`;
+    document.body.appendChild(banner);
+    smartCanvasReferencePicker = {
+        targetNodeId,
+        refs:(Array.isArray(target.canvasReferences) ? target.canvasReferences : []).map((ref, order) => normalizeSmartCanvasReference(ref, order)),
+        limit:SMART_REFERENCE_IMAGE_MAX,
+        runSettings,
+        banner,
+        observer:null
+    };
+    banner.querySelector('[data-canvas-reference-return]').onclick = event => { event.preventDefault(); commitSmartCanvasReferencePicker(); };
+    banner.querySelector('[data-canvas-reference-close]').onclick = event => { event.preventDefault(); cancelSmartCanvasReferencePicker(); };
+    document.addEventListener('mousedown', smartCanvasReferencePickerMouseDown, true);
+    document.addEventListener('click', smartCanvasReferencePickerClick, true);
+    document.body.classList.add('canvas-reference-picker-active');
+    smartCanvasReferencePicker.observer = new MutationObserver(() => {
+        if(!smartCanvasReferencePicker) return;
+        if(document.querySelector('.modal.open,.log-modal.open,.shortcut-modal.open,.image-edit-modal.open,.workflow-transfer-modal.open')) cancelSmartCanvasReferencePicker();
+    });
+    smartCanvasReferencePicker.observer.observe(document.body, {subtree:true, attributes:true, attributeFilter:['class']});
+    applySmartCanvasReferencePickerVisuals();
+    if(window.lucide) lucide.createIcons();
+    const limit = await smartCanvasReferenceLimitFor(target, runSettings);
+    if(!smartCanvasReferencePicker || smartCanvasReferencePicker.targetNodeId !== targetNodeId) return;
+    smartCanvasReferencePicker.limit = limit;
+    updateSmartCanvasReferencePickerBanner();
 }
 function nodeHasReferenceContent(node){
     return imagesForNode(node).some(img => img?.url);
@@ -14970,9 +15464,10 @@ function defaultReferenceImagesFor(node, consume=false, ctx=smartLoopContext){
     const upstream = (smartImageUsesWorkflowInput(node, ctx) ? workflowInputImagesFor(node, consume, ctx) : inputImagesFor(node, consume, ctx))
         .filter(img => img?.url);
     const manual = manualReferenceImagesFor(node);
-    if(smartImageUsesWorkflowInput(node, ctx)) return uniqueReferenceImages([...upstream, ...manual]);
-    if(self.length) return uniqueReferenceImages([...self, ...upstream, ...manual]);
-    return uniqueReferenceImages([...upstream, ...manual]);
+    const canvasRefs = smartCanvasReferenceImagesFor(node).filter(img => img?.url);
+    if(smartImageUsesWorkflowInput(node, ctx)) return uniqueReferenceImages([...upstream, ...manual, ...canvasRefs]);
+    if(self.length) return uniqueReferenceImages([...self, ...upstream, ...manual, ...canvasRefs]);
+    return uniqueReferenceImages([...upstream, ...manual, ...canvasRefs]);
 }
 function lineConnectionsFor(node){
     if(!node) return [];
@@ -15044,7 +15539,6 @@ function uniqueReferenceImages(images){
     (images || []).forEach((img, index) => {
         if(!img?.url || seen.has(img.url)) return;
         seen.add(img.url);
-        if(refs.length >= SMART_REFERENCE_IMAGE_MAX) return;
         refs.push({
             ...img,
             name:img.name || `图${refs.length + 1}`,
@@ -16900,13 +17394,20 @@ function runSmartCascadeFromLoop(loopId){
 async function runGeneration(){
     const node = selectedNode();
     if(node?.type === 'smart-minimax') return runMinimaxNode(node.id);
+    if(!node) return;
+    const initialRunSettings = smartSettingsForNode(node);
+    try {
+        await materializeSmartCanvasReferenceEdges(node.id, initialRunSettings);
+    } catch(error){
+        toast((error.message || String(error)).slice(0, 180));
+        return;
+    }
     const request = buildPromptRequest(node, null, true, smartLoopContext);
     const prompt = request.prompt.trim();
-    if(!node) return;
     if(smartNodeInFlight(node)) return;
     const refs = request.refs;
     const previousSettings = cloneSmartSettings(settings);
-    const runSettings = smartSettingsForNode(node);
+    const runSettings = initialRunSettings;
     settings = {...settings, ...cloneSmartSettings(runSettings || {})};
     if(!prompt && smartRunNeedsPrompt(settings)){
         settings = previousSettings;
@@ -17130,8 +17631,9 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     if(kieSchema) normalizeKieSettings(kieSchema, runSettings);
     const imageRefs = imageRefsOnly(refs);
     const kieRefLimit = Number(kieCapabilityField(kieSchema, 'reference_images')?.max || kieSchema?.reference_image_limit || 0);
-    if(kieSchema && imageRefs.length > kieRefLimit){
-        throw new Error(`${kieSchema.label || runSettings.model} 最多支持 ${kieRefLimit} 张参考图，当前有 ${imageRefs.length} 张`);
+    const referenceLimit = kieSchema ? kieRefLimit : SMART_REFERENCE_IMAGE_MAX;
+    if(imageRefs.length > referenceLimit){
+        throw new Error(`${kieSchema?.label || runSettings.model} 最多支持 ${referenceLimit} 张参考图，当前有 ${imageRefs.length} 张`);
     }
     const apiResolution = String(runSettings.resolution || '').trim().toLowerCase();
     const payload = {
@@ -17144,7 +17646,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         output_format:kieSchema ? String(runSettings.outputFormat || '') : '',
         quality:runSettings.quality || 'auto',
         n:1,
-        reference_images:kieSchema ? imageRefs : imageRefs.slice(0, SMART_REFERENCE_IMAGE_MAX)
+        reference_images:imageRefs
     };
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw new Error(await r.text());
@@ -18566,7 +19068,7 @@ function suppressNextSmartContextMenuOnce(){
     suppressSmartContextMenuTimer = setTimeout(clearSmartContextMenuSuppression, 500);
 }
 function beginSmartRightPan(e){
-    if(!canvas || zoomPreviewState || e.button !== 2 || !isSmartCanvasBackgroundTarget(e.target)) return false;
+    if(!canvas || zoomPreviewState || e.button !== 2 || (!smartCanvasReferencePicker && !isSmartCanvasBackgroundTarget(e.target))) return false;
     if(selectionState || panState || dragState || resizeState || portDragState) return false;
     clearSmartContextMenuSuppression();
     rightPanState = {
@@ -19312,6 +19814,18 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && smartCanvasReferencePicker){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cancelSmartCanvasReferencePicker();
+        setSmartSpacePanKey(false);
+        return;
+    }
+    if(smartCanvasReferencePicker && (e.key === 'Delete' || e.key === 'Backspace')){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+    }
     if(e.key === 'Escape' && suppressNextSmartContextMenu) clearSmartContextMenuSuppression();
     if(e.key === 'Escape' && rightPanState){
         e.preventDefault();
@@ -19378,7 +19892,13 @@ window.addEventListener('keydown', e => {
     }
     if((e.ctrlKey || e.metaKey) && key === 'z' && !isEditableTarget(e.target)){
         e.preventDefault();
-        performUndo();
+        if(e.shiftKey) performRedo();
+        else performUndo();
+        return;
+    }
+    if((e.ctrlKey || e.metaKey) && key === 'y' && !isEditableTarget(e.target)){
+        e.preventDefault();
+        performRedo();
         return;
     }
     if((e.key === 'Delete' || e.key === 'Backspace') && (selectedId || selectedIds.length) && !isEditableTarget(e.target)){
@@ -19418,6 +19938,7 @@ window.addEventListener('keyup', e => {
     }
 });
 window.addEventListener('blur', () => {
+    if(smartCanvasReferencePicker) cancelSmartCanvasReferencePicker();
     isRKeyDown = false;
     finishSmartRightPan({suppressContextMenu:false});
     clearSmartContextMenuSuppression();

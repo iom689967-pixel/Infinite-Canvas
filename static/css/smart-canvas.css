@@ -9,6 +9,33 @@
     --text:#e5e9f0; --muted:#8f9aab; --faint:#657286; --line:#2a3444; --soft:#111722;
     --shadow:rgba(0,0,0,.28); --strong:#d8dee9; --strong-text:#10141d;
 }
+/* 画布参考选择模式：覆盖层独立于素材，不修改图片节点透明度。 */
+.canvas-reference-banner{position:fixed;z-index:10050;top:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;justify-content:space-between;gap:28px;min-width:470px;padding:10px 12px 10px 16px;border:1px solid rgba(147,197,253,.85);border-radius:14px;background:linear-gradient(135deg,#2563eb,#1d4ed8);box-shadow:0 14px 36px rgba(30,64,175,.3);color:#fff;font-size:13px}
+.canvas-reference-banner-title,.canvas-reference-banner-actions,.canvas-reference-banner button{display:flex;align-items:center;gap:8px}
+.canvas-reference-banner-title svg{width:17px;height:17px}
+.canvas-reference-banner-title strong{padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.18);font-size:11px}
+.canvas-reference-banner button{height:30px;padding:0 11px;border:1px solid rgba(255,255,255,.42);border-radius:9px;background:#fff;color:#1d4ed8;font-size:11px;font-weight:800;cursor:pointer}
+.canvas-reference-banner button:disabled{opacity:.55;cursor:not-allowed}
+.canvas-reference-banner button svg{width:13px;height:13px}
+.canvas-reference-banner .canvas-reference-close{justify-content:center;width:30px;padding:0;border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.12);color:#fff;font-size:20px;font-weight:400}
+.canvas-reference-picker-active .shell{cursor:default}
+.canvas-reference-picker-active .image-node .node-port,.canvas-reference-picker-active .image-node .node-resize-handle{pointer-events:none}
+.canvas-reference-target{outline:2px dashed #3b82f6!important;outline-offset:5px}
+.canvas-reference-candidate{position:relative!important;cursor:pointer!important;isolation:isolate}
+.canvas-reference-candidate>.canvas-reference-overlay{position:absolute;z-index:18;inset:0;display:flex;align-items:flex-start;justify-content:flex-end;padding:8px;border:2px solid rgba(96,165,250,.72);border-radius:inherit;background:rgba(15,23,42,.24);pointer-events:none;box-sizing:border-box}
+.canvas-reference-candidate:hover>.canvas-reference-overlay{border-color:#60a5fa;background:rgba(37,99,235,.24)}
+.canvas-reference-selected>.canvas-reference-overlay{border:3px solid #2563eb;background:rgba(15,23,42,.46);box-shadow:inset 0 0 0 1px rgba(255,255,255,.55)}
+.canvas-reference-disabled{cursor:not-allowed!important}
+.canvas-reference-disabled>.canvas-reference-overlay{border-color:rgba(148,163,184,.75);background:rgba(15,23,42,.56)}
+.canvas-reference-order,.canvas-reference-pick-hint{display:grid;place-items:center;min-width:26px;height:26px;padding:0 7px;border-radius:999px;background:#2563eb;color:#fff;font-size:12px;font-weight:900;box-shadow:0 4px 12px rgba(15,23,42,.28)}
+.canvas-reference-pick-hint{min-width:auto;height:22px;background:rgba(15,23,42,.72);font-size:10px}
+.input-thumb-add.canvas-reference-entry{width:auto;min-width:78px;padding:0 9px;gap:5px;border-color:#bfdbfe;background:#eff6ff;color:#2563eb;font-size:10px;font-weight:800}
+.input-thumb-add.canvas-reference-entry span{white-space:nowrap}
+.input-thumb.input-canvas-reference{border-color:#93c5fd;background:#eff6ff}
+.input-thumb.input-canvas-reference .canvas-reference-source-badge{position:absolute;right:3px;bottom:3px;padding:1px 5px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-size:8px;font-weight:900;pointer-events:none}
+.input-thumb.input-canvas-reference .input-thumb-remove{z-index:4}
+.theme-dark .input-thumb-add.canvas-reference-entry{border-color:#1d4ed8;background:rgba(30,64,175,.28);color:#93c5fd}
+.theme-dark .input-thumb.input-canvas-reference{border-color:#1d4ed8;background:rgba(30,58,138,.22)}
 * { box-sizing:border-box; }
 body { margin:0; height:100vh; overflow:hidden; color:var(--text); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--page); }
 button,input,select,textarea { font:inherit; }
