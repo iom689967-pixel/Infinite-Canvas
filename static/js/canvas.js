@@ -8485,7 +8485,11 @@ function renderGeneratorBody(node){
     normalizeApiNodeSizeChoice(node);
     wrap.innerHTML = `
         <div class="prompt-list mb-3"></div>
-        <div class="generator-image-heading"><div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">${tr('canvas.images')}</div><button class="canvas-reference-entry" type="button"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button></div>
+        <div class="generator-reference-tabs" role="tablist" aria-label="参考图来源">
+            <button class="generator-reference-tab active" type="button" role="tab" aria-selected="true" data-generator-reference-tab="input"><i data-lucide="image"></i><span>输入图</span></button>
+            <button class="generator-reference-tab" type="button" role="tab" aria-selected="false" data-generator-reference-tab="asset"><i data-lucide="library"></i><span>资产库</span></button>
+            <button class="generator-reference-tab canvas-reference-entry" type="button" role="tab" aria-selected="false" data-generator-reference-tab="canvas"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button>
+        </div>
         <div class="input-list"></div>
         <div class="gen-settings">
             <div class="gen-settings-row">
@@ -8785,7 +8789,22 @@ function renderGeneratorBody(node){
     const list = wrap.querySelector('.input-list');
     renderImageInputList(list, node, mediaInputs);
     renderPromptPreview(wrap.querySelector('.prompt-list'), promptInputs);
-    wrap.querySelector('.canvas-reference-entry').onclick = e => { e.preventDefault(); e.stopPropagation(); beginCanvasReferencePicker(node.id); };
+    wrap.querySelector('[data-generator-reference-tab="input"]').onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleCanvasAssetLibrary(false);
+    };
+    wrap.querySelector('[data-generator-reference-tab="asset"]').onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleCanvasAssetLibrary(true);
+    };
+    wrap.querySelector('[data-generator-reference-tab="canvas"]').onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleCanvasAssetLibrary(false);
+        beginCanvasReferencePicker(node.id);
+    };
     wrap.querySelector('.gen-btn').onclick = e => { e.stopPropagation(); runCanvasGenerate(node.id); };
     bindCascadeButtons(wrap, node.id);
     return wrap;

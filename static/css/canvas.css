@@ -16,7 +16,13 @@ html[data-studio-scale="off"].studio-scale-managed .asset-manager-panel {
 }
 
 /* 画布参考选择模式：仅叠加交互层，不改变来源节点本身的透明度。 */
-.generator-image-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.generator-reference-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;margin-bottom:8px;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}
+.generator-reference-tab{min-width:0;height:25px;padding:0 5px;border:0;border-radius:7px;background:transparent;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;gap:4px;font-size:10px;font-weight:700;white-space:nowrap;cursor:pointer}
+.generator-reference-tab:hover{background:var(--card-solid);color:var(--text)}
+.generator-reference-tab.active{background:var(--card-solid);color:var(--text);box-shadow:0 3px 8px rgba(15,23,42,.12)}
+.generator-reference-tab svg{width:12px;height:12px;flex:0 0 auto}
+.generator-reference-tabs .canvas-reference-entry{height:25px;min-width:0;padding:0 5px;border:0;border-radius:7px;background:transparent;color:#2563eb;font-size:10px}
+.generator-reference-tabs .canvas-reference-entry:hover{background:#dbeafe;color:#1d4ed8}
 .canvas-reference-entry{display:inline-flex;align-items:center;gap:5px;height:25px;padding:0 9px;border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;color:#2563eb;font-size:10px;font-weight:700;cursor:pointer}
 .canvas-reference-entry:hover{background:#dbeafe;border-color:#93c5fd}
 .canvas-reference-entry svg{width:12px;height:12px}
@@ -45,6 +51,8 @@ html[data-studio-scale="off"].studio-scale-managed .asset-manager-panel {
 .canvas-reference-input-remove{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:18px;height:18px;padding:0;border:0;border-radius:999px;background:#fff;color:#64748b;font-size:15px;line-height:1;cursor:pointer}
 .canvas-reference-input-remove:hover{background:#fee2e2;color:#dc2626}
 html.dark .canvas-reference-entry,body.dark .canvas-reference-entry,.theme-dark .canvas-reference-entry{border-color:#1d4ed8;background:rgba(30,64,175,.28);color:#93c5fd}
+html.dark .generator-reference-tabs .canvas-reference-entry,body.dark .generator-reference-tabs .canvas-reference-entry,.theme-dark .generator-reference-tabs .canvas-reference-entry{border:0;background:transparent;color:#93c5fd}
+html.dark .generator-reference-tabs .canvas-reference-entry:hover,body.dark .generator-reference-tabs .canvas-reference-entry:hover,.theme-dark .generator-reference-tabs .canvas-reference-entry:hover{background:rgba(30,64,175,.34);color:#bfdbfe}
 html.dark .canvas-reference-input,body.dark .canvas-reference-input,.theme-dark .canvas-reference-input{border-color:#1e40af!important;background:rgba(30,58,138,.2)!important}
 .topbar { position:absolute; top:22px; left:24px; right:24px; z-index:30; display:flex; align-items:flex-start; justify-content:space-between; gap:14px; pointer-events:none; }
 .panel { pointer-events:auto; background:var(--panel); border:1px solid var(--line); border-radius:24px; box-shadow:0 16px 44px var(--shadow); backdrop-filter:blur(16px); }

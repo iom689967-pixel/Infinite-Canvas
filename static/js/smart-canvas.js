@@ -13919,10 +13919,7 @@ function renderInputThumbsRow(node){
     inputThumbsRow.dataset.thumbsSig = thumbsSignature;
     inputThumbsRow.classList.toggle('has-items', Boolean(node));
     if(!node){ inputThumbsRow.innerHTML = ''; return; }
-    const nodeSettings = smartSettingsForNode(node);
-    const showCanvasReference = isSmartRunnableNode(node) && isApiLikeEngine(nodeSettings.engine) && nodeSettings.apiKind !== 'video';
-    const canvasButton = showCanvasReference ? `<button class="input-thumb-add canvas-reference-entry" type="button" data-input-canvas-reference title="从画布选择参考" aria-label="从画布选择参考"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button>` : '';
-    const addButton = `${canvasButton}<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
+    const addButton = `<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
     if(!dedup.length){
         inputThumbsRow.innerHTML = `<div class="input-thumb-list empty"></div><div class="input-thumb-actions">${addButton}</div>`;
         bindInputThumbReferenceActions();
@@ -13962,14 +13959,6 @@ function renderInputThumbsRow(node){
     refreshIcons();
 }
 function bindInputThumbReferenceActions(){
-    inputThumbsRow?.querySelectorAll('[data-input-canvas-reference]').forEach(btn => {
-        btn.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            const node = selectedNode();
-            if(node) beginSmartCanvasReferencePicker(node.id);
-        });
-    });
     inputThumbsRow?.querySelectorAll('[data-input-add-reference]').forEach(btn => {
         btn.addEventListener('click', event => {
             event.preventDefault();
@@ -15633,6 +15622,14 @@ function renderMentionPicker(source){
     const assetCats = assetCategories('image');
     const hasInput = inputItems.length > 0;
     const hasAssets = Boolean(libraryWithMentionAssets);
+    const nodeSettings = node ? smartSettingsForNode(node) : null;
+    const hasCanvasReference = Boolean(
+        mentionInsertMode === 'manual-ref'
+        && isSmartRunnableNode(node)
+        && nodeSettings
+        && isApiLikeEngine(nodeSettings.engine)
+        && nodeSettings.apiKind !== 'video'
+    );
     mentionSource = source || (hasInput ? 'input' : 'asset');
     if(mentionSource === 'asset' && hasAssets && !assetCats.some(cat => (cat.items || []).some(item => item?.url)) && libraryWithMentionAssets){
         activeAssetLibraryId = libraryWithMentionAssets.id;
@@ -15641,7 +15638,7 @@ function renderMentionPicker(source){
     }
     if(mentionSource === 'input' && !hasInput && hasAssets) mentionSource = 'asset';
     if(mentionSource === 'asset' && !hasAssets && hasInput) mentionSource = 'input';
-    if(!hasInput && !hasAssets){ closeMentionPicker(); return; }
+    if(!hasInput && !hasAssets && !hasCanvasReference){ closeMentionPicker(); return; }
     const nextAssetCats = assetCategories('image');
     const currentAssetCat = assetCategoryForMention();
     const assetItems = assetMentionCandidateImages(currentAssetCat?.id || '');
@@ -15670,6 +15667,9 @@ function renderMentionPicker(source){
                 <button class="mention-source-tab ${mentionSource === 'asset' ? 'active' : ''}" type="button" data-mention-source="asset" title="${escapeHtml(tr('smart.mentionAssets'))}" ${hasAssets ? '' : 'disabled'}>
                     <i data-lucide="library"></i><span>${escapeHtml(tr('smart.mentionAssets'))}</span>
                 </button>
+                ${hasCanvasReference ? `<button class="mention-source-tab canvas-reference-entry" type="button" data-mention-canvas-reference title="从画布选择参考" aria-label="从画布选择参考">
+                    <i data-lucide="mouse-pointer-2"></i><span>画布参考</span>
+                </button>` : ''}
             </div>
             ${librarySelect}
             <div class="mention-folder-chips ${folderChips ? '' : 'hidden'}">
@@ -15697,6 +15697,13 @@ function renderMentionPicker(source){
             if(btn.disabled) return;
             renderMentionPicker(btn.dataset.mentionSource);
         });
+    });
+    mentionPicker.querySelector('[data-mention-canvas-reference]')?.addEventListener('mousedown', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const target = selectedNode();
+        closeMentionPicker();
+        if(target) beginSmartCanvasReferencePicker(target.id);
     });
     mentionPicker.querySelectorAll('[data-mention-library]').forEach(select => {
         select.addEventListener('mousedown', e => e.stopPropagation());

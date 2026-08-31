@@ -7,16 +7,19 @@ CLASSIC = (ROOT / "static/js/canvas.js").read_text(encoding="utf-8")
 SMART = (ROOT / "static/js/smart-canvas.js").read_text(encoding="utf-8")
 CLASSIC_CSS = (ROOT / "static/css/canvas.css").read_text(encoding="utf-8")
 SMART_CSS = (ROOT / "static/css/smart-canvas.css").read_text(encoding="utf-8")
+CLASSIC_HTML = (ROOT / "static/canvas.html").read_text(encoding="utf-8")
+SMART_HTML = (ROOT / "static/smart-canvas.html").read_text(encoding="utf-8")
 
 
 class CanvasReferencePickerContractTests(unittest.TestCase):
     def test_01_classic_has_canvas_reference_entry(self):
-        self.assertIn('class="canvas-reference-entry"', CLASSIC)
+        self.assertIn('data-generator-reference-tab="canvas"', CLASSIC)
+        self.assertIn("canvas-reference-entry", CLASSIC)
         self.assertIn("beginCanvasReferencePicker(node.id)", CLASSIC)
 
     def test_02_smart_has_canvas_reference_entry(self):
-        self.assertIn("data-input-canvas-reference", SMART)
-        self.assertIn("beginSmartCanvasReferencePicker(node.id)", SMART)
+        self.assertIn("data-mention-canvas-reference", SMART)
+        self.assertIn("beginSmartCanvasReferencePicker(target.id)", SMART)
 
     def test_03_classic_persists_soft_references(self):
         self.assertIn("target.canvasReferences = picker.refs.map", CLASSIC)
@@ -128,6 +131,26 @@ class CanvasReferencePickerContractTests(unittest.TestCase):
     def test_30_both_mark_thumbnail_source_as_canvas(self):
         self.assertIn("canvas-reference-source-badge", CLASSIC)
         self.assertIn("canvas-reference-source-badge", SMART)
+
+    def test_31_classic_entry_is_in_reference_source_tabs(self):
+        for tab in ('input', 'asset', 'canvas'):
+            self.assertIn(f'data-generator-reference-tab="{tab}"', CLASSIC)
+        self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', CLASSIC_CSS)
+
+    def test_32_smart_entry_is_in_shared_mention_source_tabs(self):
+        self.assertIn('data-mention-source="input"', SMART)
+        self.assertIn('data-mention-source="asset"', SMART)
+        self.assertIn('data-mention-canvas-reference', SMART)
+        self.assertIn("beginSmartCanvasReferencePicker(target.id)", SMART)
+        self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', SMART_CSS)
+
+    def test_33_canvas_entry_assets_are_cache_busted(self):
+        self.assertRegex(CLASSIC_HTML, r'/static/css/canvas\.css\?v=[^"\s]+')
+        self.assertRegex(CLASSIC_HTML, r'/static/js/canvas\.js\?v=[^"\s]+')
+        self.assertRegex(SMART_HTML, r'/static/css/smart-canvas\.css\?v=[^"\s]+')
+        self.assertRegex(SMART_HTML, r'/static/js/smart-canvas\.js\?v=[^"\s]+')
+        self.assertNotIn('canvas.js?v=2026.08.04.1787982726', CLASSIC_HTML)
+        self.assertNotIn('smart-canvas.js?v=2026.08.04.1787982875', SMART_HTML)
 
 
 if __name__ == "__main__":
