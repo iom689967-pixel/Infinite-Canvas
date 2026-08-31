@@ -18,7 +18,7 @@ class CanvasReferencePickerContractTests(unittest.TestCase):
         self.assertIn("beginCanvasReferencePicker(node.id)", CLASSIC)
 
     def test_02_smart_has_canvas_reference_entry(self):
-        self.assertIn("data-mention-canvas-reference", SMART)
+        self.assertIn("data-input-canvas-reference", SMART)
         self.assertIn("beginSmartCanvasReferencePicker(target.id)", SMART)
 
     def test_03_classic_persists_soft_references(self):
@@ -137,12 +137,16 @@ class CanvasReferencePickerContractTests(unittest.TestCase):
             self.assertIn(f'data-generator-reference-tab="{tab}"', CLASSIC)
         self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', CLASSIC_CSS)
 
-    def test_32_smart_entry_is_in_shared_mention_source_tabs(self):
-        self.assertIn('data-mention-source="input"', SMART)
-        self.assertIn('data-mention-source="asset"', SMART)
-        self.assertIn('data-mention-canvas-reference', SMART)
+    def test_32_smart_entry_is_in_composer_reference_tabs(self):
+        self.assertIn('data-input-reference-source="input"', SMART)
+        self.assertIn('data-input-reference-source="asset"', SMART)
+        self.assertIn('data-input-canvas-reference', SMART)
         self.assertIn("beginSmartCanvasReferencePicker(target.id)", SMART)
-        self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', SMART_CSS)
+        self.assertIn('.smart-reference-tabs.has-canvas-reference { grid-template-columns:repeat(3,minmax(0,1fr)); }', SMART_CSS)
+        mention_picker = SMART[SMART.index('function renderMentionPicker('):SMART.index('function showMentionPicker(')]
+        self.assertNotIn('data-input-canvas-reference', mention_picker)
+        self.assertIn('data-mention-source="input"', mention_picker)
+        self.assertIn('data-mention-source="asset"', mention_picker)
 
     def test_33_canvas_entry_assets_are_cache_busted(self):
         self.assertRegex(CLASSIC_HTML, r'/static/css/canvas\.css\?v=[^"\s]+')

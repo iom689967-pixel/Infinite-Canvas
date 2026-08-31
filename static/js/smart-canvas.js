@@ -13905,6 +13905,15 @@ function renderInputThumbsRow(node){
     const manualRefKeys = new Set(manualReferenceImagesFor(node).map(img => inputRefKey(img)));
     const canvasRefKeys = new Set(smartCanvasReferenceImagesFor(node).filter(img => img?.url).map(img => inputRefKey(img)));
     const addActive = mentionInsertMode === 'manual-ref';
+    const nodeSettings = node ? smartSettingsForNode(node) : null;
+    const showCanvasReference = Boolean(
+        node
+        && isSmartRunnableNode(node)
+        && nodeSettings
+        && isApiLikeEngine(nodeSettings.engine)
+        && nodeSettings.apiKind !== 'video'
+    );
+    const activeSource = addActive && mentionPicker?.classList.contains('open') ? mentionSource : 'input';
     // 仅当参考图集合/状态真正变化时才重建缩略图 DOM。否则每敲一个字都重建并重新解码所有图片，
     // 参考图多时会让输入框打字明显卡顿。
     const thumbsSignature = JSON.stringify({
@@ -13913,15 +13922,21 @@ function renderInputThumbsRow(node){
         manual: [...manualRefKeys],
         canvas: [...canvasRefKeys],
         add: addActive,
+        source: activeSource,
+        showCanvasReference,
         mode: node ? smartImageMode(node) : ''
     });
     if(inputThumbsRow.dataset.thumbsSig === thumbsSignature) return;
     inputThumbsRow.dataset.thumbsSig = thumbsSignature;
     inputThumbsRow.classList.toggle('has-items', Boolean(node));
     if(!node){ inputThumbsRow.innerHTML = ''; return; }
-    const addButton = `<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
+    const sourceTabs = `<div class="smart-reference-tabs ${showCanvasReference ? 'has-canvas-reference' : ''}" role="tablist" aria-label="参考图来源">
+        <button class="smart-reference-tab ${activeSource === 'input' ? 'active' : ''}" type="button" role="tab" aria-selected="${activeSource === 'input'}" data-input-reference-source="input"><i data-lucide="image"></i><span>${escapeHtml(tr('smart.mentionInput'))}</span></button>
+        <button class="smart-reference-tab ${activeSource === 'asset' ? 'active' : ''}" type="button" role="tab" aria-selected="${activeSource === 'asset'}" data-input-reference-source="asset"><i data-lucide="library"></i><span>${escapeHtml(tr('smart.mentionAssets'))}</span></button>
+        ${showCanvasReference ? `<button class="smart-reference-tab canvas-reference-entry" type="button" role="tab" aria-selected="false" data-input-canvas-reference title="从画布选择参考" aria-label="从画布选择参考"><i data-lucide="mouse-pointer-2"></i><span>画布参考</span></button>` : ''}
+    </div>`;
     if(!dedup.length){
-        inputThumbsRow.innerHTML = `<div class="input-thumb-list empty"></div><div class="input-thumb-actions">${addButton}</div>`;
+        inputThumbsRow.innerHTML = sourceTabs;
         bindInputThumbReferenceActions();
         refreshIcons();
         return;
@@ -13952,19 +13967,26 @@ function renderInputThumbsRow(node){
                 : '';
         return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''} ${canvasRef ? 'input-canvas-reference' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${canvasRef ? '画布参考' : title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${canvasRef ? '<span class="canvas-reference-source-badge">画布</span>' : ''}${removeBtn}</div>`;
     }).join('');
-    inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div><div class="input-thumb-actions">${addButton}</div>`;
+    inputThumbsRow.innerHTML = `${sourceTabs}<div class="input-thumb-content"><div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div></div>`;
     bindSmartPreviewImageFallbacks(inputThumbsRow);
     bindInputThumbsDrag(node, dedup, manualRefKeys, canvasRefKeys);
     bindInputThumbReferenceActions();
     refreshIcons();
 }
 function bindInputThumbReferenceActions(){
-    inputThumbsRow?.querySelectorAll('[data-input-add-reference]').forEach(btn => {
+    inputThumbsRow?.querySelectorAll('[data-input-reference-source]').forEach(btn => {
         btn.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            toggleAssetMentionPickerFromThumbs();
+            toggleAssetMentionPickerFromThumbs(btn.dataset.inputReferenceSource || 'asset');
         });
+    });
+    inputThumbsRow?.querySelector('[data-input-canvas-reference]')?.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const target = selectedNode();
+        closeMentionPicker();
+        if(target) beginSmartCanvasReferencePicker(target.id);
     });
     inputThumbsRow?.querySelectorAll('[data-input-remove-reference]').forEach(btn => {
         btn.addEventListener('click', event => {
@@ -15622,14 +15644,6 @@ function renderMentionPicker(source){
     const assetCats = assetCategories('image');
     const hasInput = inputItems.length > 0;
     const hasAssets = Boolean(libraryWithMentionAssets);
-    const nodeSettings = node ? smartSettingsForNode(node) : null;
-    const hasCanvasReference = Boolean(
-        mentionInsertMode === 'manual-ref'
-        && isSmartRunnableNode(node)
-        && nodeSettings
-        && isApiLikeEngine(nodeSettings.engine)
-        && nodeSettings.apiKind !== 'video'
-    );
     mentionSource = source || (hasInput ? 'input' : 'asset');
     if(mentionSource === 'asset' && hasAssets && !assetCats.some(cat => (cat.items || []).some(item => item?.url)) && libraryWithMentionAssets){
         activeAssetLibraryId = libraryWithMentionAssets.id;
@@ -15638,7 +15652,7 @@ function renderMentionPicker(source){
     }
     if(mentionSource === 'input' && !hasInput && hasAssets) mentionSource = 'asset';
     if(mentionSource === 'asset' && !hasAssets && hasInput) mentionSource = 'input';
-    if(!hasInput && !hasAssets && !hasCanvasReference){ closeMentionPicker(); return; }
+    if(!hasInput && !hasAssets){ closeMentionPicker(); return; }
     const nextAssetCats = assetCategories('image');
     const currentAssetCat = assetCategoryForMention();
     const assetItems = assetMentionCandidateImages(currentAssetCat?.id || '');
@@ -15658,8 +15672,7 @@ function renderMentionPicker(source){
             return `<button class="mention-folder-chip ${cat.id === mentionAssetCategoryId ? 'active' : ''}" type="button" data-mention-folder="${escapeHtml(cat.id)}" title="${escapeHtml(label)}">${escapeHtml(label)}</button>`;
           }).join('')
         : '';
-    mentionPicker.innerHTML = `
-        <div class="mention-picker-shell">
+    const promptSourceTabs = mentionInsertMode === 'manual-ref' ? '' : `
             <div class="mention-source-tabs">
                 <button class="mention-source-tab ${mentionSource === 'input' ? 'active' : ''}" type="button" data-mention-source="input" title="${escapeHtml(tr('smart.mentionInput'))}" ${hasInput ? '' : 'disabled'}>
                     <i data-lucide="image"></i><span>${escapeHtml(tr('smart.mentionInput'))}</span>
@@ -15667,10 +15680,10 @@ function renderMentionPicker(source){
                 <button class="mention-source-tab ${mentionSource === 'asset' ? 'active' : ''}" type="button" data-mention-source="asset" title="${escapeHtml(tr('smart.mentionAssets'))}" ${hasAssets ? '' : 'disabled'}>
                     <i data-lucide="library"></i><span>${escapeHtml(tr('smart.mentionAssets'))}</span>
                 </button>
-                ${hasCanvasReference ? `<button class="mention-source-tab canvas-reference-entry" type="button" data-mention-canvas-reference title="从画布选择参考" aria-label="从画布选择参考">
-                    <i data-lucide="mouse-pointer-2"></i><span>画布参考</span>
-                </button>` : ''}
-            </div>
+            </div>`;
+    mentionPicker.innerHTML = `
+        <div class="mention-picker-shell">
+            ${promptSourceTabs}
             ${librarySelect}
             <div class="mention-folder-chips ${folderChips ? '' : 'hidden'}">
                 ${folderChips}
@@ -15685,7 +15698,7 @@ function renderMentionPicker(source){
     if(mentionInsertMode === 'manual-ref'){
         placeMentionPickerInComposerCard();
         renderInputThumbsRow(selectedNode());
-        mentionAnchorEl = inputThumbsRow?.querySelector('[data-input-add-reference]') || inputThumbsRow;
+        mentionAnchorEl = inputThumbsRow?.querySelector(`[data-input-reference-source="${mentionSource}"]`) || inputThumbsRow;
     } else {
         placeMentionPickerInPromptRow();
     }
@@ -15697,13 +15710,6 @@ function renderMentionPicker(source){
             if(btn.disabled) return;
             renderMentionPicker(btn.dataset.mentionSource);
         });
-    });
-    mentionPicker.querySelector('[data-mention-canvas-reference]')?.addEventListener('mousedown', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        const target = selectedNode();
-        closeMentionPicker();
-        if(target) beginSmartCanvasReferencePicker(target.id);
     });
     mentionPicker.querySelectorAll('[data-mention-library]').forEach(select => {
         select.addEventListener('mousedown', e => e.stopPropagation());
@@ -15752,16 +15758,18 @@ function setPromptCaretToEnd(){
     sel.addRange(range);
     mentionRange = range.cloneRange();
 }
-function toggleAssetMentionPickerFromThumbs(){
+function toggleAssetMentionPickerFromThumbs(source='asset'){
     if(!selectedNode()) return;
-    if(mentionInsertMode === 'manual-ref'){
+    const nextSource = source === 'input' ? 'input' : 'asset';
+    if(mentionInsertMode === 'manual-ref' && mentionSource === nextSource && mentionPicker.classList.contains('open')){
         closeMentionPicker();
         return;
     }
     mentionInsertMode = 'manual-ref';
+    mentionSource = nextSource;
     renderInputThumbsRow(selectedNode());
-    mentionAnchorEl = inputThumbsRow?.querySelector('[data-input-add-reference]') || inputThumbsRow;
-    renderMentionPicker('asset');
+    mentionAnchorEl = inputThumbsRow?.querySelector(`[data-input-reference-source="${nextSource}"]`) || inputThumbsRow;
+    renderMentionPicker(nextSource);
 }
 function addManualReferenceToSelectedNode(img){
     const node = selectedNode();
@@ -20471,7 +20479,7 @@ promptInput.addEventListener('mouseout', event => {
 mentionPicker.addEventListener('mousedown', event => event.stopPropagation());
 document.addEventListener('click', event => {
     if(!event.target.closest('.smart-control')) closeAllSmartPopovers();
-    if(!event.target.closest('.mention-picker') && !event.target.closest('#promptInput') && !event.target.closest('[data-input-add-reference]')) closeMentionPicker();
+    if(!event.target.closest('.mention-picker') && !event.target.closest('#promptInput') && !event.target.closest('[data-input-reference-source]') && !event.target.closest('[data-input-canvas-reference]')) closeMentionPicker();
     if(!event.target.closest('.prompt-preset-panel') && !event.target.closest('.prompt-preset-edit') && !event.target.closest('.prompt-preset-save')) closePromptPresetPanel();
     if(!event.target.closest('.prompt-template-panel') && !event.target.closest('.prompt-preset-edit') && !event.target.closest('#composerTemplateBtn')) closePromptTemplatePanel();
 });
