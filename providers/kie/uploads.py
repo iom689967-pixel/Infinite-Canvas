@@ -1,12 +1,18 @@
-"""Kie-only reference image normalization, upload, and URL verification."""
+"""Kie-only reference image normalization, upload, caching, and URL verification."""
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
 import re
+import tempfile
+import threading
+import time
 import urllib.parse
+import weakref
 from io import BytesIO
+from pathlib import Path
 
 import httpx
 from PIL import Image, ImageOps
@@ -15,6 +21,166 @@ from PIL import Image, ImageOps
 KIE_UPLOAD_BASE_URL = "https://kieai.redpandaai.co"
 KIE_STREAM_UPLOAD_PATH = "/api/file-stream-upload"
 KIE_UPLOAD_PATH = "images/infinite-canvas"
+KIE_REFERENCE_CACHE_TTL_SECONDS = 24 * 60 * 60
+KIE_REFERENCE_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "kie_reference_cache.json"
+
+
+_CACHE_FILE_LOCK = threading.RLock()
+_CACHE_HASH_LOCKS_GUARD = threading.Lock()
+_CACHE_HASH_LOCKS_BY_LOOP = weakref.WeakKeyDictionary()
+_DEFAULT_REFERENCE_CACHE = None
+
+
+def _safe_timestamp(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _cache_ttl_from_env():
+    value = _safe_timestamp(os.getenv("KIE_REFERENCE_CACHE_TTL_SECONDS"), KIE_REFERENCE_CACHE_TTL_SECONDS)
+    return max(60.0, value)
+
+
+def _log_reference_cache(action, digest=""):
+    suffix = f" hash={str(digest or '')[:8]}" if digest else ""
+    print(f"[KieRefCache] {action}{suffix}", flush=True)
+
+
+class KieReferenceUploadCache:
+    """Small persistent cache containing only normalized hashes and Kie URLs."""
+
+    def __init__(self, path=KIE_REFERENCE_CACHE_PATH, *, ttl_seconds=None, now_fn=None):
+        self.path = Path(path)
+        self.ttl_seconds = max(
+            60.0,
+            _safe_timestamp(ttl_seconds, _cache_ttl_from_env()),
+        )
+        self._now = now_fn or time.time
+
+    def now(self):
+        return float(self._now())
+
+    def _read_entries_unlocked(self):
+        if not self.path.exists():
+            return {}
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            entries = payload.get("entries") if isinstance(payload, dict) else None
+            return dict(entries) if isinstance(entries, dict) else {}
+        except (OSError, ValueError, TypeError):
+            _log_reference_cache("LOAD_FAILED")
+            return {}
+
+    def _write_entries_unlocked(self, entries):
+        temporary_path = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                dir=str(self.path.parent),
+            )
+            payload = {
+                "version": 1,
+                "updated_at": self.now(),
+                "entries": entries,
+            }
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.path)
+            temporary_path = None
+            return True
+        except (OSError, TypeError, ValueError):
+            _log_reference_cache("WRITE_FAILED")
+            return False
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+
+    def lookup(self, digest):
+        now = self.now()
+        with _CACHE_FILE_LOCK:
+            entries = self._read_entries_unlocked()
+            entry = entries.get(digest)
+            if not isinstance(entry, dict):
+                return "miss", None
+            validated_at = _safe_timestamp(entry.get("validated_at"))
+            expires_at = _safe_timestamp(entry.get("expires_at"))
+            url = str(entry.get("kie_url") or "").strip()
+            if entry.get("sha256") != digest or not url.startswith("https://") or validated_at <= 0:
+                entries.pop(digest, None)
+                self._write_entries_unlocked(entries)
+                return "invalid", None
+            if (expires_at > 0 and now >= expires_at) or now - validated_at >= self.ttl_seconds:
+                return "expired", dict(entry)
+            return "hit", dict(entry)
+
+    def store(self, digest, url, *, size, mime_type, validated_at=None, expires_at=None):
+        now = self.now()
+        with _CACHE_FILE_LOCK:
+            entries = self._read_entries_unlocked()
+            previous = entries.get(digest) if isinstance(entries.get(digest), dict) else {}
+            entry = {
+                "sha256": digest,
+                "kie_url": str(url or ""),
+                "validated_at": _safe_timestamp(validated_at, now),
+                "created_at": _safe_timestamp(previous.get("created_at"), now),
+                "last_used_at": now,
+                "size": int(size or 0),
+                "mime_type": str(mime_type or ""),
+            }
+            if expires_at is not None and _safe_timestamp(expires_at) > 0:
+                entry["expires_at"] = _safe_timestamp(expires_at)
+            elif _safe_timestamp(previous.get("expires_at")) > 0:
+                entry["expires_at"] = _safe_timestamp(previous.get("expires_at"))
+            entries[digest] = entry
+            return self._write_entries_unlocked(entries)
+
+    def touch(self, digest):
+        with _CACHE_FILE_LOCK:
+            entries = self._read_entries_unlocked()
+            entry = entries.get(digest)
+            if not isinstance(entry, dict):
+                return False
+            entry = dict(entry)
+            entry["last_used_at"] = self.now()
+            entries[digest] = entry
+            return self._write_entries_unlocked(entries)
+
+    def invalidate(self, digest):
+        with _CACHE_FILE_LOCK:
+            entries = self._read_entries_unlocked()
+            if digest not in entries:
+                return True
+            entries.pop(digest, None)
+            return self._write_entries_unlocked(entries)
+
+
+def _default_reference_cache():
+    global _DEFAULT_REFERENCE_CACHE
+    if _DEFAULT_REFERENCE_CACHE is None:
+        _DEFAULT_REFERENCE_CACHE = KieReferenceUploadCache()
+    return _DEFAULT_REFERENCE_CACHE
+
+
+def _reference_hash_lock(cache_path, digest):
+    loop = asyncio.get_running_loop()
+    key = f"{Path(cache_path).resolve()}:{digest}"
+    with _CACHE_HASH_LOCKS_GUARD:
+        locks = _CACHE_HASH_LOCKS_BY_LOOP.setdefault(loop, {})
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        return lock
 
 
 class KieReferenceError(RuntimeError):
@@ -216,8 +382,8 @@ def normalize_image_bytes(content, *, index, filename, max_bytes):
     }
 
 
-async def _upload_normalized_image(client, api_key, content, meta, *, index, filename):
-    digest = hashlib.sha256(content).hexdigest()[:12]
+async def _upload_normalized_image(client, api_key, content, meta, *, index, filename, content_hash=""):
+    digest = str(content_hash or hashlib.sha256(content).hexdigest())[:12]
     stem = _safe_filename(filename, f"reference-{index}")
     upload_name = f"{stem}-{digest}{meta['extension']}"
     try:
@@ -308,12 +474,28 @@ async def _validate_kie_public_url(client, url, *, index, filename):
     return response.status_code, content_type
 
 
-async def prepare_kie_references(api_key, references, *, resolve_local_path, max_bytes):
+async def prepare_kie_references(
+    api_key,
+    references,
+    *,
+    resolve_local_path,
+    max_bytes,
+    cache=None,
+    http_client=None,
+):
     prepared_urls = []
     audits = []
+    timing_rows = []
+    cache_hits = 0
+    cache_misses = 0
+    total_started = time.perf_counter()
+    cache = cache or _default_reference_cache()
     timeout = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    owns_client = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    try:
         for index, ref in enumerate(references or [], 1):
+            reference_started = time.perf_counter()
             raw_url = ref.get("url", "") if isinstance(ref, dict) else ref
             source_url = str(raw_url or "").strip()
             filename = str((ref or {}).get("name") or "").strip() if isinstance(ref, dict) else ""
@@ -356,16 +538,110 @@ async def prepare_kie_references(api_key, references, *, resolve_local_path, max
                         filename=filename,
                         content_type=source_type,
                     )
+            normalize_started = time.perf_counter()
             normalized, meta = normalize_image_bytes(
                 content, index=index, filename=filename, max_bytes=max_bytes
             )
-            public_url, upload_status, upload_type = await _upload_normalized_image(
-                client, api_key, normalized, meta, index=index, filename=filename
-            )
-            verify_status, verify_type = await _validate_kie_public_url(
-                client, public_url, index=index, filename=filename
-            )
+            normalize_ms = (time.perf_counter() - normalize_started) * 1000
+            digest = hashlib.sha256(normalized).hexdigest()
+            cache_lookup_ms = 0.0
+            cache_wait_ms = 0.0
+            upload_ms = 0.0
+            validate_ms = 0.0
+            cache_status = "miss"
+            public_url = ""
+            upload_status = None
+            upload_type = ""
+            verify_status = None
+            verify_type = ""
+            cache_lock = _reference_hash_lock(cache.path, digest)
+            cache_wait_started = time.perf_counter()
+            async with cache_lock:
+                cache_wait_ms = (time.perf_counter() - cache_wait_started) * 1000
+                lookup_started = time.perf_counter()
+                lookup_state, cache_entry = cache.lookup(digest)
+                cache_lookup_ms = (time.perf_counter() - lookup_started) * 1000
+
+                if lookup_state == "hit":
+                    _log_reference_cache("HIT", digest)
+                    cache.touch(digest)
+                    cache_hits += 1
+                    cache_status = "hit"
+                    public_url = str(cache_entry.get("kie_url") or "")
+                    upload_type = str(cache_entry.get("mime_type") or meta["mime_type"])
+                    verify_status = 200
+                    verify_type = upload_type
+                elif lookup_state == "expired":
+                    _log_reference_cache("EXPIRED", digest)
+                    cached_url = str(cache_entry.get("kie_url") or "")
+                    validate_started = time.perf_counter()
+                    try:
+                        verify_status, verify_type = await _validate_kie_public_url(
+                            client, cached_url, index=index, filename=filename
+                        )
+                    except KieReferenceError:
+                        validate_ms += (time.perf_counter() - validate_started) * 1000
+                        cache.invalidate(digest)
+                        _log_reference_cache("INVALIDATE", digest)
+                    else:
+                        validate_ms += (time.perf_counter() - validate_started) * 1000
+                        public_url = cached_url
+                        upload_type = str(cache_entry.get("mime_type") or meta["mime_type"])
+                        cache.store(
+                            digest,
+                            public_url,
+                            size=meta["bytes"],
+                            mime_type=upload_type,
+                            validated_at=cache.now(),
+                        )
+                        _log_reference_cache("HIT", digest)
+                        cache_hits += 1
+                        cache_status = "revalidated"
+                elif lookup_state == "invalid":
+                    _log_reference_cache("INVALIDATE", digest)
+
+                if not public_url:
+                    _log_reference_cache("MISS", digest)
+                    cache_misses += 1
+                    cache_status = "miss"
+                    upload_started = time.perf_counter()
+                    public_url, upload_status, upload_type = await _upload_normalized_image(
+                        client,
+                        api_key,
+                        normalized,
+                        meta,
+                        index=index,
+                        filename=filename,
+                        content_hash=digest,
+                    )
+                    upload_ms = (time.perf_counter() - upload_started) * 1000
+                    validate_started = time.perf_counter()
+                    verify_status, verify_type = await _validate_kie_public_url(
+                        client, public_url, index=index, filename=filename
+                    )
+                    validate_ms += (time.perf_counter() - validate_started) * 1000
+                    if cache.store(
+                        digest,
+                        public_url,
+                        size=meta["bytes"],
+                        mime_type=upload_type or meta["mime_type"],
+                        validated_at=cache.now(),
+                    ):
+                        _log_reference_cache("STORE", digest)
             prepared_urls.append(public_url)
+            reference_total_ms = (time.perf_counter() - reference_started) * 1000
+            timing = {
+                "index": index,
+                "hash": digest[:8],
+                "cache_status": cache_status,
+                "normalize_ms": round(normalize_ms, 3),
+                "cache_wait_ms": round(cache_wait_ms, 3),
+                "cache_lookup_ms": round(cache_lookup_ms, 3),
+                "upload_ms": round(upload_ms, 3),
+                "validate_ms": round(validate_ms, 3),
+                "total_reference_prepare_ms": round(reference_total_ms, 3),
+            }
+            timing_rows.append(timing)
             audits.append({
                 "index": index,
                 "filename": filename,
@@ -378,6 +654,19 @@ async def prepare_kie_references(api_key, references, *, resolve_local_path, max
                 "public_url": public_url,
                 "verify_http_status": verify_status,
                 "verify_content_type": verify_type,
+                "cache_status": cache_status,
+                "cache_hash": digest[:8],
+                "timing": timing,
             })
+    finally:
+        if owns_client:
+            await client.aclose()
     print(json.dumps({"event": "kie_reference_preflight", "references": audits}, ensure_ascii=False), flush=True)
+    print(json.dumps({
+        "event": "kie_reference_prepare_metrics",
+        "total_reference_prepare_ms": round((time.perf_counter() - total_started) * 1000, 3),
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "references": timing_rows,
+    }, ensure_ascii=False), flush=True)
     return prepared_urls, audits
