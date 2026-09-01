@@ -6714,16 +6714,36 @@ function shellPoint(event){
     const rect = shell.getBoundingClientRect();
     return {x:event.clientX - rect.left, y:event.clientY - rect.top};
 }
+function smartTemporaryOutputConnectionCurve(fromPoint, toPoint){
+    const dx = Math.max(50, Math.abs(toPoint.x - fromPoint.x) * 0.45);
+    return `M${fromPoint.x} ${fromPoint.y} C ${fromPoint.x + dx} ${fromPoint.y}, ${toPoint.x - dx} ${toPoint.y}, ${toPoint.x} ${toPoint.y}`;
+}
+function smartOutputAnchorForNode(node){
+    return node ? smartConnectionAnchorPoint(nodeRect(node), null, 'right') : null;
+}
 function quickConnectTemporaryConnectionSvg(){
     const pending = pendingQuickConnection;
     const source = pending && !pending.drag?.aggregate ? nodes.find(node => node.id === pending.drag?.fromId) : null;
     const anchor = pending?.worldPoint;
     if((!source && !pending?.drag?.aggregate) || !anchor) return '';
+    if(pending.drag.aggregate){
+        const sources = Array.from(new Set(pending.drag.sourceIds || []))
+            .map(id => nodes.find(node => node.id === id))
+            .filter(Boolean);
+        if(!sources.length) return '';
+        const color = 'rgba(100,116,139,0.78)';
+        const endpoint = {x:anchor.x, y:anchor.y};
+        const paths = sources.map(sourceNode => {
+            const start = smartOutputAnchorForNode(sourceNode);
+            const curve = smartTemporaryOutputConnectionCurve(start, endpoint);
+            return `<path class="quick-connect-temp aggregate-connection-preview conn-line conn-pending" data-preview-source-id="${escapeAttr(sourceNode.id)}" d="${curve}" stroke="${color}" stroke-width="1.9" fill="none" stroke-linecap="round"></path>`;
+        }).join('');
+        return `${paths}<circle class="quick-connect-temp quick-connect-temp-end conn-end" cx="${endpoint.x}" cy="${endpoint.y}" r="3.5" fill="${color}" opacity=".66"></circle>`;
+    }
     const sourceRect = source ? nodeRect(source) : null;
     const fromOutput = pending.drag.fromPort === 'out';
-    const aggregateStart = pending.drag.aggregate ? pending.drag.startWorld : null;
-    const fx = aggregateStart?.x ?? (fromOutput ? sourceRect.x + sourceRect.width : anchor.x);
-    const fy = aggregateStart?.y ?? (fromOutput ? sourceRect.y + sourceRect.height / 2 : anchor.y);
+    const fx = fromOutput ? sourceRect.x + sourceRect.width : anchor.x;
+    const fy = fromOutput ? sourceRect.y + sourceRect.height / 2 : anchor.y;
     const tx = fromOutput ? anchor.x : sourceRect.x;
     const ty = fromOutput ? anchor.y : sourceRect.y + sourceRect.height / 2;
     const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
@@ -9217,8 +9237,27 @@ function ensurePortDragPathElement(){
     }
     return path;
 }
+function createAggregatePortDragPreviewPaths(sourceIds){
+    const svg = world.querySelector('svg.connection-layer');
+    if(!svg) return [];
+    svg.querySelectorAll('path.port-drag-temp').forEach(path => path.remove());
+    const fragment = document.createDocumentFragment();
+    const previews = Array.from(new Set(sourceIds || [])).map(sourceId => {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'port-drag-temp aggregate-connection-preview conn-pending');
+        path.setAttribute('stroke', 'rgba(100,116,139,0.92)');
+        path.setAttribute('stroke-width', '1.9');
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke-linecap', 'round');
+        path.dataset.previewSourceId = sourceId;
+        fragment.appendChild(path);
+        return {sourceId, path};
+    });
+    svg.appendChild(fragment);
+    return previews;
+}
 function clearPortDragVisual(){
-    world.querySelector('path.port-drag-temp')?.remove();
+    world.querySelectorAll('path.port-drag-temp').forEach(path => path.remove());
     clearSmartFloatingConnectionPort();
     world.querySelectorAll('.node-port.is-active').forEach(el => el.classList.remove('is-active'));
     world.querySelectorAll('.image-node.port-hover').forEach(el => el.classList.remove('port-hover'));
@@ -10226,16 +10265,25 @@ function updatePortDragVisual(){
     if(!portDragState) return;
     const fromNode = portDragState.aggregate ? null : nodes.find(n => n.id === portDragState.fromId);
     if(!fromNode && !portDragState.aggregate) return;
-    const fr = fromNode ? nodeRect(fromNode) : null;
-    const isOut = portDragState.fromPort === 'out';
-    const fx = portDragState.startWorld?.x ?? (isOut ? fr.x + fr.width : fr.x);
-    const fy = portDragState.startWorld?.y ?? (fr.y + fr.height / 2);
     const tx = portDragState.magnetic?.worldPoint?.x ?? portDragState.currentWorld.x;
     const ty = portDragState.magnetic?.worldPoint?.y ?? portDragState.currentWorld.y;
-    const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
-    const sign = isOut ? 1 : -1;
-    const path = ensurePortDragPathElement();
-    if(path) path.setAttribute('d', `M${fx} ${fy} C ${fx + dx * sign} ${fy}, ${tx - dx * sign} ${ty}, ${tx} ${ty}`);
+    if(portDragState.aggregate){
+        const endpoint = {x:tx, y:ty};
+        (portDragState.previewPaths || []).forEach(preview => {
+            const sourceNode = nodes.find(node => node.id === preview.sourceId);
+            const start = smartOutputAnchorForNode(sourceNode);
+            if(start && preview.path?.isConnected) preview.path.setAttribute('d', smartTemporaryOutputConnectionCurve(start, endpoint));
+        });
+    } else {
+        const fr = nodeRect(fromNode);
+        const isOut = portDragState.fromPort === 'out';
+        const fx = isOut ? fr.x + fr.width : fr.x;
+        const fy = fr.y + fr.height / 2;
+        const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
+        const sign = isOut ? 1 : -1;
+        const path = ensurePortDragPathElement();
+        if(path) path.setAttribute('d', `M${fx} ${fy} C ${fx + dx * sign} ${fy}, ${tx - dx * sign} ${ty}, ${tx} ${ty}`);
+    }
     world.querySelectorAll('.node-port.is-active').forEach(el => el.classList.remove('is-active'));
     world.querySelectorAll('.image-node.port-hover').forEach(el => el.classList.remove('port-hover'));
     renderSmartFloatingConnectionPort(portDragState.magnetic);
@@ -10309,7 +10357,7 @@ function bindAggregateSelectionHandle(handle){
         };
         shell.classList.add('port-dragging', 'aggregate-port-dragging');
         capturePendingUndo();
-        ensurePortDragPathElement();
+        portDragState.previewPaths = createAggregatePortDragPreviewPaths(bounds.sourceIds);
         updatePortDragVisual();
         installSmartConnectionPointerCapture();
     });

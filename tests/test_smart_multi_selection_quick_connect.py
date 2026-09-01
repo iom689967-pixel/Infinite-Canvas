@@ -62,22 +62,41 @@ class SmartMultiSelectionQuickConnectContractTests(unittest.TestCase):
         self.assertIn("capturePendingUndo()", binder)
         self.assertIn("installSmartConnectionPointerCapture()", binder)
 
-    def test_03_temporary_line_starts_at_aggregate_bounds_not_each_node(self):
+    def test_03_aggregate_drag_creates_one_preview_path_per_snapshot_source(self):
+        binder = function_source("bindAggregateSelectionHandle")
+        creator = function_source("createAggregatePortDragPreviewPaths")
         visual = function_source("updatePortDragVisual")
         menu_line = function_source("quickConnectTemporaryConnectionSvg")
-        self.assertIn("portDragState.startWorld?.x", visual)
-        self.assertIn("portDragState.startWorld?.y", visual)
-        self.assertIn("pending.drag.startWorld", menu_line)
-        self.assertNotIn("sourceIds.map", visual)
+        self.assertIn("portDragState.previewPaths = createAggregatePortDragPreviewPaths(bounds.sourceIds)", binder)
+        self.assertIn("document.createDocumentFragment()", creator)
+        self.assertIn("Array.from(new Set(sourceIds || [])).map", creator)
+        self.assertIn("path.dataset.previewSourceId = sourceId", creator)
+        self.assertIn("svg.appendChild(fragment)", creator)
+        self.assertIn("(portDragState.previewPaths || []).forEach", visual)
+        self.assertIn("smartOutputAnchorForNode(sourceNode)", visual)
+        self.assertIn("smartTemporaryOutputConnectionCurve(start, endpoint)", visual)
+        self.assertNotIn("createElementNS", visual)
+        self.assertIn("Array.from(new Set(pending.drag.sourceIds || []))", menu_line)
+        self.assertIn("data-preview-source-id", menu_line)
 
-    def test_04_quick_connect_registry_is_reused_and_filtered_for_all_sources(self):
+    def test_04_preview_uses_real_output_anchor_shared_curve_and_magnetic_endpoint(self):
+        anchor = function_source("smartOutputAnchorForNode")
+        curve = function_source("smartTemporaryOutputConnectionCurve")
+        visual = function_source("updatePortDragVisual")
+        self.assertIn("smartConnectionAnchorPoint(nodeRect(node), null, 'right')", anchor)
+        self.assertIn("Math.max(50, Math.abs(toPoint.x - fromPoint.x) * 0.45)", curve)
+        self.assertIn("portDragState.magnetic?.worldPoint?.x", visual)
+        self.assertIn("portDragState.magnetic?.worldPoint?.y", visual)
+        self.assertIn("const endpoint = {x:tx, y:ty}", visual)
+
+    def test_05_quick_connect_registry_is_reused_and_filtered_for_all_sources(self):
         accepts = function_source("quickConnectEntryAcceptsDrag")
         opener = function_source("openQuickConnectMenu")
         self.assertIn("canConnectSmartInputNodeBatch(drag.sourceIds, previewTarget)", accepts)
         self.assertIn("button.hidden = !quickConnectEntryAcceptsDrag", opener)
         self.assertIn("QUICK_CONNECT_NODE_REGISTRY", SMART)
 
-    def test_05_new_and_existing_targets_share_the_same_batch_edge_path(self):
+    def test_06_new_and_existing_targets_share_the_same_batch_edge_path(self):
         creator = function_source("createQuickConnectedNode")
         drop = function_source("handlePortDrop")
         self.assertIn("entry.create(pending.worldPoint, {select:true, skipUndo:true, deferRender:true, anchorPort})", creator)
@@ -85,7 +104,7 @@ class SmartMultiSelectionQuickConnectContractTests(unittest.TestCase):
         self.assertIn("connectSmartInputNodeBatch(", drop)
         self.assertIn("connectInputNode(sourceId, target.id, anchors)", function_source("connectSmartInputNodeBatch"))
 
-    def test_06_batch_validation_is_all_or_nothing_and_checks_cycles(self):
+    def test_07_batch_validation_is_all_or_nothing_and_checks_cycles(self):
         validator = function_source("canConnectSmartInputNodeBatch")
         batch = function_source("connectSmartInputNodeBatch")
         single = function_source("canConnectSmartInputNodes")
@@ -95,7 +114,7 @@ class SmartMultiSelectionQuickConnectContractTests(unittest.TestCase):
         self.assertIn("Object.assign(target, targetBefore)", batch)
         self.assertIn("wouldCreateSmartCanvasReferenceCycle(from.id, to.id)", single)
 
-    def test_07_real_batch_functions_create_normal_edges_or_zero_new_edges(self):
+    def test_08_real_batch_functions_create_normal_edges_or_zero_new_edges(self):
         names = (
             "addConnection",
             "canConnectSmartInputNodes",
@@ -164,7 +183,7 @@ console.log(JSON.stringify(results));
         self.assertFalse(results["cycle"])
         self.assertEqual(results["cycleConnections"], [{"from": "cycle-target", "to": "cycle-b", "kind": "input"}])
 
-    def test_08_one_pending_undo_transaction_covers_node_and_all_edges(self):
+    def test_09_one_pending_undo_transaction_covers_node_and_all_edges(self):
         creator = function_source("createQuickConnectedNode")
         drop = function_source("handlePortDrop")
         self.assertNotIn("pushUndo()", creator)
@@ -173,7 +192,7 @@ console.log(JSON.stringify(results));
         self.assertEqual(aggregate_drop.count("commitPendingUndo()"), 1)
         self.assertIn("discardPendingUndo()", aggregate_drop)
 
-    def test_09_escape_pointercancel_invalid_drop_and_menu_close_discard(self):
+    def test_10_escape_pointercancel_invalid_drop_and_menu_close_discard(self):
         capture = function_source("installSmartConnectionPointerCapture")
         close = function_source("closeQuickConnectMenu")
         drop = function_source("handlePortDrop")
@@ -182,14 +201,32 @@ console.log(JSON.stringify(results));
         self.assertIn("discardPendingUndo()", close)
         self.assertIn("if(hit?.closest?.('.image-node'))", drop)
 
-    def test_10_css_uses_light_bounds_and_one_interactive_handle(self):
+    def test_11_all_drag_preview_paths_are_removed_together(self):
+        clear = function_source("clearPortDragVisual")
+        quick_clear = function_source("clearQuickConnectVisual")
+        self.assertIn("querySelectorAll('path.port-drag-temp').forEach", clear)
+        self.assertIn("path.remove()", clear)
+        self.assertIn("querySelectorAll('.quick-connect-temp')", quick_clear)
+
+    def test_12_css_uses_light_bounds_one_handle_and_noninteractive_preview(self):
         self.assertIn(".multi-selection-bounds {", SMART_CSS)
         self.assertIn("pointer-events:none", SMART_CSS[SMART_CSS.index(".multi-selection-bounds {"):])
         self.assertIn(".aggregate-output-handle", SMART_CSS)
         self.assertIn("pointer-events:auto", SMART_CSS[SMART_CSS.index(".multi-selection-bounds .aggregate-output-handle"):])
         self.assertIn("right:-9px", SMART_CSS)
+        preview_css = SMART_CSS[SMART_CSS.index(".connection-layer .aggregate-connection-preview"):]
+        self.assertIn("opacity:.78", preview_css)
+        self.assertIn("pointer-events:none", preview_css)
 
-    def test_11_no_parallel_graph_schema_or_normal_canvas_implementation(self):
+    def test_13_single_node_drag_still_uses_one_existing_temporary_path(self):
+        creator = function_source("ensurePortDragPathElement")
+        visual = function_source("updatePortDragVisual")
+        self.assertIn("querySelector('path.port-drag-temp')", creator)
+        single_branch = visual[visual.index("} else {"):]
+        self.assertIn("ensurePortDragPathElement()", single_branch)
+        self.assertIn("path.setAttribute('d'", single_branch)
+
+    def test_14_no_parallel_graph_schema_or_normal_canvas_implementation(self):
         for forbidden in ("aggregateEdge", "batchEdge", "origin:'multi'", "type:'smart-group'"):
             batch_area = SMART[SMART.index("function aggregateSelectionBounds"):SMART.index("function smartConnectionSelectionKey")]
             self.assertNotIn(forbidden, batch_area)
