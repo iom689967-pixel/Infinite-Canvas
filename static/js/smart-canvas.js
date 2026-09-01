@@ -6497,9 +6497,26 @@ function createPromptNode(x, y, options={}){
     };
     nodes.push(node);
     if(options.select !== false) selectedId = node.id;
-    render();
-    scheduleSave();
+    if(options.deferRender !== true){
+        render();
+        scheduleSave();
+    }
     return node;
+}
+function createPromptNodeAt(point, options={}){
+    const width = 316;
+    const height = 240;
+    const anchorPort = options.anchorPort || '';
+    const centerX = anchorPort === 'in'
+        ? (point?.x || 0) + width / 2
+        : anchorPort === 'out'
+            ? (point?.x || 0) - width / 2
+            : (point?.x || 0);
+    return createPromptNode(
+        centerX - Math.round(width / 2),
+        (point?.y || 0) - Math.round(height / 2),
+        options
+    );
 }
 function createTextNode(x, y, options={}){
     if(!options.skipUndo) pushUndo();
@@ -10642,7 +10659,7 @@ function installSmartConnectionPointerCapture(){
     };
 }
 const QUICK_CONNECT_NODE_REGISTRY = Object.freeze([
-    {type:'text', nodeType:'smart-text', label:'文本', icon:'type', description:'手写 Prompt 或说明文字', create:(point, options) => createTextNodeAt(point, options)},
+    {type:'prompt', nodeType:'smart-prompt', label:'提示词', icon:'text-cursor-input', description:'手写或用 LLM 生成文本', create:(point, options) => createPromptNodeAt(point, options)},
     {type:'image-generation', nodeType:'smart-image-generation', label:'图片生成', icon:'image', description:'生成图片', create:(point, options) => createGenerationNode('image', point, options)},
     {type:'video-generation', nodeType:'smart-video-generation', label:'视频生成', icon:'video', description:'生成视频', create:(point, options) => createGenerationNode('video', point, options)}
 ]);
