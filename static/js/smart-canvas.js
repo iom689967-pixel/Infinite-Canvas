@@ -104,6 +104,24 @@ let selectedConnectionKeys = new Set();
 let selectedImage = {nodeId:'', index:-1};
 let nodeGenerationHistoryPanelNodeId = '';
 let nodeGenerationHistorySelectedId = '';
+const FOCUS_EDIT_INACTIVE = 'inactive';
+const FOCUS_EDIT_PICKING = 'picking-reference';
+const FOCUS_EDIT_RECOGNIZING = 'recognizing';
+const FOCUS_EDIT_SELECTED = 'reference-selected';
+const FOCUS_EDIT_EDITING = 'editing';
+const FOCUS_EDIT_RUNNING = 'running';
+let focusEditSession = {
+    status:FOCUS_EDIT_INACTIVE,
+    targetNodeId:'',
+    targetImageIndex:0,
+    referenceElement:null,
+    candidates:[],
+    candidateAnchor:null,
+    recognitionError:'',
+    instruction:'',
+    recognitionToken:0,
+    runToken:null
+};
 let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
@@ -6338,6 +6356,7 @@ function migrateSmartGroupImageMembers(){
 }
 async function loadCanvas(){
     if(!canvasId) return;
+    if(focusEditActive()) exitFocusEdit({cancelRun:true, renderCanvas:false});
     if(smartCanvasReferencePicker) cancelSmartCanvasReferencePicker();
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`);
@@ -8873,12 +8892,14 @@ function smartNodeToolbarHtml(node){
     const item = imageForDisplay(images[smartNodeToolbarImageIndex(node)] || images.find(img => img?.url));
     const kind = item?.url ? mediaKindForItem(item) : '';
     const canEditImage = kind === 'image';
+    const canFocusEdit = canEditImage && images.filter(img => imageForDisplay(img)?.url).length === 1 && !smartNodeInFlight(node);
     const imageCount = images.filter(img => mediaKindForItem(imageForDisplay(img)) === 'image' && imageForDisplay(img)?.url).length;
     const gridLabel = imageCount > 1 ? '宫格拼接' : '宫格切分';
     const actions = [
         ...(historyCount ? [{key:'history', icon:'history', label:`生成历史 ${historyCount}`, enabled:true}] : []),
         ...(item?.url ? [
         {key:'preview', icon:'eye', label:'预览', enabled:kind === 'image' || kind === 'video'},
+        {key:'focus-edit', icon:'scan-search', label:'焦点编辑', enabled:canFocusEdit},
         {key:'crop', icon:'crop', label:'裁剪', enabled:canEditImage},
         {key:'outpaint', icon:'expand', label:'扩图', enabled:canEditImage},
         {key:'mask', icon:'brush', label:'遮罩', enabled:canEditImage},
@@ -8917,6 +8938,10 @@ function runSmartNodeToolbarAction(nodeId, action){
         openNodeGenerationHistory(nodeId);
         return;
     }
+    if(action === 'focus-edit'){
+        startFocusEdit(nodeId, smartNodeToolbarImageIndex(node));
+        return;
+    }
     const index = smartNodeToolbarImageIndex(node);
     const item = imageForDisplay(node.images?.[index]);
     if(!item?.url) return;
@@ -8951,11 +8976,564 @@ function runSmartNodeToolbarAction(nodeId, action){
         setGridOperationMode('join');
     }
 }
+function freshFocusEditSession(){
+    return {
+        status:FOCUS_EDIT_INACTIVE,
+        targetNodeId:'',
+        targetImageIndex:0,
+        referenceElement:null,
+        candidates:[],
+        candidateAnchor:null,
+        candidateContext:null,
+        recognitionError:'',
+        instruction:'',
+        recognitionToken:Number(focusEditSession?.recognitionToken || 0) + 1,
+        runToken:null
+    };
+}
+function focusEditActive(){
+    return focusEditSession.status !== FOCUS_EDIT_INACTIVE && Boolean(focusEditSession.targetNodeId);
+}
+function focusEditTargetNode(){
+    return focusEditActive() ? nodes.find(node => node.id === focusEditSession.targetNodeId) || null : null;
+}
+function focusEditImageForNode(node, imageIndex=0){
+    if(!node) return null;
+    const refs = imagesForNode(node).filter(item => item?.url && mediaKindForItem(item) === 'image');
+    return refs.find(item => Number(item.imageIndex ?? 0) === Number(imageIndex)) || refs[0] || null;
+}
+function focusEditableImageNode(node, imageIndex=0){
+    if(!isSmartImageNode(node) || isHistoryGroupNode(node) || smartNodeInFlight(node)) return null;
+    const images = imagesForNode(node).filter(item => item?.url && mediaKindForItem(item) === 'image');
+    if(images.length !== 1) return null;
+    return focusEditImageForNode(node, imageIndex);
+}
+function focusObjectPositionFraction(value, axis='x'){
+    const tokens = String(value || '50% 50%').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    let token = tokens[axis === 'y' ? 1 : 0] || (axis === 'y' ? '50%' : tokens[0]) || '50%';
+    if(axis === 'x' && ['top','bottom'].includes(token)) token = '50%';
+    if(axis === 'y' && ['left','right'].includes(token)) token = '50%';
+    if(['left','top'].includes(token)) return 0;
+    if(['right','bottom'].includes(token)) return 1;
+    if(token === 'center') return .5;
+    if(token.endsWith('%')){
+        const n = Number.parseFloat(token);
+        return Number.isFinite(n) ? n / 100 : .5;
+    }
+    return .5;
+}
+function normalizedImagePointFromClient(imgEl, clientX, clientY){
+    if(!imgEl?.getBoundingClientRect) return null;
+    const rect = imgEl.getBoundingClientRect();
+    const boxW = Number(rect.width || 0), boxH = Number(rect.height || 0);
+    if(!(boxW > 0 && boxH > 0)) return null;
+    if(clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+    const naturalW = Number(imgEl.naturalWidth || imgEl.videoWidth || boxW) || boxW;
+    const naturalH = Number(imgEl.naturalHeight || imgEl.videoHeight || boxH) || boxH;
+    const view = imgEl.ownerDocument?.defaultView || globalThis;
+    const style = view?.getComputedStyle ? view.getComputedStyle(imgEl) : (imgEl.computedStyle || {});
+    const fit = String(style?.objectFit || 'fill').toLowerCase();
+    let renderedW = boxW, renderedH = boxH;
+    if(fit !== 'fill'){
+        const containScale = Math.min(boxW / naturalW, boxH / naturalH);
+        const coverScale = Math.max(boxW / naturalW, boxH / naturalH);
+        const scale = fit === 'cover' ? coverScale : fit === 'none' ? 1 : fit === 'scale-down' ? Math.min(1, containScale) : containScale;
+        renderedW = naturalW * scale;
+        renderedH = naturalH * scale;
+    }
+    const offsetX = (boxW - renderedW) * focusObjectPositionFraction(style?.objectPosition, 'x');
+    const offsetY = (boxH - renderedH) * focusObjectPositionFraction(style?.objectPosition, 'y');
+    const contentX = clientX - rect.left - offsetX;
+    const contentY = clientY - rect.top - offsetY;
+    if(fit !== 'cover' && (contentX < 0 || contentY < 0 || contentX > renderedW || contentY > renderedH)) return null;
+    return {
+        x:Math.max(0, Math.min(1, contentX / Math.max(1, renderedW))),
+        y:Math.max(0, Math.min(1, contentY / Math.max(1, renderedH)))
+    };
+}
+function approximateFocusRegion(point, size=.36){
+    const width = Math.max(.16, Math.min(.62, Number(size) || .36));
+    const height = width;
+    return {
+        x:Math.max(0, Math.min(1 - width, Number(point?.x || 0) - width / 2)),
+        y:Math.max(0, Math.min(1 - height, Number(point?.y || 0) - height / 2)),
+        width,
+        height,
+        approximate:true
+    };
+}
+function focusEditImageElement(itemEl){
+    const element = itemEl?.matches?.('img.node-img') ? itemEl : itemEl?.querySelector?.('img');
+    return element && !element.dataset?.previewKind ? element : null;
+}
+async function focusEditCropDataUrl(sourceImageUrl, region){
+    if(!sourceImageUrl || !region) return '';
+    const response = await fetch(displayMediaUrl({url:sourceImageUrl}));
+    if(!response.ok) throw new Error(`无法读取参考图片（HTTP ${response.status}）`);
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+        const image = await new Promise((resolve, reject) => {
+            const item = new Image();
+            item.onload = () => resolve(item);
+            item.onerror = () => reject(new Error('无法解析参考图片'));
+            item.src = objectUrl;
+        });
+        const sx = Math.max(0, Math.round(region.x * image.naturalWidth));
+        const sy = Math.max(0, Math.round(region.y * image.naturalHeight));
+        const sw = Math.max(1, Math.min(image.naturalWidth - sx, Math.round(region.width * image.naturalWidth)));
+        const sh = Math.max(1, Math.min(image.naturalHeight - sy, Math.round(region.height * image.naturalHeight)));
+        const scale = Math.min(1, 768 / Math.max(sw, sh));
+        const canvasEl = document.createElement('canvas');
+        canvasEl.width = Math.max(1, Math.round(sw * scale));
+        canvasEl.height = Math.max(1, Math.round(sh * scale));
+        canvasEl.getContext('2d').drawImage(image, sx, sy, sw, sh, 0, 0, canvasEl.width, canvasEl.height);
+        return canvasEl.toDataURL('image/png');
+    } finally {
+        URL.revokeObjectURL(objectUrl);
+    }
+}
+function focusEditMockRuntime(){
+    const mock = globalThis.__SMART_FOCUS_EDIT_MOCK__;
+    return mock && typeof mock === 'object' ? mock : null;
+}
+function parseFocusEditCandidates(value){
+    let parsed = value;
+    if(typeof parsed === 'string'){
+        const text = parsed.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+        try { parsed = JSON.parse(text); }
+        catch(error){
+            const start = text.indexOf('['), end = text.lastIndexOf(']');
+            if(start < 0 || end <= start) throw new Error('识别结果格式无效');
+            parsed = JSON.parse(text.slice(start, end + 1));
+        }
+    }
+    const raw = Array.isArray(parsed) ? parsed : (parsed?.candidates || parsed?.items || []);
+    const seen = new Set();
+    const candidates = raw.map((item, index) => {
+        const label = String(typeof item === 'string' ? item : (item?.label || item?.name || '')).trim();
+        if(!label || seen.has(label)) return null;
+        seen.add(label);
+        return {id:String(item?.id || `focus-candidate-${index + 1}`), label, description:String(item?.description || '').trim()};
+    }).filter(Boolean).slice(0, 5);
+    if(candidates.length < 2) throw new Error('未能识别足够的局部候选，请重新点击');
+    return candidates;
+}
+function focusEditRecognitionPayload(context){
+    const point = context.point || {x:.5, y:.5};
+    return {
+        message:[
+            '你是图片局部元素识别助手。请只识别用户点击点附近的视觉内容，不要枚举整张图片。',
+            `点击点（原图 normalized coordinate）：x=${point.x.toFixed(4)}, y=${point.y.toFixed(4)}。`,
+            '图1是点击点附近的近似局部裁切；如提供图2，它是来源整图，仅用于理解上下文。',
+            '返回严格 JSON：{"candidates":[{"label":"...","description":"..."}]}。',
+            '返回 2 到 5 个候选，从最具体到较概括；不要输出 JSON 以外文字。'
+        ].join('\n'),
+        images:[context.cropDataUrl, context.sourceImageUrl].filter((value, index, list) => value && list.indexOf(value) === index)
+    };
+}
+async function recognizeFocusEditCandidates(context){
+    const payload = focusEditRecognitionPayload(context);
+    const mock = focusEditMockRuntime();
+    if(typeof mock?.recognize === 'function') return parseFocusEditCandidates(await mock.recognize({...context, ...payload}));
+    const provider = resolveChatProviderId('');
+    const model = resolveChatModel('', provider);
+    const result = await fetch('/api/canvas-llm', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({message:payload.message, messages:[], images:payload.images, videos:[], model, provider, ms_model:provider === 'modelscope' ? model : '', system_prompt:'只输出严格 JSON。'})
+    }).then(async response => {
+        if(!response.ok) throw new Error(await response.text());
+        return response.json();
+    });
+    return parseFocusEditCandidates(result?.text || result);
+}
+function focusEditReferenceSnapshot(reference){
+    if(!reference) return null;
+    const point = reference.point || {};
+    const region = reference.region || {};
+    return {
+        kind:'focus-element-reference',
+        sourceNodeId:String(reference.sourceNodeId || ''),
+        sourceImageUrl:String(reference.sourceImageUrl || ''),
+        sourceImageIndex:Math.max(0, Number(reference.sourceImageIndex || 0) || 0),
+        label:String(reference.label || ''),
+        point:{x:Number(point.x || 0), y:Number(point.y || 0)},
+        region:{x:Number(region.x || 0), y:Number(region.y || 0), width:Number(region.width || 0), height:Number(region.height || 0), approximate:reference.region?.approximate !== false},
+        cropUrl:String(reference.cropUrl || ''),
+        approximate:true
+    };
+}
+function startFocusEdit(nodeId, imageIndex=0){
+    const node = nodes.find(item => item.id === nodeId);
+    const image = focusEditableImageNode(node, imageIndex);
+    if(!node || !image){ toast('请选择一张可编辑的单图节点'); return false; }
+    if(focusEditActive()) exitFocusEdit({cancelRun:true, renderCanvas:false});
+    closeNodeGenerationHistory();
+    focusEditSession = freshFocusEditSession();
+    focusEditSession.status = FOCUS_EDIT_PICKING;
+    focusEditSession.targetNodeId = node.id;
+    focusEditSession.targetImageIndex = Number(image.imageIndex ?? imageIndex ?? 0) || 0;
+    selectedId = node.id;
+    selectedIds = [];
+    selectedConnectionKeys.clear();
+    selectedImage = {nodeId:node.id, index:focusEditSession.targetImageIndex};
+    render();
+    return true;
+}
+function cancelFocusEditRun(){
+    const token = focusEditSession.runToken;
+    if(!token || token.cancelRequested) return false;
+    token.cancelRequested = true;
+    const target = nodes.find(node => node.id === token.targetNodeId);
+    if(target){
+        cancelSmartTasksForNode(target);
+        const attempt = nodeGenerationAttempt(target, token.generationId);
+        if(attempt?.status === 'running') finishNodeGenerationAttempt(target, 'cancelled', '用户取消焦点编辑', token.generationId);
+        target.pending = 0;
+        target.running = false;
+        delete target.pendingTasks;
+    }
+    const mock = focusEditMockRuntime();
+    if(typeof mock?.cancel === 'function') Promise.resolve(mock.cancel({targetNodeId:token.targetNodeId, generationId:token.generationId})).catch(() => {});
+    focusEditSession.runToken = null;
+    focusEditSession.status = focusEditSession.referenceElement ? FOCUS_EDIT_EDITING : FOCUS_EDIT_PICKING;
+    scheduleSave();
+    renderFocusEditUi();
+    return true;
+}
+function exitFocusEdit(options={}){
+    const active = focusEditActive();
+    if(options.cancelRun !== false && focusEditSession.status === FOCUS_EDIT_RUNNING) cancelFocusEditRun();
+    focusEditSession = freshFocusEditSession();
+    document.getElementById('focusEditUi')?.remove();
+    document.body.classList.remove('smart-focus-edit-active');
+    if(active && options.renderCanvas !== false) render();
+    return active;
+}
+function handleFocusEditNodeRemoval(deleteIds){
+    if(!focusEditActive()) return;
+    const ids = deleteIds instanceof Set ? deleteIds : new Set(Array.isArray(deleteIds) ? deleteIds : [deleteIds]);
+    if(ids.has(focusEditSession.targetNodeId)){
+        exitFocusEdit({cancelRun:true, renderCanvas:false});
+        return;
+    }
+    const sourceId = focusEditSession.referenceElement?.sourceNodeId || focusEditSession.candidateContext?.sourceNodeId;
+    if(sourceId && ids.has(sourceId)){
+        exitFocusEdit({cancelRun:true, renderCanvas:false});
+    }
+}
+function handleFocusEditImageRemoval(nodeId, imageIndex){
+    if(!focusEditActive()) return;
+    if(nodeId === focusEditSession.targetNodeId && Number(imageIndex) === Number(focusEditSession.targetImageIndex)){
+        exitFocusEdit({cancelRun:true, renderCanvas:false});
+        return;
+    }
+    const ref = focusEditSession.referenceElement || focusEditSession.candidateContext;
+    if(ref?.sourceNodeId === nodeId && Number(ref.sourceImageIndex || 0) === Number(imageIndex || 0)){
+        handleFocusEditNodeRemoval(new Set([nodeId]));
+    }
+}
+async function handleFocusEditImageClick(event, sourceNodeId, sourceImageIndex, itemEl){
+    if(!focusEditActive() || event.button > 0) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    if(sourceNodeId === focusEditSession.targetNodeId){
+        toast('请点击其他图片节点中的参考元素');
+        return true;
+    }
+    const sourceNode = nodes.find(node => node.id === sourceNodeId);
+    const sourceImage = focusEditImageForNode(sourceNode, sourceImageIndex);
+    const imageEl = focusEditImageElement(itemEl);
+    if(!sourceNode || !sourceImage || !imageEl){ toast('这里只能提取图片元素'); return true; }
+    const point = normalizedImagePointFromClient(imageEl, event.clientX, event.clientY);
+    if(!point){ toast('请点击图片内容区域'); return true; }
+    const region = approximateFocusRegion(point);
+    const token = focusEditSession.recognitionToken + 1;
+    focusEditSession.recognitionToken = token;
+    focusEditSession.status = FOCUS_EDIT_RECOGNIZING;
+    focusEditSession.candidates = [];
+    focusEditSession.recognitionError = '';
+    focusEditSession.candidateAnchor = {x:event.clientX, y:event.clientY};
+    focusEditSession.candidateContext = {
+        sourceNodeId,
+        sourceImageIndex:Number(sourceImage.imageIndex ?? sourceImageIndex ?? 0) || 0,
+        sourceImageUrl:smartOriginalMediaUrl(sourceImage),
+        sourceName:sourceNode.title || sourceImage.name || '参考图片',
+        point,
+        region,
+        cropDataUrl:''
+    };
+    renderFocusEditUi();
+    try {
+        focusEditSession.candidateContext.cropDataUrl = await focusEditCropDataUrl(focusEditSession.candidateContext.sourceImageUrl, region).catch(() => '');
+        const candidates = await recognizeFocusEditCandidates(focusEditSession.candidateContext);
+        if(!focusEditActive() || focusEditSession.recognitionToken !== token) return true;
+        focusEditSession.candidates = candidates;
+        focusEditSession.status = FOCUS_EDIT_SELECTED;
+    } catch(error){
+        if(!focusEditActive() || focusEditSession.recognitionToken !== token) return true;
+        focusEditSession.recognitionError = error.message || '未能识别该位置，请重新点击';
+        focusEditSession.status = FOCUS_EDIT_PICKING;
+    }
+    renderFocusEditUi();
+    return true;
+}
+function selectFocusEditCandidate(candidateId){
+    const candidate = focusEditSession.candidates.find(item => item.id === candidateId);
+    const context = focusEditSession.candidateContext;
+    if(!focusEditActive() || !candidate || !context) return false;
+    focusEditSession.referenceElement = {
+        kind:'focus-element-reference',
+        sourceNodeId:context.sourceNodeId,
+        sourceImageUrl:context.sourceImageUrl,
+        sourceImageIndex:context.sourceImageIndex,
+        label:candidate.label,
+        point:{...context.point},
+        region:{...context.region, approximate:true},
+        crop:{...context.region, approximate:true},
+        cropDataUrl:context.cropDataUrl || '',
+        previewUrl:context.cropDataUrl || context.sourceImageUrl,
+        approximate:true
+    };
+    focusEditSession.status = FOCUS_EDIT_EDITING;
+    focusEditSession.candidates = [];
+    focusEditSession.candidateAnchor = null;
+    focusEditSession.recognitionError = '';
+    render();
+    renderFocusEditUi();
+    return true;
+}
+function clearFocusEditReference(){
+    if(!focusEditActive() || focusEditSession.status === FOCUS_EDIT_RUNNING) return;
+    focusEditSession.recognitionToken += 1;
+    focusEditSession.referenceElement = null;
+    focusEditSession.candidateContext = null;
+    focusEditSession.candidates = [];
+    focusEditSession.candidateAnchor = null;
+    focusEditSession.recognitionError = '';
+    focusEditSession.status = FOCUS_EDIT_PICKING;
+    render();
+}
+function focusEditUiHtml(){
+    const target = focusEditTargetNode();
+    const targetImage = focusEditImageForNode(target, focusEditSession.targetImageIndex);
+    const reference = focusEditSession.referenceElement;
+    const source = reference ? nodes.find(node => node.id === reference.sourceNodeId) : null;
+    const running = focusEditSession.status === FOCUS_EDIT_RUNNING;
+    const cancelling = Boolean(focusEditSession.runToken?.cancelRequested);
+    const targetPreview = targetImage?.url ? smartPreviewImgHtml(targetImage, 512, 'alt="目标图"') : '';
+    const referencePreview = reference?.previewUrl ? smartPreviewImgHtml(reference.previewUrl, 320, 'alt="参考元素"') : '';
+    const hint = focusEditSession.status === FOCUS_EDIT_RECOGNIZING ? '正在识别点击位置…' : reference ? '参考元素已选，可填写修改说明' : '点击其他节点图片中的局部元素';
+    let candidate = '';
+    if(focusEditSession.candidateAnchor){
+        const x = Math.max(12, Math.min(window.innerWidth - 252, Number(focusEditSession.candidateAnchor.x || 0) + 12));
+        const y = Math.max(72, Math.min(window.innerHeight - 260, Number(focusEditSession.candidateAnchor.y || 0) + 12));
+        const body = focusEditSession.status === FOCUS_EDIT_RECOGNIZING
+            ? '<div class="focus-edit-recognizing"><i data-lucide="loader-2"></i><span>正在识别…</span></div>'
+            : focusEditSession.candidates.length
+                ? focusEditSession.candidates.map(item => `<button type="button" data-focus-candidate="${escapeAttr(item.id)}"><strong>${escapeHtml(item.label)}</strong>${item.description ? `<small>${escapeHtml(item.description)}</small>` : ''}</button>`).join('')
+                : `<div class="focus-edit-recognition-error"><span>${escapeHtml(focusEditSession.recognitionError || '未能识别该位置，请重新点击')}</span></div>`;
+        candidate = `<div class="focus-edit-candidate-menu" style="left:${x}px;top:${y}px">${body}</div>`;
+    }
+    return `<div class="focus-edit-topbar"><span class="focus-edit-mode-icon"><i data-lucide="scan-search"></i></span><strong>焦点编辑</strong><span>${escapeHtml(hint)}</span><button type="button" data-focus-exit>退出</button></div>
+        <aside class="focus-edit-panel" role="dialog" aria-label="焦点编辑面板">
+            <header><div><strong>焦点编辑</strong><span>近似语义焦点区域</span></div><button type="button" data-focus-exit title="关闭"><i data-lucide="x"></i></button></header>
+            <section class="focus-edit-section"><h3>目标图</h3><div class="focus-edit-target-card">${targetPreview}<span>${escapeHtml(target?.title || '图片节点')}</span></div></section>
+            <section class="focus-edit-section"><div class="focus-edit-section-head"><h3>参考元素</h3>${reference && !running ? '<button type="button" data-focus-reselect>重新选择</button>' : ''}</div>
+                ${reference ? `<div class="focus-edit-reference-card"><span class="focus-edit-reference-preview">${referencePreview}</span><span class="focus-edit-reference-copy"><strong>${escapeHtml(reference.label)}</strong><small>${escapeHtml(source?.title || reference.sourceNodeId || '来源图片')}</small><em>Approximate region · ${(reference.point.x * 100).toFixed(1)}%, ${(reference.point.y * 100).toFixed(1)}%</em></span>${running ? '' : '<button type="button" data-focus-remove title="删除参考元素"><i data-lucide="trash-2"></i></button>'}</div>` : '<button type="button" class="focus-edit-pick-hint" data-focus-reselect><i data-lucide="mouse-pointer-2"></i><span>请在画布中点击其他图片的局部内容</span></button>'}
+            </section>
+            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction maxlength="4000" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
+            <footer>${running ? `<button type="button" class="focus-edit-cancel" data-focus-cancel ${cancelling ? 'disabled' : ''}>${cancelling ? '正在取消…' : '取消任务'}</button>` : '<span>执行时会同时提交目标图、参考元素视觉与文字指令。</span>'}<button type="button" class="focus-edit-run" data-focus-run ${!reference || !focusEditSession.instruction.trim() || running ? 'disabled' : ''}>${running ? '编辑中…' : '执行焦点编辑'}</button></footer>
+        </aside>${candidate}`;
+}
+function ensureFocusEditUi(){
+    let root = document.getElementById('focusEditUi');
+    if(root) return root;
+    root = document.createElement('div');
+    root.id = 'focusEditUi';
+    root.className = 'focus-edit-ui';
+    root.addEventListener('pointerdown', event => event.stopPropagation());
+    root.addEventListener('click', event => {
+        const exit = event.target.closest('[data-focus-exit]');
+        if(exit){ event.preventDefault(); exitFocusEdit(); return; }
+        const candidate = event.target.closest('[data-focus-candidate]');
+        if(candidate){ event.preventDefault(); selectFocusEditCandidate(candidate.dataset.focusCandidate || ''); return; }
+        if(event.target.closest('[data-focus-remove],[data-focus-reselect]')){ event.preventDefault(); clearFocusEditReference(); return; }
+        if(event.target.closest('[data-focus-cancel]')){ event.preventDefault(); cancelFocusEditRun(); return; }
+        if(event.target.closest('[data-focus-run]')){ event.preventDefault(); runFocusEdit(); }
+    });
+    root.addEventListener('input', event => {
+        if(event.target.matches('[data-focus-instruction]')){
+            focusEditSession.instruction = event.target.value;
+            const runButton = root.querySelector('[data-focus-run]');
+            if(runButton) runButton.disabled = !focusEditSession.referenceElement || !focusEditSession.instruction.trim() || focusEditSession.status === FOCUS_EDIT_RUNNING;
+        }
+    });
+    document.body.appendChild(root);
+    return root;
+}
+function renderFocusEditUi(){
+    document.body.classList.toggle('smart-focus-edit-active', focusEditActive());
+    if(!focusEditActive()){
+        document.getElementById('focusEditUi')?.remove();
+        return;
+    }
+    const target = focusEditTargetNode();
+    if(!target || !focusEditImageForNode(target, focusEditSession.targetImageIndex)){
+        exitFocusEdit({cancelRun:true, renderCanvas:false});
+        return;
+    }
+    const root = ensureFocusEditUi();
+    root.innerHTML = focusEditUiHtml();
+    bindSmartPreviewImageFallbacks(root);
+    if(window.lucide) lucide.createIcons();
+}
+async function uploadFocusEditCrop(reference){
+    if(!reference?.cropDataUrl) return '';
+    const mock = focusEditMockRuntime();
+    if(mock) return reference.cropDataUrl;
+    try {
+        const blob = await fetch(reference.cropDataUrl).then(response => response.blob());
+        const file = await uploadCroppedBlob(blob, `focus-element-${Date.now()}.png`);
+        return file?.url || '';
+    } catch(error){
+        return '';
+    }
+}
+function buildFocusEditRequest(targetNode, referenceElement, instruction, cropUrl=''){
+    const targetImage = focusEditImageForNode(targetNode, focusEditSession.targetImageIndex);
+    const reference = focusEditReferenceSnapshot({...referenceElement, cropUrl});
+    if(!targetImage?.url) throw new Error('目标图已不存在');
+    if(!reference?.sourceImageUrl) throw new Error('参考元素已不存在');
+    const visualUrl = cropUrl || reference.sourceImageUrl;
+    const refs = [
+        {url:smartOriginalMediaUrl(targetImage), name:'Target Image', kind:'image', role:'target_image', nodeId:targetNode.id, imageIndex:targetImage.imageIndex ?? 0},
+        {url:visualUrl, name:`Reference Element: ${reference.label}`, kind:'image', role:'reference_element', nodeId:reference.sourceNodeId, imageIndex:reference.sourceImageIndex}
+    ];
+    if(visualUrl !== reference.sourceImageUrl) refs.push({url:reference.sourceImageUrl, name:'Reference Source Image', kind:'image', role:'reference_source', nodeId:reference.sourceNodeId, imageIndex:reference.sourceImageIndex});
+    const prompt = [
+        '执行语义焦点图片编辑。',
+        '图1是必须原位修改的 Target Image；图2是 Reference Element 的视觉裁切；如有图3，它是参考元素来源整图。',
+        `参考元素：${reference.label}。`,
+        `参考点击点（normalized）：x=${reference.point.x.toFixed(4)}, y=${reference.point.y.toFixed(4)}。`,
+        `近似参考区域（normalized）：x=${reference.region.x.toFixed(4)}, y=${reference.region.y.toFixed(4)}, width=${reference.region.width.toFixed(4)}, height=${reference.region.height.toFixed(4)}。`,
+        `用户修改说明：${String(instruction || '').trim()}`,
+        '只执行用户指定的局部修改；保持目标图的人物身份、姿势、构图、背景和未提及区域不变。参考元素用于视觉结构、材质或颜色参照，不要把整张参考图复制到目标图。'
+    ].join('\n');
+    return {targetImage, referenceElement:reference, instruction:String(instruction || '').trim(), prompt, refs};
+}
+async function runFocusEdit(){
+    if(!focusEditActive() || focusEditSession.status === FOCUS_EDIT_RUNNING) return false;
+    const target = focusEditTargetNode();
+    const reference = focusEditSession.referenceElement;
+    const instruction = focusEditSession.instruction.trim();
+    if(!target || !reference || !instruction){ toast('请先选择参考元素并填写修改说明'); return false; }
+    if(smartNodeInFlight(target)){ toast('目标节点正在执行其他任务'); return false; }
+    const runSettings = smartSettingsForNode(target);
+    const cropUrl = await uploadFocusEditCrop(reference);
+    if(!focusEditActive() || focusEditTargetNode()?.id !== target.id) return false;
+    let request;
+    try { request = buildFocusEditRequest(target, reference, instruction, cropUrl); }
+    catch(error){ toast(error.message || '无法组装焦点编辑请求'); return false; }
+    pushUndo();
+    ensureLegacyNodeGenerationHistory(target);
+    const meta = {
+        prompt:request.prompt,
+        displayPrompt:instruction,
+        promptText:instruction,
+        promptHtml:'',
+        inputRefs:request.refs,
+        promptRefs:request.refs,
+        sourceNodeId:target.sourceNodeId || '',
+        mode:'focus-edit',
+        userInstruction:instruction,
+        referenceElement:request.referenceElement,
+        settings:cloneSmartSettings(runSettings)
+    };
+    const attempt = createNodeGenerationAttempt(target, meta, runSettings, 'image');
+    if(!attempt) return false;
+    const token = {id:uid('focus-run'), targetNodeId:target.id, generationId:attempt.id, cancelRequested:false};
+    focusEditSession.status = FOCUS_EDIT_RUNNING;
+    focusEditSession.runToken = token;
+    target.pending = 1;
+    target.running = false;
+    target.runStartedAt = nowMs();
+    target.runTimerHidden = false;
+    render();
+    scheduleSave();
+    const previousSettings = cloneSmartSettings(settings);
+    try {
+        const mock = focusEditMockRuntime();
+        if(typeof mock?.edit === 'function'){
+            const result = await mock.edit({targetNodeId:target.id, generationId:attempt.id, ...request, settings:cloneSmartSettings(runSettings)});
+            if(token.cancelRequested || result?.status === 'cancelled') throw new SmartTaskCancelledSignal();
+            if(result?.status === 'failed') throw new Error(result.error || '焦点编辑失败');
+            const outputs = resultMediaUrls(result?.images || result?.outputs || result?.result || result);
+            if(!outputs.length) throw new Error('焦点编辑没有返回图片');
+            completeNodeGenerationAttempt(target, outputs, {generationId:attempt.id, kind:'image'});
+        } else if(runSettings.engine === 'comfy'){
+            settings = {...settings, ...cloneSmartSettings(runSettings), comfyMode:'edit'};
+            const savedPromptHtml = promptInput.innerHTML;
+            try { await runComfyEdit(target, request.prompt, request.refs, target, meta); }
+            finally { promptInput.innerHTML = savedPromptHtml; }
+            if(token.cancelRequested) throw new SmartTaskCancelledSignal();
+        } else if(runSettings.engine === 'modelscope'){
+            const outputs = await runModelscopeGeneration(request.prompt, request.refs, {...runSettings, msgenModel:'qwen_edit', count:1});
+            if(token.cancelRequested) throw new SmartTaskCancelledSignal();
+            if(!outputs.length) throw new Error('焦点编辑没有返回图片');
+            completeNodeGenerationAttempt(target, outputs, {generationId:attempt.id, kind:'image'});
+        } else {
+            let apiSettings = runSettings;
+            if(runSettings.engine === 'runninghub'){
+                if(!runningHubSelectedModel(runSettings)) throw new Error('当前 RunningHub 工作流未声明焦点编辑能力，请切换到支持参考图编辑的图片模型');
+                apiSettings = runningHubModelApiSettings(runSettings);
+            }
+            const submitted = await runApiGeneration(request.prompt, request.refs, apiSettings);
+            const taskIds = Array.isArray(submitted?.taskIds) ? submitted.taskIds : [];
+            if(!taskIds.length) throw new Error('焦点编辑任务提交失败');
+            target.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:submitted.providerId, model:submitted.model, status:'queued', generationId:attempt.id}));
+            bindNodeGenerationAttemptTasks(target, taskIds, {providerId:submitted.providerId, model:submitted.model});
+            target.pending = taskIds.length;
+            render();
+            scheduleSave();
+            await saveCanvas();
+            await resumeSmartPendingNode(target);
+            if(token.cancelRequested && nodeGenerationAttempt(target, attempt.id)?.status === 'running') throw new SmartTaskCancelledSignal();
+            const completed = nodeGenerationAttempt(target, attempt.id);
+            if(completed?.status === 'failed') throw new Error(completed.error || '焦点编辑失败');
+            if(completed?.status === 'cancelled') throw new SmartTaskCancelledSignal();
+        }
+        toast('焦点编辑已原位更新');
+    } catch(error){
+        const activeAttempt = nodeGenerationAttempt(target, attempt.id);
+        if(activeAttempt?.status === 'running') finishNodeGenerationAttempt(target, error?.smartTaskCancelled || token.cancelRequested ? 'cancelled' : 'failed', error.message || String(error), attempt.id);
+        if(!target.jimengPending && !smartRecoverableImageTask(target)){
+            target.pending = 0;
+            target.running = false;
+            delete target.pendingTasks;
+        }
+        toast((error?.smartTaskCancelled ? '焦点编辑已取消' : (error.message || '焦点编辑失败')).slice(0, 160));
+    } finally {
+        settings = previousSettings;
+        if(focusEditActive() && focusEditSession.runToken === token){
+            focusEditSession.runToken = null;
+            focusEditSession.status = focusEditSession.referenceElement ? FOCUS_EDIT_EDITING : FOCUS_EDIT_PICKING;
+        }
+        render();
+        scheduleSave();
+    }
+    return nodeGenerationAttempt(target, attempt.id)?.status === 'success';
+}
 function nodeGenerationHistoryStatusLabel(status){
     return status === 'success' ? '成功' : status === 'running' ? '生成中' : status === 'cancelled' ? '已取消' : '失败';
 }
 function nodeGenerationHistoryTypeLabel(type){
     return type === 'image-to-image' ? '图生图' : type === 'text-to-image' ? '文生图' : (type || '未记录');
+}
+function nodeGenerationHistoryModeLabel(mode){
+    return mode === 'focus-edit' ? '焦点编辑' : mode === 'image-edit' ? '图片编辑' : '普通生成';
 }
 function nodeGenerationHistoryTime(value){
     const timestamp = Number(value || 0);
@@ -9003,6 +9581,16 @@ function nodeGenerationHistoryReferenceHtml(reference, index){
     const media = kind === 'image' ? smartPreviewImgHtml(reference.url, 192) : `<i data-lucide="${kind === 'video' ? 'video' : kind === 'audio' ? 'audio-lines' : 'file'}"></i>`;
     return `<div class="node-generation-history-ref">${media}<span>${escapeHtml(reference.name || `素材 ${index + 1}`)}</span></div>`;
 }
+function nodeGenerationHistoryFocusElementHtml(reference){
+    if(!reference) return '';
+    const previewUrl = reference.cropUrl || reference.sourceImageUrl || '';
+    const point = reference.point || {};
+    const region = reference.region || {};
+    return `<section class="node-generation-history-section node-generation-history-focus-element"><h3>焦点参考元素</h3><div class="node-generation-history-focus-card">
+        <span class="node-generation-history-focus-preview">${previewUrl ? smartPreviewImgHtml(previewUrl, 256) : '<i data-lucide="scan-search"></i>'}</span>
+        <span><strong>${escapeHtml(reference.label || '未记录')}</strong><small>来源节点：${escapeHtml(reference.sourceNodeId || '未记录')}</small><small>点击点：${Number(point.x || 0).toFixed(4)}, ${Number(point.y || 0).toFixed(4)}</small><small>近似区域：${Number(region.x || 0).toFixed(4)}, ${Number(region.y || 0).toFixed(4)}, ${Number(region.width || 0).toFixed(4)} × ${Number(region.height || 0).toFixed(4)}</small><em>Approximate semantic focus region（非精确分割）</em></span>
+    </div></section>`;
+}
 function renderNodeGenerationHistoryPanel(){
     const backdrop = document.getElementById('nodeGenerationHistoryBackdrop');
     const content = document.getElementById('nodeGenerationHistoryContent');
@@ -9025,6 +9613,7 @@ function renderNodeGenerationHistoryPanel(){
         ['比例', selected.ratio || '未记录'],
         ['分辨率', selected.resolution || '未记录'],
         ['类型', nodeGenerationHistoryTypeLabel(selected.generationType)],
+        ['模式', nodeGenerationHistoryModeLabel(selected.mode)],
         ['开始时间', nodeGenerationHistoryTime(selected.createdAt)],
         ['完成时间', nodeGenerationHistoryTime(selected.completedAt)]
     ];
@@ -9038,7 +9627,7 @@ function renderNodeGenerationHistoryPanel(){
             const adopted = item.id === node.currentGenerationId;
             return `<button type="button" class="node-generation-history-card ${item.id === selected.id ? 'selected' : ''} ${adopted ? 'adopted' : ''}" data-generation-history-id="${escapeAttr(item.id)}">
                 <span class="node-generation-history-thumb">${preview ? smartPreviewImgHtml(preview.url, 240) : `<i data-lucide="${item.status === 'running' ? 'loader-2' : item.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i>`}</span>
-                <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
+                <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}${item.mode === 'focus-edit' ? ' · 焦点编辑' : ''}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
                 <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml(nodeGenerationHistoryStatusLabel(item.status))}</span>
             </button>`;
         }).join('')}</aside>
@@ -9050,6 +9639,7 @@ function renderNodeGenerationHistoryPanel(){
             </div>
             <dl class="node-generation-history-details">${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
             <section class="node-generation-history-section"><h3>当次提示词</h3><pre>${escapeHtml(selected.displayPrompt || selected.prompt || '未记录')}</pre></section>
+            ${selected.mode === 'focus-edit' ? `<section class="node-generation-history-section"><h3>焦点编辑说明</h3><pre>${escapeHtml(selected.userInstruction || selected.displayPrompt || '未记录')}</pre></section>${nodeGenerationHistoryFocusElementHtml(selected.referenceElement)}` : ''}
             <section class="node-generation-history-section"><h3>参考素材 ${refs.length ? `(${refs.length})` : ''}</h3><div class="node-generation-history-refs">${refs.length ? refs.map(nodeGenerationHistoryReferenceHtml).join('') : '<span class="node-generation-history-missing">未记录</span>'}</div></section>
             ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.error)}</pre></section>` : ''}
         </main>
@@ -9277,7 +9867,8 @@ function render(){
         const body = nodeBodyHtml(node, layout);
         const deleteBtn = (isGroup || isMinimax) ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isText ? '双击编辑文本' : isGeneration ? '选择节点后编辑生成参数' : isSmartGroup ? '双击添加 · 拖入归组 · 选中后生成' : isMinimax ? 'Timeline editing' : isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
-        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''} ${hasActiveGeneration ? 'node-generation-running' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
+        const focusSourceNodeId = focusEditSession.referenceElement?.sourceNodeId || focusEditSession.candidateContext?.sourceNodeId || '';
+        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${focusEditActive() && node.id === focusEditSession.targetNodeId ? 'focus-edit-target' : ''} ${focusEditActive() && node.id === focusSourceNodeId ? 'focus-edit-source' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''} ${hasActiveGeneration ? 'node-generation-running' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
 
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
             ${!isEmpty && !isGroup && !isMinimax ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
@@ -9333,6 +9924,7 @@ function render(){
     refreshRunTimerPills();
     renderNodeGenerationHistoryPanel();
     if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
+    renderFocusEditUi();
     return;
     world.innerHTML = '';
     if(composerEl) world.appendChild(composerEl);
@@ -9373,6 +9965,7 @@ function render(){
     measureSmartNodeImages();
     refreshRunTimerPills();
     if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
+    renderFocusEditUi();
 }
 function measureSmartNodeImages(){
     world.querySelectorAll('.image-node img,.image-node video').forEach(imgEl => {
@@ -10889,6 +11482,7 @@ function bindNodeEvents(){
         }
         el.onclick = e => {
             e.stopPropagation();
+            if(focusEditActive()) return;
             if(Date.now() < suppressNodeClickUntil) return;
             const node = nodes.find(n => n.id === id);
             hideRunTimerForNode(node);
@@ -11034,6 +11628,17 @@ function bindNodeEvents(){
                 return {targetNodeId, imageIndex, owner, image:owner?.images?.[imageIndex]};
             };
             item.setAttribute('draggable', 'false');
+            item.addEventListener('mousedown', e => {
+                if(!focusEditActive() || e.button !== 0 || e.target.closest('.image-delete,.image-name-badge,video,audio')) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }, true);
+            item.addEventListener('click', e => {
+                if(!focusEditActive() || e.target.closest('.image-delete,.image-name-badge,video,audio')) return;
+                const target = thumbTarget();
+                void handleFocusEditImageClick(e, target.targetNodeId, target.imageIndex, item);
+            }, true);
             item.addEventListener('dragstart', e => {
                 e.preventDefault();
             });
@@ -11133,6 +11738,7 @@ function bindNodeEvents(){
         });
         el.querySelector('.node-resize-handle')?.addEventListener('mousedown', e => {
             if(e.button !== 0) return;
+            if(focusEditActive()){ e.preventDefault(); e.stopPropagation(); return; }
             e.preventDefault(); e.stopPropagation();
             const node = nodes.find(n => n.id === id);
             if(!node) return;
@@ -11160,6 +11766,7 @@ function bindNodeEvents(){
         });
         const beginNodeDrag = e => {
             if(e.button !== 0 || e.target.closest('.mini-x, .smart-node-floating-menu, .node-resize-handle, .thumb-item, .node-port, .prompt-node-control, .nodrag, .nopan, select, input, textarea, button, [contenteditable]:not([contenteditable="false"])')) return;
+            if(focusEditActive()){ e.preventDefault(); e.stopPropagation(); return; }
             if(e.target.closest('.prompt-node-pill, textarea:not(.prompt-node-text)')) return;
             if((nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') && e.detail >= 2){
                 e.preventDefault();
@@ -11189,6 +11796,7 @@ function bindNodeEvents(){
         el.querySelectorAll('.node-port').forEach(port => {
             port.addEventListener('mousedown', e => {
                 if(e.button !== 0) return;
+                if(focusEditActive()){ e.preventDefault(); e.stopPropagation(); return; }
                 e.preventDefault(); e.stopPropagation();
                 if(pendingQuickConnection) closeQuickConnectMenu({render:false});
                 const portType = port.dataset.port;
@@ -11289,6 +11897,7 @@ function deleteNode(id){
     nodes.forEach(node => {
         if(isHistoryGroupNode(node) && node.historyFor === id) deleteIds.add(node.id);
     });
+    handleFocusEditNodeRemoval(deleteIds);
     nodes.filter(node => deleteIds.has(node.id)).forEach(cancelSmartTasksForNode);
     nodes = nodes.filter(node => !deleteIds.has(node.id));
     if(canvas) canvas.connections = (canvas.connections || []).filter(c => !deleteIds.has(c.from) && !deleteIds.has(c.to));
@@ -11308,6 +11917,7 @@ function clearNodeMediaBeforeDelete(id){
     const hadMedia = Boolean((node.images || []).length || node.pending);
     if(!hadMedia) return false;
     pushUndo();
+    handleFocusEditNodeRemoval(new Set([id]));
     cancelSmartTasksForNode(node);
     node.images = [];
     node.pending = 0;
@@ -11520,6 +12130,7 @@ function deleteImage(id, imageIndex){
     const node = nodes.find(n => n.id === id);
     if(!node || imageIndex < 0) return;
     pushUndo();
+    handleFocusEditImageRemoval(id, imageIndex);
     node.images = (node.images || []).filter((_, index) => index !== imageIndex);
     if(node.images.length <= 1) node.title = 'Image';
     if(selectedImage.nodeId === id) selectedImage = {nodeId:id, index:Math.min(selectedImage.index, node.images.length - 1)};
@@ -15297,6 +15908,9 @@ function createNodeGenerationAttempt(node, meta, runSettings, kind='image'){
         displayPrompt:meta?.displayPrompt || meta?.promptText || meta?.prompt || '',
         promptHtml:meta?.promptHtml || '',
         references,
+        mode:String(meta?.mode || ''),
+        userInstruction:String(meta?.userInstruction || ''),
+        referenceElement:meta?.referenceElement ? (typeof focusEditReferenceSnapshot === 'function' ? focusEditReferenceSnapshot(meta.referenceElement) : JSON.parse(JSON.stringify(meta.referenceElement))) : null,
         settings:settingMeta.settings,
         sourceNodeId:meta?.sourceNodeId || '',
         outputKind:kind,
@@ -15337,6 +15951,9 @@ function nodeGenerationMetaFromAttempt(attempt){
         promptRefs:nodeGenerationReferenceSnapshot(attempt?.references || []),
         inputRefs:nodeGenerationReferenceSnapshot(attempt?.references || []),
         sourceNodeId:attempt?.sourceNodeId || '',
+        mode:attempt?.mode || '',
+        userInstruction:attempt?.userInstruction || '',
+        referenceElement:attempt?.referenceElement ? (typeof focusEditReferenceSnapshot === 'function' ? focusEditReferenceSnapshot(attempt.referenceElement) : JSON.parse(JSON.stringify(attempt.referenceElement))) : null,
         settings:cloneSmartSettings(attempt?.settings || {}),
         createdAt:Number(attempt?.createdAt || 0) || nowMs()
     };
@@ -20028,6 +20645,11 @@ shell.onmousedown = e => {
         return;
     }
     if(e.button !== 0 || !isSmartCanvasBackgroundTarget(e.target)) return;
+    if(focusEditActive() && !isSpacePanKeyDown){
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
     closeCreateMenu();
     if(isSpacePanKeyDown){
         startSmartPan(e, {spacePan:true});
@@ -20083,12 +20705,14 @@ shell.oncontextmenu = e => {
     openCreateMenu(e);
 };
 shell.ondblclick = e => {
+    if(focusEditActive()) return;
     if(didPan || e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
     if(document.getElementById('imageEditModal')?.classList.contains('open')) return;
     e.preventDefault();
     openCreateMenu(e);
 };
 shell.onclick = e => {
+    if(focusEditActive()) return;
     if(selectionJustFinished) return;
     if(didPan || e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
     if(document.getElementById('imageEditModal')?.classList.contains('open')) return;
@@ -20678,6 +21302,13 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && focusEditActive()){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        exitFocusEdit();
+        setSmartSpacePanKey(false);
+        return;
+    }
     if(e.key === 'Escape' && document.getElementById('nodeGenerationHistoryBackdrop')?.classList.contains('open')){
         e.preventDefault();
         e.stopImmediatePropagation();

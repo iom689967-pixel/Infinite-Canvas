@@ -2126,3 +2126,74 @@ body.smart-composer-resize,body.smart-composer-resize * { cursor:nwse-resize !im
     border-color: var(--ic-border);
     color: var(--ic-text-muted);
 }
+
+/* Focus Edit is a transient Smart Canvas interaction layer; it is never serialized. */
+.focus-edit-ui { position:fixed; inset:0; z-index:126; pointer-events:none; color:var(--text); }
+.focus-edit-topbar { position:fixed; top:18px; left:50%; min-height:42px; max-width:min(620px,calc(100vw - 420px)); transform:translateX(-50%); display:flex; align-items:center; gap:9px; padding:6px 7px 6px 10px; border:1px solid var(--line); border-radius:14px; background:color-mix(in srgb,var(--panel) 92%,transparent); box-shadow:0 18px 52px var(--shadow); backdrop-filter:blur(18px); pointer-events:auto; }
+.focus-edit-mode-icon { width:27px; height:27px; display:grid; place-items:center; border-radius:9px; color:var(--strong-text); background:var(--strong); }
+.focus-edit-mode-icon i,.focus-edit-mode-icon svg { width:14px; height:14px; }
+.focus-edit-topbar strong { font-size:12px; font-weight:900; white-space:nowrap; }
+.focus-edit-topbar > span:not(.focus-edit-mode-icon) { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:10px; font-weight:650; }
+.focus-edit-topbar > button { margin-left:auto; height:28px; padding:0 11px; border:1px solid var(--line); border-radius:9px; background:var(--soft); color:var(--text); font-size:10px; font-weight:800; cursor:pointer; }
+.focus-edit-panel { position:fixed; top:76px; right:20px; width:min(370px,calc(100vw - 40px)); max-height:calc(100vh - 96px); overflow:auto; display:flex; flex-direction:column; gap:0; border:1px solid var(--line); border-radius:18px; background:color-mix(in srgb,var(--panel) 96%,transparent); box-shadow:0 26px 76px var(--shadow); backdrop-filter:blur(20px); pointer-events:auto; }
+.focus-edit-panel > header { min-height:58px; padding:12px 13px 10px 15px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); }
+.focus-edit-panel > header > div { display:flex; flex-direction:column; gap:3px; }
+.focus-edit-panel > header strong { font-size:14px; font-weight:900; }
+.focus-edit-panel > header span { color:var(--faint); font-size:9px; font-weight:700; }
+.focus-edit-panel > header button { width:30px; height:30px; display:grid; place-items:center; border:1px solid var(--line); border-radius:10px; background:var(--soft); color:var(--muted); cursor:pointer; }
+.focus-edit-panel > header button i,.focus-edit-panel > header button svg { width:14px; height:14px; }
+.focus-edit-section { padding:13px 15px; border-bottom:1px solid var(--line); }
+.focus-edit-section h3 { margin:0 0 9px; color:var(--muted); font-size:10px; font-weight:900; letter-spacing:.04em; }
+.focus-edit-section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.focus-edit-section-head button { border:0; background:transparent; color:var(--strong); font-size:9px; font-weight:850; cursor:pointer; }
+.focus-edit-target-card { display:grid; grid-template-columns:58px minmax(0,1fr); align-items:center; gap:10px; }
+.focus-edit-target-card img { width:58px; height:58px; object-fit:cover; border:1px solid var(--line); border-radius:11px; background:var(--soft); }
+.focus-edit-target-card span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; font-weight:800; }
+.focus-edit-reference-card { position:relative; min-height:76px; display:grid; grid-template-columns:72px minmax(0,1fr) 28px; align-items:center; gap:10px; padding:8px; border:1px solid color-mix(in srgb,var(--strong) 40%,var(--line)); border-radius:13px; background:color-mix(in srgb,var(--soft) 76%,transparent); }
+.focus-edit-reference-preview { width:72px; height:60px; overflow:hidden; display:block; border-radius:9px; background:var(--soft); }
+.focus-edit-reference-preview img { width:100%; height:100%; display:block; object-fit:cover; }
+.focus-edit-reference-copy { min-width:0; display:flex; flex-direction:column; gap:4px; }
+.focus-edit-reference-copy strong,.focus-edit-reference-copy small,.focus-edit-reference-copy em { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.focus-edit-reference-copy strong { font-size:11px; font-weight:900; }
+.focus-edit-reference-copy small { color:var(--muted); font-size:9px; }
+.focus-edit-reference-copy em { color:var(--faint); font-size:8px; font-style:normal; }
+.focus-edit-reference-card > button { width:27px; height:27px; display:grid; place-items:center; border:0; border-radius:8px; background:transparent; color:var(--faint); cursor:pointer; }
+.focus-edit-reference-card > button:hover { color:#dc2626; background:#fee2e2; }
+.focus-edit-reference-card > button i,.focus-edit-reference-card > button svg { width:13px; height:13px; }
+.focus-edit-pick-hint { width:100%; min-height:70px; display:flex; align-items:center; justify-content:center; gap:8px; border:1px dashed var(--line); border-radius:13px; background:var(--soft); color:var(--muted); font-size:10px; font-weight:750; cursor:crosshair; }
+.focus-edit-pick-hint i,.focus-edit-pick-hint svg { width:15px; height:15px; }
+.focus-edit-instruction textarea { width:100%; min-height:118px; resize:vertical; padding:11px 12px; box-sizing:border-box; border:1px solid var(--line); border-radius:12px; outline:0; background:var(--card); color:var(--text); font:500 11px/1.65 inherit; }
+.focus-edit-instruction textarea:focus { border-color:var(--strong); box-shadow:0 0 0 3px color-mix(in srgb,var(--strong) 12%,transparent); }
+.focus-edit-panel > footer { padding:12px 15px 14px; display:flex; align-items:center; justify-content:flex-end; gap:9px; }
+.focus-edit-panel > footer > span { margin-right:auto; color:var(--faint); font-size:8px; line-height:1.45; }
+.focus-edit-panel > footer button { min-height:34px; padding:0 13px; border-radius:11px; font-size:10px; font-weight:850; cursor:pointer; }
+.focus-edit-run { border:0; background:var(--strong); color:var(--strong-text); }
+.focus-edit-cancel { border:1px solid var(--line); background:var(--soft); color:var(--text); }
+.focus-edit-panel > footer button:disabled { opacity:.45; cursor:not-allowed; }
+.focus-edit-candidate-menu { position:fixed; z-index:2; width:240px; max-height:250px; overflow:auto; padding:6px; border:1px solid var(--line); border-radius:13px; background:var(--panel); box-shadow:0 18px 50px var(--shadow); pointer-events:auto; }
+.focus-edit-candidate-menu > button { width:100%; min-height:38px; padding:8px 9px; display:flex; flex-direction:column; align-items:flex-start; gap:3px; border:0; border-radius:9px; background:transparent; color:var(--text); text-align:left; cursor:pointer; }
+.focus-edit-candidate-menu > button:hover { background:var(--soft); }
+.focus-edit-candidate-menu strong { font-size:10px; font-weight:850; }
+.focus-edit-candidate-menu small { color:var(--faint); font-size:8px; line-height:1.4; }
+.focus-edit-recognizing,.focus-edit-recognition-error { min-height:56px; padding:10px; display:flex; align-items:center; justify-content:center; gap:8px; color:var(--muted); font-size:10px; font-weight:750; text-align:center; }
+.focus-edit-recognizing i,.focus-edit-recognizing svg { width:15px; height:15px; animation:spin 1s linear infinite; }
+body.smart-focus-edit-active .image-node:not(.focus-edit-target) .image-wrap,body.smart-focus-edit-active .image-node:not(.focus-edit-target) .thumb-item { cursor:crosshair; }
+body.smart-focus-edit-active .image-node.focus-edit-target { z-index:8; filter:none; }
+body.smart-focus-edit-active .image-node.focus-edit-target::after { content:'TARGET'; position:absolute; left:10px; bottom:10px; z-index:16; padding:4px 7px; border-radius:999px; background:var(--strong); color:var(--strong-text); font-size:8px; font-weight:950; letter-spacing:.08em; pointer-events:none; }
+body.smart-focus-edit-active .image-node.focus-edit-target .image-wrap > img { border-color:var(--strong); box-shadow:0 0 0 3px color-mix(in srgb,var(--strong) 25%,transparent); }
+body.smart-focus-edit-active .image-node.focus-edit-source .image-wrap > img,body.smart-focus-edit-active .image-node.focus-edit-source .thumb-item { border-color:var(--strong); box-shadow:0 0 0 2px color-mix(in srgb,var(--strong) 20%,transparent); }
+body.smart-focus-edit-active .smart-node-floating-menu,body.smart-focus-edit-active .node-port,body.smart-focus-edit-active .node-resize-handle { pointer-events:none !important; opacity:0 !important; }
+.node-generation-history-focus-card { display:grid; grid-template-columns:96px minmax(0,1fr); gap:12px; align-items:center; }
+.node-generation-history-focus-preview { width:96px; height:82px; overflow:hidden; display:grid; place-items:center; border-radius:11px; background:var(--soft); color:var(--faint); }
+.node-generation-history-focus-preview img { width:100%; height:100%; display:block; object-fit:cover; }
+.node-generation-history-focus-card > span:last-child { min-width:0; display:flex; flex-direction:column; gap:5px; }
+.node-generation-history-focus-card strong { font-size:11px; }
+.node-generation-history-focus-card small,.node-generation-history-focus-card em { color:var(--faint); font-size:9px; font-style:normal; overflow-wrap:anywhere; }
+.theme-dark .focus-edit-panel,.theme-dark .focus-edit-candidate-menu,.theme-dark .focus-edit-topbar { border-color:var(--ic-border); background:color-mix(in srgb,var(--ic-menu) 94%,transparent); box-shadow:0 26px 76px rgba(0,0,0,.5); }
+.theme-dark .focus-edit-instruction textarea { border-color:var(--ic-input-border); background:var(--ic-input); color:var(--ic-text); }
+.theme-dark .focus-edit-reference-card,.theme-dark .focus-edit-pick-hint { border-color:var(--ic-border); background:var(--ic-node-secondary); }
+.theme-dark .focus-edit-reference-card > button:hover { color:#fecaca; background:rgba(248,113,113,.18); }
+@media (max-width:900px){
+    .focus-edit-topbar { left:14px; right:14px; max-width:none; transform:none; }
+    .focus-edit-panel { top:72px; right:12px; width:min(350px,calc(100vw - 24px)); max-height:calc(100vh - 84px); }
+}
