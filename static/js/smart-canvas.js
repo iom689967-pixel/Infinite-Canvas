@@ -13902,6 +13902,9 @@ function renderInputThumbsRow(node){
     syncJimengModelPillForRefs();
     syncJimengVideoModelPillForRefs();
     const dedup = node ? visibleReferenceImagesFor(node) : [];
+    const mentionCandidates = node ? inputMentionCandidateImages(node) : [];
+    const mentionCandidatesByKey = new Map(mentionCandidates.map(img => [inputRefKey(img), img]));
+    const mentionCandidatesByUrl = new Map(mentionCandidates.map(img => [img.url, img]));
     const manualRefKeys = new Set(manualReferenceImagesFor(node).map(img => inputRefKey(img)));
     const canvasRefKeys = new Set(smartCanvasReferenceImagesFor(node).filter(img => img?.url).map(img => inputRefKey(img)));
     const addActive = mentionInsertMode === 'manual-ref';
@@ -13919,6 +13922,7 @@ function renderInputThumbsRow(node){
     const thumbsSignature = JSON.stringify({
         node: node?.id || '',
         items: dedup.map(img => `${inputRefKey(img)}@${img.url || ''}`),
+        mentions: [...mentionCandidatesByKey.keys()],
         manual: [...manualRefKeys],
         canvas: [...canvasRefKeys],
         add: addActive,
@@ -13937,7 +13941,7 @@ function renderInputThumbsRow(node){
     </div>`;
     if(!dedup.length){
         inputThumbsRow.innerHTML = sourceTabs;
-        bindInputThumbReferenceActions();
+        bindInputThumbReferenceActions(mentionCandidatesByKey);
         refreshIcons();
         return;
     }
@@ -13958,22 +13962,28 @@ function renderInputThumbsRow(node){
         const label = kind === 'audio' ? `音频${count}` : kind === 'video' ? `视频${count}` : `图${count}`;
         const sourceUrl = img.originalLocalUrl || img.url || '';
         const key = inputRefKey(img);
+        // 手动添加的资产可能只保存 URL，而同一张图在现有 @ 候选中带 nodeId/imageIndex。
+        // 先复用稳定 key；key 因归一化不同才按同一 URL 对齐，绝不依赖 DOM 顺序重算编号。
+        const mentionCandidate = mentionCandidatesByKey.get(key) || mentionCandidatesByUrl.get(img.url);
         const removable = manualRefKeys.has(key);
         const canvasRef = canvasRefKeys.has(key);
+        const mentionBtn = mentionCandidate && kind === 'image'
+            ? `<button class="input-thumb-mention" type="button" draggable="false" data-input-insert-mention="${escapeAttr(inputRefKey(mentionCandidate))}" title="在 Prompt 当前光标处引用${escapeAttr(img.name || label)}" aria-label="在 Prompt 当前光标处引用${escapeAttr(img.name || label)}">@</button>`
+            : '';
         const removeBtn = removable
             ? `<button class="input-thumb-remove" type="button" data-input-remove-reference="${escapeHtml(inputRefKey(img))}" title="删除参考图" aria-label="删除参考图">×</button>`
             : canvasRef
                 ? `<button class="input-thumb-remove" type="button" data-input-remove-canvas-reference="${escapeAttr(img.canvasReferenceId || '')}" title="删除画布参考" aria-label="删除画布参考">×</button>`
                 : '';
-        return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''} ${canvasRef ? 'input-canvas-reference' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${canvasRef ? '画布参考' : title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${canvasRef ? '<span class="canvas-reference-source-badge">画布</span>' : ''}${removeBtn}</div>`;
+        return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''} ${canvasRef ? 'input-canvas-reference' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${canvasRef ? '画布参考' : title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${canvasRef ? '<span class="canvas-reference-source-badge">画布</span>' : ''}${mentionBtn}${removeBtn}</div>`;
     }).join('');
     inputThumbsRow.innerHTML = `${sourceTabs}<div class="input-thumb-content"><div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div></div>`;
     bindSmartPreviewImageFallbacks(inputThumbsRow);
     bindInputThumbsDrag(node, dedup, manualRefKeys, canvasRefKeys);
-    bindInputThumbReferenceActions();
+    bindInputThumbReferenceActions(mentionCandidatesByKey);
     refreshIcons();
 }
-function bindInputThumbReferenceActions(){
+function bindInputThumbReferenceActions(mentionCandidatesByKey=new Map()){
     inputThumbsRow?.querySelectorAll('[data-input-reference-source]').forEach(btn => {
         btn.addEventListener('click', event => {
             event.preventDefault();
@@ -14001,6 +14011,22 @@ function bindInputThumbReferenceActions(){
             event.stopPropagation();
             const node = selectedNode();
             if(node) removeSmartCanvasReference(node, btn.dataset.inputRemoveCanvasReference || '');
+        });
+    });
+    inputThumbsRow?.querySelectorAll('[data-input-insert-mention]').forEach(btn => {
+        const preservePromptRange = event => {
+            saveMentionRange();
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        btn.addEventListener('pointerdown', preservePromptRange);
+        btn.addEventListener('mousedown', preservePromptRange);
+        btn.addEventListener('dragstart', preservePromptRange);
+        btn.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const img = mentionCandidatesByKey.get(btn.dataset.inputInsertMention || '');
+            if(img) insertMentionToken(img);
         });
     });
 }
@@ -15869,9 +15895,17 @@ function insertMentionToken(img){
     if(!img?.url) return;
     promptInput.focus();
     const sel = window.getSelection();
-    if(mentionRange){
+    const savedContainer = mentionRange?.commonAncestorContainer;
+    const hasSavedPromptRange = Boolean(savedContainer && (savedContainer === promptInput || promptInput.contains(savedContainer)));
+    if(hasSavedPromptRange){
         sel.removeAllRanges();
         sel.addRange(mentionRange);
+    } else {
+        const endRange = document.createRange();
+        endRange.selectNodeContents(promptInput);
+        endRange.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(endRange);
     }
     const range = sel.rangeCount ? sel.getRangeAt(0) : document.createRange();
     let removedAt = false;
@@ -15911,6 +15945,7 @@ function insertMentionToken(img){
     range.collapse(true);
     sel.removeAllRanges();
     sel.addRange(range);
+    mentionRange = range.cloneRange();
     closeMentionPicker();
     promptInput.focus();
     renderInputThumbsRow(selectedNode());
