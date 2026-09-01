@@ -76,8 +76,9 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audits[0]["cache_status"], "miss")
         self.assertTrue(urls[0].startswith("https://kie.test/"))
         payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(len(payload["entries"]), 1)
+        self.assertEqual(len(payload["sources"]), 1)
         digest, entry = next(iter(payload["entries"].items()))
         normalized, _ = uploads.normalize_image_bytes(
             self.paths[reference["url"]].read_bytes(),
@@ -282,19 +283,36 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
 
         lines = output.getvalue().splitlines()
         cache_lines = [line for line in lines if line.startswith("[KieRefCache]")]
+        source_cache_lines = [line for line in lines if line.startswith("[KieRefSourceCache]")]
         self.assertTrue(any("MISS hash=" in line for line in cache_lines))
         self.assertTrue(any("STORE hash=" in line for line in cache_lines))
         self.assertTrue(any("HIT hash=" in line for line in cache_lines))
         self.assertTrue(all("private-filename" not in line for line in cache_lines))
+        self.assertTrue(any("MISS source=" in line for line in source_cache_lines))
+        self.assertTrue(any("STORE source=" in line for line in source_cache_lines))
+        self.assertTrue(any("HIT source=" in line for line in source_cache_lines))
+        self.assertTrue(all("private-filename" not in line for line in source_cache_lines))
         metric_rows = [json.loads(line) for line in lines if '"event": "kie_reference_prepare_metrics"' in line]
         self.assertEqual(len(metric_rows), 2)
         for metrics in metric_rows:
             self.assertIn("total_reference_prepare_ms", metrics)
             self.assertIn("cache_hits", metrics)
             self.assertIn("cache_misses", metrics)
+            self.assertIn("source_cache_hits", metrics)
+            self.assertIn("source_cache_misses", metrics)
+            self.assertIn("normalize_skipped_count", metrics)
             timing = metrics["references"][0]
-            for key in ("normalize_ms", "cache_lookup_ms", "upload_ms", "validate_ms"):
+            for key in (
+                "source_fingerprint_ms",
+                "source_cache_lookup_ms",
+                "source_cache_wait_ms",
+                "normalize_ms",
+                "cache_lookup_ms",
+                "upload_ms",
+                "validate_ms",
+            ):
                 self.assertIn(key, timing)
+        self.assertEqual(metric_rows[1]["normalize_skipped_count"], 1)
 
 
 if __name__ == "__main__":
