@@ -102,6 +102,8 @@ let selectedIds = [];
 // 使用连接语义键保存临时 Edge 选择；不写入 canvas.connections，不参与保存或撤销。
 let selectedConnectionKeys = new Set();
 let selectedImage = {nodeId:'', index:-1};
+let nodeGenerationHistoryPanelNodeId = '';
+let nodeGenerationHistorySelectedId = '';
 let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
@@ -5495,6 +5497,7 @@ function mergeSmartImageLists(localImgs, remoteImgs){
     return out;
 }
 function smartNodeInFlight(node){
+    if(nodeGenerationAttempt(node)?.status === 'running') return true;
     if(smartNodeHasCompletedResult(node)) return false;
     return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
 }
@@ -5573,7 +5576,7 @@ function hideCompletedRunTimers(){
 function clearCompletedNodeBusyStates(){
     let changed = false;
     (nodes || []).forEach(node => {
-        if(!node || !smartNodeHasCompletedResult(node) || !smartNodeInFlight(node)) return;
+        if(!node || nodeGenerationAttempt(node)?.status === 'running' || !smartNodeHasCompletedResult(node) || !smartNodeInFlight(node)) return;
         markSmartNodeComplete(node);
         changed = true;
     });
@@ -5629,6 +5632,60 @@ function completeSmartNodeWithImages(node, images){
     if(smartNodeHasDisplayResult(copy)) markSmartNodeComplete(copy);
     return copy;
 }
+function mergeNodeGenerationHistory(localHistory=[], remoteHistory=[]){
+    const byId = new Map();
+    [...(localHistory || []), ...(remoteHistory || [])].forEach(item => {
+        if(!item?.id) return;
+        const previous = byId.get(item.id);
+        if(!previous){
+            byId.set(item.id, JSON.parse(JSON.stringify(item)));
+            return;
+        }
+        const previousUpdated = Number(previous.updatedAt || previous.completedAt || previous.createdAt || 0);
+        const itemUpdated = Number(item.updatedAt || item.completedAt || item.createdAt || 0);
+        const newer = itemUpdated >= previousUpdated ? item : previous;
+        const older = newer === item ? previous : item;
+        const merged = {...older, ...newer};
+        merged.taskIds = Array.from(new Set([...(older.taskIds || []), ...(newer.taskIds || [])].filter(Boolean)));
+        merged.outputs = cleanHistoryImages([...(older.outputs || []), ...(newer.outputs || [])]);
+        byId.set(item.id, merged);
+    });
+    return Array.from(byId.values()).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+function mergeNodeGenerationState(base, local, remote){
+    const history = mergeNodeGenerationHistory(local?.generationHistory, remote?.generationHistory);
+    if(!history.length) return base;
+    const localChanged = Number(local?.currentGenerationChangedAt || 0);
+    const remoteChanged = Number(remote?.currentGenerationChangedAt || 0);
+    const pointerSource = remoteChanged >= localChanged ? remote : local;
+    let currentGenerationId = pointerSource?.currentGenerationId || base?.currentGenerationId || '';
+    if(!history.some(item => item.id === currentGenerationId && item.status === 'success')){
+        const latestSuccess = history.filter(item => item.status === 'success' && (item.outputs || []).some(output => output?.url)).at(-1);
+        currentGenerationId = latestSuccess?.id || '';
+    }
+    const result = {
+        ...base,
+        generationHistory:history,
+        currentGenerationChangedAt:Math.max(localChanged, remoteChanged)
+    };
+    if(currentGenerationId) result.currentGenerationId = currentGenerationId;
+    else delete result.currentGenerationId;
+    const current = history.find(item => item.id === currentGenerationId && item.status === 'success');
+    if(current?.outputs?.length){
+        result.images = normalizeNodeGenerationOutputs(current.outputs, current.outputKind || 'image');
+        result.outputKind = current.outputKind || result.outputKind || 'image';
+    }
+    const localActive = nodeGenerationAttempt(local);
+    const remoteActive = nodeGenerationAttempt(remote);
+    const active = localActive?.status === 'running' && smartNodeInFlight(local)
+        ? localActive
+        : remoteActive?.status === 'running' && smartNodeInFlight(remote)
+            ? remoteActive
+            : null;
+    if(active) result.activeGenerationId = active.id;
+    else delete result.activeGenerationId;
+    return result;
+}
 function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
     // 只在“当前选中节点自己”忙时禁用运行：节点正在生成/排队，或它本身是正在跑的循环。
@@ -5641,22 +5698,28 @@ function mergeSmartNode(local, remote){
     const remoteDone = smartNodeHasCompletedResult(remote);
     const localBusy = smartNodeInFlight(local);
     const remoteBusy = smartNodeInFlight(remote);
-    if(localDone && remoteBusy && !remoteDone) return completeSmartNodeWithImages(local, images);
-    if(remoteDone && localBusy && !localDone) return completeSmartNodeWithImages(remote, images);
-    if(localDone && remoteDone){
+    const localGenerationBusy = nodeGenerationAttempt(local)?.status === 'running' && localBusy;
+    const remoteGenerationBusy = nodeGenerationAttempt(remote)?.status === 'running' && remoteBusy;
+    let merged = localGenerationBusy ? {...local, images:local.images || []} : remoteGenerationBusy ? {...remote, images:remote.images || []} : null;
+    if(!merged && localDone && remoteBusy && !remoteDone) merged = completeSmartNodeWithImages(local, images);
+    else if(!merged && remoteDone && localBusy && !localDone) merged = completeSmartNodeWithImages(remote, images);
+    if(!merged && localDone && remoteDone){
         const localFinished = Number(local.runFinishedAt || 0);
         const remoteFinished = Number(remote.runFinishedAt || 0);
-        return completeSmartNodeWithImages(remoteFinished >= localFinished ? remote : local, images);
+        merged = completeSmartNodeWithImages(remoteFinished >= localFinished ? remote : local, images);
     }
     // 本地正在生成/排队的节点完全以本地为准，只把对方可能多出来的图并进来，绝不被对方旧状态冲掉
-    if(smartNodeInFlight(local)){
-        return {...local, images};
+    if(!merged && smartNodeInFlight(local)){
+        merged = {...local, images};
     }
     // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
-    const merged = {...remote, images};
-    return smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)
-        ? completeSmartNodeWithImages(merged, images)
-        : merged;
+    if(!merged){
+        merged = {...remote, images};
+        if(smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)){
+            merged = completeSmartNodeWithImages(merged, images);
+        }
+    }
+    return mergeNodeGenerationState(merged, local, remote);
 }
 function mergeSmartNodeLists(localNodes, remoteNodes){
     const localById = new Map((localNodes || []).map(n => [n.id, n]));
@@ -6296,13 +6359,18 @@ async function loadCanvas(){
             if(pendingTasks.length){
                 n.pending = Math.max(pendingTasks.length, Number(n.pending || 0) || pendingTasks.length);
                 n.running = false;
+            } else if(n.jimengPending?.submitId){
+                n.pending = 0;
+                n.running = false;
             } else if(smartNodeHasDisplayResult(n)){
-                markSmartNodeComplete(n, {hideTimer:true});
+                if(nodeGenerationAttempt(n)?.status === 'running') clearSmartNodeBusyState(n);
+                else markSmartNodeComplete(n, {hideTimer:true});
             } else if(n.pending || n.queued){
                 clearSmartNodeBusyState(n);
             }
         });
         const cleanedCompletedState = clearCompletedNodeBusyStates();
+        const reconciledGenerationHistory = nodes.map(reconcileNodeGenerationHistory).some(Boolean);
         const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
         const hiddenCompletedTimers = hideCompletedRunTimers();
         const cleanedDetachedInputs = cleanupDetachedRunInputRefs();
@@ -6320,7 +6388,7 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
-        if(cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
+        if(cleanedDetachedInputs || cleanedCompletedState || reconciledGenerationHistory || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
@@ -8783,14 +8851,16 @@ function smartNodeToolbarImageIndex(node){
 function smartNodeToolbarHtml(node){
     const isImageNode = isSmartImageNode(node);
     const images = node?.images || [];
-    if(!isImageNode || !images.some(img => img?.url)) return '';
+    const historyCount = nodeGenerationHistoryItems(node).length || (nodeGenerationHistoryCapable(node) ? 1 : 0);
+    if(!isImageNode || (!images.some(img => img?.url) && !historyCount)) return '';
     const item = imageForDisplay(images[smartNodeToolbarImageIndex(node)] || images.find(img => img?.url));
-    if(!item?.url) return '';
-    const kind = mediaKindForItem(item);
+    const kind = item?.url ? mediaKindForItem(item) : '';
     const canEditImage = kind === 'image';
     const imageCount = images.filter(img => mediaKindForItem(imageForDisplay(img)) === 'image' && imageForDisplay(img)?.url).length;
     const gridLabel = imageCount > 1 ? '宫格拼接' : '宫格切分';
     const actions = [
+        ...(historyCount ? [{key:'history', icon:'history', label:`生成历史 ${historyCount}`, enabled:true}] : []),
+        ...(item?.url ? [
         {key:'preview', icon:'eye', label:'预览', enabled:kind === 'image' || kind === 'video'},
         {key:'crop', icon:'crop', label:'裁剪', enabled:canEditImage},
         {key:'outpaint', icon:'expand', label:'扩图', enabled:canEditImage},
@@ -8799,6 +8869,7 @@ function smartNodeToolbarHtml(node){
         {key:'grid', icon:'grid-3x3', label:gridLabel, enabled:canEditImage},
         ...(jimengImageProviderId() ? [{key:'upscale', icon:'maximize-2', label:tr('smart.jimengUpscaleAction'), enabled:canEditImage}] : []),
         {key:'download', icon:'download', label:'下载', enabled:true}
+        ] : [])
     ];
     return `<div class="smart-node-floating-menu" data-smart-node-menu="1">${actions.map(action => `
         <button type="button" data-smart-node-action="${escapeAttr(action.key)}" data-node-id="${escapeAttr(node.id)}" ${action.enabled ? '' : 'disabled'} title="${escapeAttr(action.label)}">
@@ -8823,6 +8894,12 @@ function duplicateSmartNodeMediaToCanvas(node, imageIndex){
 function runSmartNodeToolbarAction(nodeId, action){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
+    if(action === 'history'){
+        selectedId = nodeId;
+        selectedIds = [];
+        openNodeGenerationHistory(nodeId);
+        return;
+    }
     const index = smartNodeToolbarImageIndex(node);
     const item = imageForDisplay(node.images?.[index]);
     if(!item?.url) return;
@@ -8856,6 +8933,146 @@ function runSmartNodeToolbarAction(nodeId, action){
     if(action === 'grid' && canGridJoinCurrentNode()){
         setGridOperationMode('join');
     }
+}
+function nodeGenerationHistoryStatusLabel(status){
+    return status === 'success' ? '成功' : status === 'running' ? '生成中' : status === 'cancelled' ? '已取消' : '失败';
+}
+function nodeGenerationHistoryTypeLabel(type){
+    return type === 'image-to-image' ? '图生图' : type === 'text-to-image' ? '文生图' : (type || '未记录');
+}
+function nodeGenerationHistoryTime(value){
+    const timestamp = Number(value || 0);
+    if(!timestamp) return '未记录';
+    try { return new Date(timestamp).toLocaleString('zh-CN', {hour12:false}); }
+    catch(e) { return new Date(timestamp).toISOString(); }
+}
+function ensureNodeGenerationHistoryPanel(){
+    let backdrop = document.getElementById('nodeGenerationHistoryBackdrop');
+    if(backdrop) return backdrop;
+    backdrop = document.createElement('div');
+    backdrop.id = 'nodeGenerationHistoryBackdrop';
+    backdrop.className = 'node-generation-history-backdrop';
+    backdrop.innerHTML = '<section class="node-generation-history-panel" role="dialog" aria-modal="true" aria-label="节点生成历史"><div id="nodeGenerationHistoryContent"></div></section>';
+    backdrop.addEventListener('click', event => {
+        if(event.target === backdrop || event.target.closest('[data-generation-history-close]')){
+            event.preventDefault();
+            closeNodeGenerationHistory();
+            return;
+        }
+        const pick = event.target.closest('[data-generation-history-id]');
+        if(pick){
+            nodeGenerationHistorySelectedId = pick.dataset.generationHistoryId || '';
+            renderNodeGenerationHistoryPanel();
+            return;
+        }
+        const adopt = event.target.closest('[data-generation-history-adopt]');
+        if(adopt){
+            event.preventDefault();
+            adoptNodeGenerationHistory(adopt.dataset.nodeId || '', adopt.dataset.generationHistoryAdopt || '');
+        }
+    });
+    document.body.appendChild(backdrop);
+    return backdrop;
+}
+function nodeGenerationHistoryPreviewHtml(attempt){
+    const outputs = (attempt?.outputs || []).filter(output => output?.url);
+    if(!outputs.length){
+        return `<div class="node-generation-history-empty"><i data-lucide="${attempt?.status === 'running' ? 'loader-2' : attempt?.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i><strong>${escapeHtml(nodeGenerationHistoryStatusLabel(attempt?.status))}</strong><span>${escapeHtml(attempt?.error || '本次生成没有可预览结果')}</span></div>`;
+    }
+    return `<div class="node-generation-history-preview-grid ${outputs.length > 1 ? 'is-multi' : ''}">${outputs.map(output => `<div class="node-generation-history-preview-item">${smartPreviewImgHtml(output.url, 1280)}</div>`).join('')}</div>`;
+}
+function nodeGenerationHistoryReferenceHtml(reference, index){
+    const kind = reference.kind || mediaKindForItem(reference);
+    const media = kind === 'image' ? smartPreviewImgHtml(reference.url, 192) : `<i data-lucide="${kind === 'video' ? 'video' : kind === 'audio' ? 'audio-lines' : 'file'}"></i>`;
+    return `<div class="node-generation-history-ref">${media}<span>${escapeHtml(reference.name || `素材 ${index + 1}`)}</span></div>`;
+}
+function renderNodeGenerationHistoryPanel(){
+    const backdrop = document.getElementById('nodeGenerationHistoryBackdrop');
+    const content = document.getElementById('nodeGenerationHistoryContent');
+    if(!backdrop?.classList.contains('open') || !content) return;
+    const node = nodes.find(item => item.id === nodeGenerationHistoryPanelNodeId);
+    if(!node){ closeNodeGenerationHistory(); return; }
+    const history = nodeGenerationHistoryItems(node).slice().sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    if(!history.length){ closeNodeGenerationHistory(); return; }
+    let selected = history.find(item => item.id === nodeGenerationHistorySelectedId);
+    if(!selected) selected = history.find(item => item.id === node.currentGenerationId) || history[0];
+    nodeGenerationHistorySelectedId = selected.id;
+    const current = selected.id === node.currentGenerationId;
+    const taskIds = Array.from(new Set([selected.taskId, ...(selected.taskIds || [])].filter(Boolean)));
+    const refs = selected.references || [];
+    const details = [
+        ['状态', nodeGenerationHistoryStatusLabel(selected.status)],
+        ['任务 ID', taskIds.join(' / ') || '未记录'],
+        ['Provider', selected.providerId || '未记录'],
+        ['模型', selected.model || '未记录'],
+        ['比例', selected.ratio || '未记录'],
+        ['分辨率', selected.resolution || '未记录'],
+        ['类型', nodeGenerationHistoryTypeLabel(selected.generationType)],
+        ['开始时间', nodeGenerationHistoryTime(selected.createdAt)],
+        ['完成时间', nodeGenerationHistoryTime(selected.completedAt)]
+    ];
+    content.innerHTML = `<header class="node-generation-history-head">
+        <div><h2>节点生成历史</h2><p>${escapeHtml(node.title || '图片节点')} · 共 ${history.length} 次</p></div>
+        <button type="button" data-generation-history-close title="关闭"><i data-lucide="x"></i></button>
+    </header>
+    <div class="node-generation-history-layout">
+        <aside class="node-generation-history-list">${history.map((item, index) => {
+            const preview = (item.outputs || []).find(output => output?.url);
+            const adopted = item.id === node.currentGenerationId;
+            return `<button type="button" class="node-generation-history-card ${item.id === selected.id ? 'selected' : ''} ${adopted ? 'adopted' : ''}" data-generation-history-id="${escapeAttr(item.id)}">
+                <span class="node-generation-history-thumb">${preview ? smartPreviewImgHtml(preview.url, 240) : `<i data-lucide="${item.status === 'running' ? 'loader-2' : item.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i>`}</span>
+                <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
+                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml(nodeGenerationHistoryStatusLabel(item.status))}</span>
+            </button>`;
+        }).join('')}</aside>
+        <main class="node-generation-history-main">
+            <div class="node-generation-history-preview">${nodeGenerationHistoryPreviewHtml(selected)}</div>
+            <div class="node-generation-history-adopt-row">
+                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml(nodeGenerationHistoryStatusLabel(selected.status))}</span>
+                <button type="button" class="node-generation-history-adopt" data-node-id="${escapeAttr(node.id)}" data-generation-history-adopt="${escapeAttr(selected.id)}" ${selected.status === 'success' && !current ? '' : 'disabled'}>${current ? '当前版本' : '采纳到当前节点'}</button>
+            </div>
+            <dl class="node-generation-history-details">${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
+            <section class="node-generation-history-section"><h3>当次提示词</h3><pre>${escapeHtml(selected.displayPrompt || selected.prompt || '未记录')}</pre></section>
+            <section class="node-generation-history-section"><h3>参考素材 ${refs.length ? `(${refs.length})` : ''}</h3><div class="node-generation-history-refs">${refs.length ? refs.map(nodeGenerationHistoryReferenceHtml).join('') : '<span class="node-generation-history-missing">未记录</span>'}</div></section>
+            ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.error)}</pre></section>` : ''}
+        </main>
+    </div>`;
+    bindSmartPreviewImageFallbacks(content);
+    if(window.lucide) lucide.createIcons();
+}
+function openNodeGenerationHistory(nodeId){
+    const node = nodes.find(item => item.id === nodeId);
+    if(!node) return;
+    ensureLegacyNodeGenerationHistory(node, {save:true});
+    const history = nodeGenerationHistoryItems(node);
+    if(!history.length){ toast('这个节点还没有生成历史'); return; }
+    nodeGenerationHistoryPanelNodeId = nodeId;
+    nodeGenerationHistorySelectedId = node.currentGenerationId || history.at(-1)?.id || '';
+    const backdrop = ensureNodeGenerationHistoryPanel();
+    backdrop.classList.add('open');
+    renderNodeGenerationHistoryPanel();
+}
+function closeNodeGenerationHistory(){
+    document.getElementById('nodeGenerationHistoryBackdrop')?.classList.remove('open');
+    nodeGenerationHistoryPanelNodeId = '';
+    nodeGenerationHistorySelectedId = '';
+}
+function adoptNodeGenerationHistory(nodeId, generationId){
+    const node = nodes.find(item => item.id === nodeId);
+    const attempt = nodeGenerationAttempt(node, generationId);
+    if(!node || !attempt || attempt.status !== 'success' || !(attempt.outputs || []).some(output => output?.url)) return;
+    if(node.currentGenerationId === generationId) return;
+    pushUndo();
+    const layout = nodeGenerationLayoutSnapshot(node);
+    if(!applyNodeGenerationAttempt(node, attempt, {layout})) return;
+    render();
+    scheduleSave();
+    toast('已采纳到当前节点');
+}
+function nodeGenerationRunningOverlayHtml(node){
+    const attempt = nodeGenerationAttempt(node);
+    if(!attempt || attempt.status !== 'running' || !(node.images || []).some(image => image?.url)) return '';
+    return '<div class="node-generation-running-overlay"><i data-lucide="loader-2"></i><strong>生成中</strong><span>当前采用版本仍可供下游使用</span></div>';
 }
 async function runJimengUpscale(node, index){
     node = liveSmartNode(node) || node;
@@ -9039,16 +9256,18 @@ function render(){
         const isHistory = isHistoryGroupNode(node);
         const isGroup = isImageNode && imgs.length > 1;
         const isPending = ((node.pending || isQueued || isJimengPending) && imgs.length === 0);
+        const hasActiveGeneration = nodeGenerationAttempt(node)?.status === 'running';
         const body = nodeBodyHtml(node, layout);
         const deleteBtn = (isGroup || isMinimax) ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isText ? '双击编辑文本' : isGeneration ? '选择节点后编辑生成参数' : isSmartGroup ? '双击添加 · 拖入归组 · 选中后生成' : isMinimax ? 'Timeline editing' : isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
-        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
+        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''} ${hasActiveGeneration ? 'node-generation-running' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
 
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
             ${!isEmpty && !isGroup && !isMinimax ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
             ${smartNodeToolbarHtml(node)}${smartGroupToolbarHtml(node)}
             ${runTimePillHtml(node)}
             <div class="node-body">${body}</div>
+            ${nodeGenerationRunningOverlayHtml(node)}
             ${isCompactMember && (isPrompt || isLoop) ? '<div class="smart-group-member-grab" title="拖动移出分组"></div>' : ''}
             <div class="node-hint">${hint}</div>
             ${imgs.length || node.pending || isQueued || isJimengPending || isPrompt || isText || isGeneration || isLoop || isMinimax || isSmartGroup ? '<div class="node-resize-handle" data-resize="1"></div>' : ''}
@@ -9095,6 +9314,7 @@ function render(){
     syncSmartSelectedImageResolution(world);
     measureSmartNodeImages();
     refreshRunTimerPills();
+    renderNodeGenerationHistoryPanel();
     if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
     return;
     world.innerHTML = '';
@@ -14938,6 +15158,268 @@ function attachRunMeta(targetNode, meta){
     }
     targetNode.images = (targetNode.images || []).map(img => stripImageGenerationMeta(img));
 }
+function nodeGenerationHistoryItems(node){
+    return Array.isArray(node?.generationHistory) ? node.generationHistory : [];
+}
+function nodeGenerationReferenceSnapshot(refs=[]){
+    return (refs || []).filter(ref => ref?.url).map((ref, index) => ({
+        url:ref.url || '',
+        name:ref.name || `图${index + 1}`,
+        kind:ref.kind || mediaKindForItem(ref),
+        nodeId:ref.nodeId || '',
+        imageIndex:ref.imageIndex ?? '',
+        role:ref.role || '',
+        asset_uris:ref.asset_uris && typeof ref.asset_uris === 'object' ? {...ref.asset_uris} : {}
+    }));
+}
+function nodeGenerationSettingsMeta(runSettings={}){
+    const snapshot = settingsForStorage(runSettings || {});
+    const engine = String(snapshot.engine || '');
+    const providerId = snapshot.provider_id || snapshot.videoProvider || (engine === 'runninghub' ? 'runninghub' : engine === 'modelscope' ? 'modelscope' : engine === 'comfy' ? 'comfyui' : '');
+    const model = snapshot.model || snapshot.videoModel || snapshot.rhConfigKey || snapshot.msCustomModel || snapshot.msgenModel || snapshot.comfyWorkflow || '';
+    return {
+        settings:snapshot,
+        providerId,
+        model,
+        ratio:snapshot.aspectRatio || snapshot.ratio || snapshot.videoAspect || snapshot.msRatio || '',
+        resolution:snapshot.resolution || snapshot.videoResolution || snapshot.msResolution || ''
+    };
+}
+function normalizeNodeGenerationOutputs(outputs=[], kind='image'){
+    const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
+    return cleanHistoryImages((resultMediaUrls(outputs) || []).map((item, index) => {
+        const url = typeof item === 'string' ? item : item?.url || item?.path || item?.src || item?.uri || '';
+        const itemKind = (typeof item === 'object' && (item.kind || item.type || item.mediaKind)) || kind;
+        const normalized = copyMediaSizeFields(item, {
+            url,
+            name:(typeof item === 'object' && (item.name || item.filename)) || `output-${index + 1}.${ext}`,
+            kind:itemKind,
+            generatedResult:true
+        });
+        return mediaItemForStorage(stripImageGenerationMeta(normalized));
+    }).filter(item => item?.url));
+}
+function nodeGenerationLayoutSnapshot(node){
+    if(!node) return null;
+    const rect = nodeRect(node);
+    return {
+        width:Math.max(1, Number(rect.width) || 1),
+        height:Math.max(1, Number(rect.height) || 1),
+        scale:Number.isFinite(Number(node.scale)) ? Number(node.scale) : undefined
+    };
+}
+function nodeGenerationHistoryCapable(node){
+    if(!isSmartImageNode(node) || isHistoryGroupNode(node)) return false;
+    if(nodeGenerationHistoryItems(node).length) return true;
+    const images = (node.images || []).filter(image => image?.url);
+    if(!images.length) return false;
+    return node.type === 'smart-image-generation'
+        || images.some(image => image.generatedResult)
+        || Boolean(node.runAt || node.runPrompt || node.runModelPrompt || node.runSettings || node.sourceNodeId);
+}
+function legacyNodeGenerationHistoryItem(node){
+    if(!nodeGenerationHistoryCapable(node) || nodeGenerationHistoryItems(node).length) return null;
+    const outputs = normalizeNodeGenerationOutputs(node.images || [], node.outputKind || 'image');
+    if(!outputs.length) return null;
+    const runSettings = node.runSettings && typeof node.runSettings === 'object' ? cloneSmartSettings(node.runSettings) : {};
+    const settingMeta = nodeGenerationSettingsMeta(runSettings);
+    const references = nodeGenerationReferenceSnapshot(node.runInputRefs || node.runPromptRefs || []);
+    const createdAt = Number(node.runAt || node.runStartedAt || node.created_at || 0) || nowMs();
+    const completedAt = Number(node.runFinishedAt || node.runAt || node.created_at || 0) || createdAt;
+    return {
+        id:uid('generation'),
+        createdAt,
+        completedAt,
+        updatedAt:nowMs(),
+        status:'success',
+        taskId:'',
+        taskIds:[],
+        providerId:settingMeta.providerId,
+        model:settingMeta.model,
+        ratio:settingMeta.ratio,
+        resolution:settingMeta.resolution,
+        generationType:references.some(ref => (ref.kind || 'image') === 'image') ? 'image-to-image' : 'text-to-image',
+        prompt:node.runModelPrompt || node.runPrompt || '',
+        displayPrompt:node.runPrompt || node.runModelPrompt || '',
+        promptHtml:node.promptDraftHtml || '',
+        references,
+        settings:settingMeta.settings,
+        outputKind:node.outputKind || mediaKindForUrls(outputs, 'image'),
+        outputs,
+        error:'',
+        legacy:true
+    };
+}
+function ensureLegacyNodeGenerationHistory(node, {save=false}={}){
+    const legacy = legacyNodeGenerationHistoryItem(node);
+    if(!legacy) return nodeGenerationHistoryItems(node)[0] || null;
+    node.generationHistory = [legacy];
+    node.currentGenerationId = legacy.id;
+    node.currentGenerationChangedAt = nowMs();
+    if(save) scheduleSave();
+    return legacy;
+}
+function createNodeGenerationAttempt(node, meta, runSettings, kind='image'){
+    if(!node || kind !== 'image') return null;
+    const references = nodeGenerationReferenceSnapshot(meta?.inputRefs || meta?.promptRefs || []);
+    const settingMeta = nodeGenerationSettingsMeta(runSettings || meta?.settings || {});
+    const attempt = {
+        id:uid('generation'),
+        createdAt:nowMs(),
+        completedAt:0,
+        updatedAt:nowMs(),
+        status:'running',
+        taskId:'',
+        taskIds:[],
+        providerId:settingMeta.providerId,
+        model:settingMeta.model,
+        ratio:settingMeta.ratio,
+        resolution:settingMeta.resolution,
+        generationType:references.some(ref => (ref.kind || 'image') === 'image') ? 'image-to-image' : 'text-to-image',
+        prompt:meta?.prompt || '',
+        displayPrompt:meta?.displayPrompt || meta?.promptText || meta?.prompt || '',
+        promptHtml:meta?.promptHtml || '',
+        references,
+        settings:settingMeta.settings,
+        sourceNodeId:meta?.sourceNodeId || '',
+        outputKind:kind,
+        outputs:[],
+        error:'',
+        layout:nodeGenerationLayoutSnapshot(node)
+    };
+    node.generationHistory = [...nodeGenerationHistoryItems(node), attempt];
+    node.activeGenerationId = attempt.id;
+    return attempt;
+}
+function nodeGenerationAttempt(node, generationId=''){
+    const id = generationId || node?.activeGenerationId || '';
+    return nodeGenerationHistoryItems(node).find(item => item?.id === id) || null;
+}
+function nodeGenerationAttemptForTask(node, taskId){
+    const task = smartPendingTasks(node).find(item => item.taskId === taskId);
+    if(task?.generationId) return nodeGenerationAttempt(node, task.generationId);
+    return nodeGenerationHistoryItems(node).find(item => (item.taskIds || []).includes(taskId)) || nodeGenerationAttempt(node);
+}
+function bindNodeGenerationAttemptTasks(node, taskIds=[], details={}){
+    const attempt = nodeGenerationAttempt(node);
+    if(!attempt || attempt.status !== 'running') return null;
+    const ids = Array.from(new Set((taskIds || []).filter(Boolean)));
+    attempt.taskIds = ids;
+    attempt.taskId = ids[0] || attempt.taskId || '';
+    if(details.providerId) attempt.providerId = details.providerId;
+    if(details.model) attempt.model = details.model;
+    attempt.updatedAt = nowMs();
+    return attempt;
+}
+function nodeGenerationMetaFromAttempt(attempt){
+    return {
+        prompt:attempt?.prompt || '',
+        displayPrompt:attempt?.displayPrompt || attempt?.prompt || '',
+        promptHtml:attempt?.promptHtml || '',
+        promptText:attempt?.displayPrompt || attempt?.prompt || '',
+        promptRefs:nodeGenerationReferenceSnapshot(attempt?.references || []),
+        inputRefs:nodeGenerationReferenceSnapshot(attempt?.references || []),
+        sourceNodeId:attempt?.sourceNodeId || '',
+        settings:cloneSmartSettings(attempt?.settings || {}),
+        createdAt:Number(attempt?.createdAt || 0) || nowMs()
+    };
+}
+function applyNodeGenerationAttempt(node, attempt, {layout=null}={}){
+    if(!node || !attempt || attempt.status !== 'success') return false;
+    const outputs = normalizeNodeGenerationOutputs(attempt.outputs || [], attempt.outputKind || 'image');
+    if(!outputs.length) return false;
+    const stableLayout = layout || nodeGenerationLayoutSnapshot(node) || attempt.layout;
+    node.images = outputs;
+    node.outputKind = attempt.outputKind || mediaKindForUrls(outputs, 'image');
+    node.title = cascadeOutputTitle(node.outputKind, outputs.length);
+    node.currentGenerationId = attempt.id;
+    node.currentGenerationChangedAt = nowMs();
+    attachRunMeta(node, nodeGenerationMetaFromAttempt(attempt));
+    node.runStartedAt = Number(attempt.createdAt || 0) || nowMs();
+    node.runFinishedAt = Number(attempt.completedAt || 0) || node.runStartedAt;
+    node.runElapsedMs = Math.max(0, node.runFinishedAt - node.runStartedAt);
+    node.runTimerHidden = false;
+    if(stableLayout){
+        node.w = stableLayout.width;
+        node.h = stableLayout.height;
+        if(Number.isFinite(Number(stableLayout.scale))) node.scale = Number(stableLayout.scale);
+    }
+    selectedImage = {nodeId:'', index:-1};
+    return true;
+}
+function completeNodeGenerationAttempt(node, outputs, options={}){
+    const attempt = nodeGenerationAttempt(node, options.generationId || '');
+    if(!attempt || attempt.status !== 'running') return false;
+    const additions = normalizeNodeGenerationOutputs(outputs, options.kind || attempt.outputKind || 'image');
+    const merged = cleanHistoryImages([...(attempt.outputs || []), ...additions]);
+    if(!merged.length) return false;
+    attempt.outputs = merged;
+    attempt.outputKind = options.kind || attempt.outputKind || mediaKindForUrls(merged, 'image');
+    attempt.status = 'success';
+    attempt.completedAt = nowMs();
+    attempt.updatedAt = attempt.completedAt;
+    attempt.error = '';
+    markSmartNodeComplete(node, {createdAt:attempt.createdAt});
+    if(node.activeGenerationId === attempt.id) delete node.activeGenerationId;
+    return applyNodeGenerationAttempt(node, attempt, {layout:attempt.layout});
+}
+function finishNodeGenerationAttempt(node, status, error='', generationId=''){
+    const attempt = nodeGenerationAttempt(node, generationId);
+    if(!attempt || attempt.status !== 'running') return false;
+    attempt.status = status === 'cancelled' ? 'cancelled' : 'failed';
+    attempt.completedAt = nowMs();
+    attempt.updatedAt = attempt.completedAt;
+    attempt.error = String(error || '').slice(0, 1200);
+    if(node.activeGenerationId === attempt.id) delete node.activeGenerationId;
+    node.runFinishedAt = attempt.completedAt;
+    if(!node.runStartedAt) node.runStartedAt = Number(attempt.createdAt || 0) || attempt.completedAt;
+    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
+    node.runTimerHidden = false;
+    return true;
+}
+function reconcileNodeGenerationHistory(node){
+    if(!node || !Array.isArray(node.generationHistory)) return false;
+    let changed = false;
+    node.generationHistory = node.generationHistory.filter(item => item && item.id).map(item => {
+        const status = ['running','success','failed','cancelled'].includes(item.status) ? item.status : (item.outputs || []).some(output => output?.url) ? 'success' : 'failed';
+        if(status !== item.status){ item.status = status; changed = true; }
+        if(!Array.isArray(item.taskIds)){ item.taskIds = item.taskId ? [item.taskId] : []; changed = true; }
+        if(!Array.isArray(item.references)){ item.references = []; changed = true; }
+        if(!Array.isArray(item.outputs)){ item.outputs = []; changed = true; }
+        return item;
+    });
+    if(node.currentGenerationId && !nodeGenerationAttempt(node, node.currentGenerationId)){
+        delete node.currentGenerationId;
+        changed = true;
+    }
+    if(!node.currentGenerationId){
+        const latestSuccess = node.generationHistory.filter(item => item.status === 'success' && (item.outputs || []).some(output => output?.url)).at(-1);
+        if(latestSuccess){
+            node.currentGenerationId = latestSuccess.id;
+            changed = true;
+        }
+    }
+    const current = nodeGenerationAttempt(node, node.currentGenerationId || '');
+    if(current?.status === 'success' && (current.outputs || []).some(output => output?.url)){
+        const adopted = normalizeNodeGenerationOutputs(current.outputs, current.outputKind || 'image');
+        const currentUrls = (node.images || []).map(image => image?.url).filter(Boolean);
+        const adoptedUrls = adopted.map(image => image?.url).filter(Boolean);
+        if(JSON.stringify(currentUrls) !== JSON.stringify(adoptedUrls)){
+            node.images = adopted;
+            node.outputKind = current.outputKind || node.outputKind || 'image';
+            changed = true;
+        }
+    }
+    const active = nodeGenerationAttempt(node);
+    if(active && active.status === 'running' && !smartPendingTasks(node).length && !node.jimengPending && !node.running && !node.pending){
+        finishNodeGenerationAttempt(node, 'cancelled', '页面关闭或任务中断');
+        changed = true;
+    } else if(node.activeGenerationId && (!active || active.status !== 'running')){
+        delete node.activeGenerationId;
+        changed = true;
+    }
+    return changed;
+}
 function stripRunInputMeta(meta){
     if(!meta) return meta;
     const cleanPrompt = meta.promptText || meta.displayPrompt || meta.prompt || '';
@@ -16459,6 +16941,18 @@ function finalizePendingNode(pendingNode, urls, meta, kind='image'){
         const itemKind = (typeof item === 'object' && item.kind) || kind;
         return copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
     }).filter(img => img.url));
+    const generationAttempt = kind === 'image' ? nodeGenerationAttempt(pendingNode) : null;
+    if(generationAttempt?.status === 'running'){
+        completeNodeGenerationAttempt(pendingNode, imgs, {generationId:generationAttempt.id, kind});
+        clearSourceBusyStateIfDownstreamDone(nodes.find(n => n.id === generationAttempt.sourceNodeId));
+        const afterRunSelection = pendingNode._selectAfterRunId || pendingNode.id;
+        if(!selectedId || selectedId === pendingNode.id) selectedId = afterRunSelection;
+        delete pendingNode._runMetaTargetId;
+        delete pendingNode._selectAfterRunId;
+        if(activeComposerSubject?.id && selectedId === activeComposerSubject.id) lastComposerNodeId = `${selectedId}:node`;
+        selectedImage = {nodeId:'', index:-1};
+        return;
+    }
     pendingNode.images = imgs;
     markSmartNodeComplete(pendingNode, meta);
     pendingNode.outputKind = kind;
@@ -17703,7 +18197,15 @@ async function runGeneration(){
     const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope' || settings.engine === 'comfy';
     const nodeHasImages = isSmartGroupNode(node) ? imagesForNode(node).some(img => img?.url) : (node.images || []).some(img => img?.url);
     const workflowModeRun = smartImageUsesWorkflowInput(node, smartLoopContext);
-    const sourceVisualState = isSmartImageNode(node) && nodeHasImages && !workflowModeRun ? {
+    let extracted = null;
+    let branchNode = null;
+    const groupRun = isSmartGroupNode(node);
+    const inPlaceGenerationRun = logKind === 'image'
+        && isSmartImageNode(node)
+        && !groupRun
+        && (node.type === 'smart-image-generation' || nodeGenerationHistoryCapable(node));
+    const shouldCreateBranchOutput = groupRun || (nodeHasImages && !workflowModeRun && !inPlaceGenerationRun);
+    const sourceVisualState = shouldCreateBranchOutput && isSmartImageNode(node) && nodeHasImages ? {
         images:(node.images || []).map(img => ({...img})),
         title:node.title,
         w:node.w,
@@ -17712,10 +18214,8 @@ async function runGeneration(){
         outputKind:node.outputKind
     } : null;
     pushUndo();
-    let extracted = null;
-    let branchNode = null;
-    const groupRun = isSmartGroupNode(node);
-    const shouldCreateBranchOutput = groupRun || (nodeHasImages && !workflowModeRun);
+    if(inPlaceGenerationRun && nodeHasImages) ensureLegacyNodeGenerationHistory(node);
+    const generationAttempt = inPlaceGenerationRun ? createNodeGenerationAttempt(node, meta, settings, 'image') : null;
     const pendingMeta = shouldCreateBranchOutput ? stripRunInputMeta(meta) : meta;
     undoSuppressed = true;
     if(shouldCreateBranchOutput) branchNode = createPendingOutputFromSource(node, expectedCount, pendingMeta, {connectSource:false, selectOutput:true, refs});
@@ -17728,10 +18228,12 @@ async function runGeneration(){
         delete pendingNode.runFinishedAt;
         delete pendingNode.runElapsedMs;
         pendingNode.runTimerHidden = false;
-        const pendingBox = pendingBoxSize(pendingNode.pending, {sourceNode:node, refs});
-        pendingNode.w = pendingBox.w;
-        pendingNode.h = pendingBox.h;
-        attachRunMeta(pendingNode, pendingMeta);
+        if(!generationAttempt){
+            const pendingBox = pendingBoxSize(pendingNode.pending, {sourceNode:node, refs});
+            pendingNode.w = pendingBox.w;
+            pendingNode.h = pendingBox.h;
+            attachRunMeta(pendingNode, pendingMeta);
+        }
     }
     if(apiConcurrentRun){
         coolNodeRunningState(pendingNode, 2000);
@@ -17741,6 +18243,7 @@ async function runGeneration(){
         syncRunButtonState();
     }
     render();
+    scheduleSave();
     try {
         if(settings.engine === 'comfy'){
             await runComfyGeneration(pendingNode, prompt, refs, pendingNode, pendingMeta);
@@ -17761,6 +18264,7 @@ async function runGeneration(){
             return;
         }
         const rhModelMode = settings.engine === 'runninghub' && Boolean(runningHubSelectedModel(settings));
+        const priorRunningHubTaskId = settings.rhTaskId || '';
         const outImages = rhModelMode
             ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings))
             : settings.engine === 'runninghub'
@@ -17768,10 +18272,14 @@ async function runGeneration(){
                 : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
                 : await runApiGeneration(prompt, refs);
+        if(generationAttempt && settings.engine === 'runninghub' && !rhModelMode && settings.rhTaskId && settings.rhTaskId !== priorRunningHubTaskId){
+            bindNodeGenerationAttemptTasks(pendingNode, [settings.rhTaskId], {providerId:'runninghub', model:settings.model || settings.rhConfigKey || ''});
+        }
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, status:'queued'}));
+            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, status:'queued', generationId:generationAttempt?.id || ''}));
+            bindNodeGenerationAttemptTasks(pendingNode, taskIds, {providerId:outImages.providerId, model:outImages.model});
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
@@ -17812,6 +18320,9 @@ async function runGeneration(){
             clearPromptInput({preserveDraft:true});
             return;
         }
+        if(generationAttempt){
+            finishNodeGenerationAttempt(pendingNode, e?.smartTaskCancelled ? 'cancelled' : 'failed', e.message || String(e), generationAttempt.id);
+        }
         pendingNode.pending = 0;
         if(branchNode){
             nodes = nodes.filter(n => n.id !== branchNode.id);
@@ -17829,6 +18340,7 @@ async function runGeneration(){
         delete pendingNode._runMetaTargetId;
         if(!e?.smartGenerationLogged) addSmartGenerationLog({run:runLog, outputs:[], runMs:nowMs() - runLogStart, error:e.message || String(e)});
         toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
+        if(generationAttempt) scheduleSave();
     } finally {
         if(!apiConcurrentRun){
             clearNodeRunningState(pendingNode);
@@ -18587,6 +19099,12 @@ function setNodeJimengPending(node, signal){
     delete node.runFinishedAt;
     delete node.runElapsedMs;
     node.runTimerHidden = false;
+    const attempt = nodeGenerationAttempt(node);
+    if(attempt?.status === 'running'){
+        attempt.taskIds = Array.from(new Set([...(attempt.taskIds || []), signal.submitId].filter(Boolean)));
+        attempt.taskId = attempt.taskId || signal.submitId;
+        attempt.updatedAt = nowMs();
+    }
     render();
     scheduleSave();
     startJimengPoll(node);
@@ -18607,7 +19125,9 @@ function finalizeJimengPending(node, urls, kind='image'){
     }).filter(item => item.url);
     if(!additions.length) return false;
     delete node.jimengPending;
-    replaceOutputsToNodeWithHistory(node, additions, kind, null, {skipShift:true});
+    const attempt = kind === 'image' ? nodeGenerationAttempt(node) : null;
+    if(attempt?.status === 'running') completeNodeGenerationAttempt(node, additions, {generationId:attempt.id, kind});
+    else replaceOutputsToNodeWithHistory(node, additions, kind, null, {skipShift:true});
     node.running = false;
     node.pending = 0;
     node.runFinishedAt = nowMs();
@@ -18625,6 +19145,8 @@ function applyJimengQueryResult(node, data){
         return finalizeJimengPending(node, data.urls || [], kind);
     }
     if(data.status === 'failed'){
+        const attempt = nodeGenerationAttempt(node);
+        if(attempt?.status === 'running') finishNodeGenerationAttempt(node, 'failed', data.error || '即梦任务失败', attempt.id);
         delete node.jimengPending;
         node.running = false;
         node.pending = 0;
@@ -18705,6 +19227,18 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         }
         if(data.status === 'failed'){
             task.error = data.error || tr('smart.errRunFailed');
+            const attempt = nodeGenerationAttemptForTask(node, task.taskId);
+            if(attempt?.status === 'running'){
+                attempt.failedTaskIds = Array.from(new Set([...(attempt.failedTaskIds || []), task.taskId]));
+                node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
+                node.pending = Math.max(0, Number(node.pending || 0) - 1);
+                if(!smartPendingTasks(node).length){
+                    delete node.pendingTasks;
+                    node.pending = 0;
+                    node.running = false;
+                    finishNodeGenerationAttempt(node, 'failed', task.error, attempt.id);
+                }
+            }
             toast(task.error.slice(0, 160));
         } else {
             task.error = data.message || '任务仍在生成中，请稍后再查询';
@@ -18792,8 +19326,20 @@ async function pollSmartCanvasTask(taskId){
 }
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     if(!node || !taskId) return;
+    const generationAttempt = nodeGenerationAttemptForTask(node, taskId);
     node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
     node.pending = Math.max(0, Number(node.pending || 0) - 1);
+    if(generationAttempt?.status === 'running'){
+        const additions = normalizeNodeGenerationOutputs(images, kind);
+        generationAttempt.outputs = cleanHistoryImages([...(generationAttempt.outputs || []), ...additions]);
+        generationAttempt.updatedAt = nowMs();
+        const finishedBatch = !node.pending && smartPendingTasks(node).length === 0;
+        if(finishedBatch && !(generationAttempt.failedTaskIds || []).length && !(generationAttempt.cancelledTaskIds || []).length){
+            delete node.pendingTasks;
+            completeNodeGenerationAttempt(node, generationAttempt.outputs, {generationId:generationAttempt.id, kind});
+        }
+        return;
+    }
     const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
     const mediaItems = resultMediaUrls(images);
     const existing = cleanHistoryImages(node.images || []);
@@ -18827,6 +19373,7 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
 async function resumeSmartPendingNode(node, logContext={}){
     const tasks = smartPendingTasks(node);
     if(!node || !tasks.length) return;
+    const generationAttemptId = tasks.find(task => task.generationId)?.generationId || node?.activeGenerationId || '';
     const logTaskFailure = (message, task) => {
         if(!logContext?.run || !message) return;
         const runMs = Math.max(0, nowMs() - Number(logContext.runLogStart || nowMs()));
@@ -18841,6 +19388,7 @@ async function resumeSmartPendingNode(node, logContext={}){
     node.running = false;
     render();
     const failures = [];
+    const cancellations = [];
     await Promise.all(tasks.map(async task => {
         if(task.failed && task.recoverTaskId) return;
         try {
@@ -18849,7 +19397,19 @@ async function resumeSmartPendingNode(node, logContext={}){
             render();
             scheduleSave();
         } catch(e) {
-            if(e && e.smartTaskCancelled) return;
+            if(e && e.smartTaskCancelled){
+                const attempt = nodeGenerationAttemptForTask(node, task.taskId);
+                if(attempt?.status === 'running'){
+                    attempt.cancelledTaskIds = Array.from(new Set([...(attempt.cancelledTaskIds || []), task.taskId]));
+                    attempt.updatedAt = nowMs();
+                }
+                node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
+                node.pending = Math.max(0, Number(node.pending || 0) - 1);
+                cancellations.push(e);
+                render();
+                scheduleSave();
+                return;
+            }
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);
@@ -18871,6 +19431,11 @@ async function resumeSmartPendingNode(node, logContext={}){
                 scheduleSave();
                 return;
             }
+            const attempt = nodeGenerationAttemptForTask(node, task.taskId);
+            if(attempt?.status === 'running'){
+                attempt.failedTaskIds = Array.from(new Set([...(attempt.failedTaskIds || []), task.taskId]));
+                attempt.updatedAt = nowMs();
+            }
             node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
             node.pending = Math.max(0, Number(node.pending || 0) - 1);
             if(!node.pending && smartPendingTasks(node).length === 0){
@@ -18889,8 +19454,27 @@ async function resumeSmartPendingNode(node, logContext={}){
             scheduleSave();
         }
     }));
-    if(failures.length && !(node.images || []).length){
-        throw failures[0];
+    const activeAttempt = nodeGenerationAttempt(node);
+    if(activeAttempt?.status === 'running' && !smartPendingTasks(node).length && !node.jimengPending){
+        delete node.pendingTasks;
+        node.pending = 0;
+        node.running = false;
+        if(failures.length){
+            finishNodeGenerationAttempt(node, 'failed', failures[0]?.message || tr('smart.errRunFailed'), activeAttempt.id);
+        } else if(cancellations.length){
+            finishNodeGenerationAttempt(node, 'cancelled', cancellations[0]?.message || '任务已取消', activeAttempt.id);
+        } else if((activeAttempt.outputs || []).length){
+            completeNodeGenerationAttempt(node, activeAttempt.outputs, {generationId:activeAttempt.id, kind:activeAttempt.outputKind || 'image'});
+        }
+        node.runFinishedAt = nowMs();
+        if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
+        node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
+        node.runTimerHidden = false;
+        render();
+        scheduleSave();
+    }
+    if((failures.length || cancellations.length) && (generationAttemptId || !(node.images || []).length)){
+        throw failures[0] || cancellations[0];
     }
 }
 function resumeSmartPendingTasks(){
@@ -20077,6 +20661,12 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(e.key === 'Escape' && document.getElementById('nodeGenerationHistoryBackdrop')?.classList.contains('open')){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        closeNodeGenerationHistory();
+        return;
+    }
     if(e.key === 'Escape' && smartCanvasReferencePicker){
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -20732,7 +21322,7 @@ document.addEventListener('click', event => {
     if(!event.target.closest('.prompt-template-panel') && !event.target.closest('.prompt-preset-edit') && !event.target.closest('#composerTemplateBtn')) closePromptTemplatePanel();
 });
 document.addEventListener('keydown', event => {
-    if(event.key === 'Escape') { closeSmartLogLightbox(); closeAllSmartPopovers(); closeCreateMenu(); closeSmartCanvasLog(); closeSmartCanvasShortcuts(); closePromptPresetPanel(); closePromptTemplatePanel(); }
+    if(event.key === 'Escape') { closeNodeGenerationHistory(); closeSmartLogLightbox(); closeAllSmartPopovers(); closeCreateMenu(); closeSmartCanvasLog(); closeSmartCanvasShortcuts(); closePromptPresetPanel(); closePromptTemplatePanel(); }
 });
 function cropDragModeFromPointer(event){
     const explicit = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle;
