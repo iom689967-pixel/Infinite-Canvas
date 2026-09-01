@@ -131,6 +131,7 @@ const MAGNETIC_SNAP_PX = 65;
 const MAGNETIC_DISPLAY_EXIT_PX = 135;
 const MAGNETIC_VERTICAL_MARGIN_PX = 36;
 const MAGNETIC_HANDLE_INSET_PX = 18;
+const AGGREGATE_SELECTION_PADDING = 8;
 let didPan = false;
 let portDragState = null;
 let quickConnectMenu = null;
@@ -1396,6 +1397,7 @@ function syncSelectionUi(){
     smartSelectionUiImage = {nodeId:selectedImage.nodeId || '', index:Number(selectedImage.index ?? -1)};
     syncSmartSelectedImageResolution(world);
     syncRunButtonState();
+    syncAggregateSelectionOverlay();
     scheduleConnectionLayerRefresh();
 }
 function isNodeSelected(id){
@@ -1403,6 +1405,46 @@ function isNodeSelected(id){
 }
 function selectedNodeIds(){
     return selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
+}
+function aggregateSelectionBounds(sourceIds=selectedNodeIds()){
+    const selected = Array.from(new Set(sourceIds || []))
+        .map(id => nodes.find(node => node.id === id))
+        .filter(Boolean);
+    if(selected.length < 2) return null;
+    const rects = selected.map(nodeRect);
+    const minX = Math.min(...rects.map(rect => rect.x));
+    const minY = Math.min(...rects.map(rect => rect.y));
+    const maxX = Math.max(...rects.map(rect => rect.x + rect.width));
+    const maxY = Math.max(...rects.map(rect => rect.y + rect.height));
+    return {
+        sourceIds:selected.map(node => node.id),
+        x:minX,
+        y:minY,
+        width:maxX - minX,
+        height:maxY - minY,
+        anchor:{x:maxX + AGGREGATE_SELECTION_PADDING + 1, y:(minY + maxY) / 2}
+    };
+}
+function syncAggregateSelectionOverlay(){
+    if(!world) return;
+    const bounds = aggregateSelectionBounds();
+    let overlay = world.querySelector('.multi-selection-bounds');
+    if(!bounds){
+        overlay?.remove();
+        return;
+    }
+    if(!overlay){
+        overlay = document.createElement('div');
+        overlay.className = 'multi-selection-bounds';
+        overlay.innerHTML = '<button class="node-port port-out aggregate-output-handle" type="button" aria-label="连接所有选中节点" title="连接所有选中节点"></button>';
+        world.appendChild(overlay);
+        bindAggregateSelectionHandle(overlay.querySelector('.aggregate-output-handle'));
+    }
+    overlay.dataset.sourceCount = String(bounds.sourceIds.length);
+    overlay.style.left = `${bounds.x - AGGREGATE_SELECTION_PADDING}px`;
+    overlay.style.top = `${bounds.y - AGGREGATE_SELECTION_PADDING}px`;
+    overlay.style.width = `${bounds.width + AGGREGATE_SELECTION_PADDING * 2}px`;
+    overlay.style.height = `${bounds.height + AGGREGATE_SELECTION_PADDING * 2}px`;
 }
 function smartConnectionSelectionKey(connection){
     return JSON.stringify([
@@ -6674,13 +6716,14 @@ function shellPoint(event){
 }
 function quickConnectTemporaryConnectionSvg(){
     const pending = pendingQuickConnection;
-    const source = pending ? nodes.find(node => node.id === pending.drag?.fromId) : null;
+    const source = pending && !pending.drag?.aggregate ? nodes.find(node => node.id === pending.drag?.fromId) : null;
     const anchor = pending?.worldPoint;
-    if(!source || !anchor) return '';
-    const sourceRect = nodeRect(source);
+    if((!source && !pending?.drag?.aggregate) || !anchor) return '';
+    const sourceRect = source ? nodeRect(source) : null;
     const fromOutput = pending.drag.fromPort === 'out';
-    const fx = fromOutput ? sourceRect.x + sourceRect.width : anchor.x;
-    const fy = fromOutput ? sourceRect.y + sourceRect.height / 2 : anchor.y;
+    const aggregateStart = pending.drag.aggregate ? pending.drag.startWorld : null;
+    const fx = aggregateStart?.x ?? (fromOutput ? sourceRect.x + sourceRect.width : anchor.x);
+    const fy = aggregateStart?.y ?? (fromOutput ? sourceRect.y + sourceRect.height / 2 : anchor.y);
     const tx = fromOutput ? anchor.x : sourceRect.x;
     const ty = fromOutput ? anchor.y : sourceRect.y + sourceRect.height / 2;
     const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
@@ -6840,6 +6883,7 @@ function moveNodeElementsDuringDrag(){
     if(active && (dragState.group || [{id:dragState.id}]).some(item => item.id === active.id)){
         positionComposerForNode(active);
     }
+    syncAggregateSelectionOverlay();
     scheduleInteractionLayerRefresh();
 }
 function updateNodeElementDuringResize(node){
@@ -6902,6 +6946,7 @@ function updateNodeElementDuringResize(node){
     }
     const active = selectedNode();
     if(active?.id === node.id) positionComposerForNode(active);
+    syncAggregateSelectionOverlay();
     scheduleInteractionLayerRefresh();
 }
 function syncSmartGroupMemberElements(group){
@@ -9021,6 +9066,7 @@ function render(){
     });
     restoreMediaPlaybackStates(mediaStates);
     bindNodeEvents();
+    syncAggregateSelectionOverlay();
     bindConnectionEvents();
     updateComposer();
     renderMinimap();
@@ -10073,13 +10119,19 @@ function bindScrollableText(el){
         if(textSelectionGuard?.el === el) textSelectionGuard.wheelUntil = Date.now() + 180;
     }, {passive:true});
 }
-function buildSmartConnectionMagneticCandidates(fromId, fromPort){
+function buildSmartConnectionMagneticCandidates(fromId, fromPort, sourceIds=[]){
     const targetPort = fromPort === 'out' ? 'in' : 'out';
+    const aggregateSourceIds = Array.from(new Set(sourceIds || []));
+    const excludedIds = new Set(aggregateSourceIds.length ? aggregateSourceIds : [fromId]);
     return [...world.querySelectorAll('.image-node')].map(nodeEl => {
         const targetId = nodeEl.dataset.id;
-        if(!targetId || targetId === fromId) return null;
+        if(!targetId || excludedIds.has(targetId)) return null;
         const port = nodeEl.querySelector(`.node-port[data-port="${targetPort}"]`);
         if(!port || getComputedStyle(port).display === 'none') return null;
+        if(aggregateSourceIds.length > 1 && fromPort === 'out'){
+            if(!canConnectSmartInputNodeBatch(aggregateSourceIds, targetId)) return null;
+            return {targetId, targetPort, nodeEl};
+        }
         const sourceNode = nodes.find(node => node.id === (fromPort === 'out' ? fromId : targetId));
         const targetNode = nodes.find(node => node.id === (fromPort === 'out' ? targetId : fromId));
         if(!canConnectSmartInputNodes(sourceNode, targetNode)) return null;
@@ -10172,12 +10224,12 @@ function renderSmartFloatingConnectionPort(candidate){
 }
 function updatePortDragVisual(){
     if(!portDragState) return;
-    const fromNode = nodes.find(n => n.id === portDragState.fromId);
-    if(!fromNode) return;
-    const fr = nodeRect(fromNode);
+    const fromNode = portDragState.aggregate ? null : nodes.find(n => n.id === portDragState.fromId);
+    if(!fromNode && !portDragState.aggregate) return;
+    const fr = fromNode ? nodeRect(fromNode) : null;
     const isOut = portDragState.fromPort === 'out';
-    const fx = isOut ? fr.x + fr.width : fr.x;
-    const fy = fr.y + fr.height / 2;
+    const fx = portDragState.startWorld?.x ?? (isOut ? fr.x + fr.width : fr.x);
+    const fy = portDragState.startWorld?.y ?? (fr.y + fr.height / 2);
     const tx = portDragState.magnetic?.worldPoint?.x ?? portDragState.currentWorld.x;
     const ty = portDragState.magnetic?.worldPoint?.y ?? portDragState.currentWorld.y;
     const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
@@ -10213,7 +10265,7 @@ function updateSmartConnectionPointer(event){
     if(magnetic){
         targetId = magnetic.targetId;
         targetPort = magnetic.targetPort;
-    } else if(nodeEl && nodeEl.dataset.id && nodeEl.dataset.id !== portDragState.fromId){
+    } else if(nodeEl && nodeEl.dataset.id && !(portDragState.sourceIds || [portDragState.fromId]).includes(nodeEl.dataset.id)){
         targetId = nodeEl.dataset.id;
         if(portEl){
             targetPort = portEl.dataset.port;
@@ -10231,6 +10283,42 @@ function updateSmartConnectionPointer(event){
     updatePortDragVisual();
     return true;
 }
+function bindAggregateSelectionHandle(handle){
+    if(!handle || handle.dataset.aggregateBound === '1') return;
+    handle.dataset.aggregateBound = '1';
+    handle.addEventListener('pointerdown', event => {
+        if(event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        const bounds = aggregateSelectionBounds();
+        if(!bounds || bounds.sourceIds.length < 2) return;
+        if(pendingQuickConnection) closeQuickConnectMenu({render:false});
+        portDragState = {
+            aggregate:true,
+            sourceIds:bounds.sourceIds.slice(),
+            fromId:bounds.sourceIds[0],
+            fromPort:'out',
+            startWorld:{...bounds.anchor},
+            currentWorld:{...bounds.anchor},
+            hoverTargetId:'',
+            hoverPort:'',
+            magnetic:null,
+            magneticCandidates:buildSmartConnectionMagneticCandidates(bounds.sourceIds[0], 'out', bounds.sourceIds),
+            moved:false
+        };
+        shell.classList.add('port-dragging', 'aggregate-port-dragging');
+        capturePendingUndo();
+        ensurePortDragPathElement();
+        updatePortDragVisual();
+        installSmartConnectionPointerCapture();
+    });
+    ['mousedown','click','dblclick'].forEach(type => handle.addEventListener(type, event => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+    }));
+}
 function removeSmartConnectionPointerCapture(){
     smartConnectionPointerCaptureCleanup?.();
     smartConnectionPointerCaptureCleanup = null;
@@ -10239,7 +10327,7 @@ function cancelSmartPortDrag(){
     if(!portDragState) return false;
     portDragState = null;
     removeSmartConnectionPointerCapture();
-    shell.classList.remove('port-dragging');
+    shell.classList.remove('port-dragging', 'aggregate-port-dragging');
     clearPortDragVisual();
     discardPendingUndo();
     render();
@@ -10250,7 +10338,7 @@ function finishSmartPortDrag(event){
     if(!drag) return false;
     portDragState = null;
     removeSmartConnectionPointerCapture();
-    shell.classList.remove('port-dragging');
+    shell.classList.remove('port-dragging', 'aggregate-port-dragging');
     clearPortDragVisual();
     handlePortDrop(drag, event);
     return true;
@@ -10286,10 +10374,15 @@ function installSmartConnectionPointerCapture(){
     };
 }
 const QUICK_CONNECT_NODE_REGISTRY = Object.freeze([
-    {type:'text', label:'文本', icon:'type', description:'手写 Prompt 或说明文字', create:(point, options) => createTextNodeAt(point, options)},
-    {type:'image-generation', label:'图片生成', icon:'image', description:'生成图片', create:(point, options) => createGenerationNode('image', point, options)},
-    {type:'video-generation', label:'视频生成', icon:'video', description:'生成视频', create:(point, options) => createGenerationNode('video', point, options)}
+    {type:'text', nodeType:'smart-text', label:'文本', icon:'type', description:'手写 Prompt 或说明文字', create:(point, options) => createTextNodeAt(point, options)},
+    {type:'image-generation', nodeType:'smart-image-generation', label:'图片生成', icon:'image', description:'生成图片', create:(point, options) => createGenerationNode('image', point, options)},
+    {type:'video-generation', nodeType:'smart-video-generation', label:'视频生成', icon:'video', description:'生成视频', create:(point, options) => createGenerationNode('video', point, options)}
 ]);
+function quickConnectEntryAcceptsDrag(entry, drag){
+    if(!entry || !drag?.aggregate) return true;
+    const previewTarget = {id:`__quick-connect-${entry.type}__`, type:entry.nodeType};
+    return canConnectSmartInputNodeBatch(drag.sourceIds, previewTarget);
+}
 function clearQuickConnectVisual(){
     world.querySelectorAll('.quick-connect-temp').forEach(element => element.remove());
 }
@@ -10309,7 +10402,8 @@ function createQuickConnectedNode(type){
     quickConnectMenu?.classList.remove('open');
     quickConnectMenu?.setAttribute('aria-hidden', 'true');
     const source = nodes.find(node => node.id === pending.drag.fromId);
-    if(!source){
+    const aggregateSourceIds = pending.drag.aggregate ? Array.from(new Set(pending.drag.sourceIds || [])) : [];
+    if((!pending.drag.aggregate && !source) || (pending.drag.aggregate && aggregateSourceIds.length < 2) || !quickConnectEntryAcceptsDrag(entry, pending.drag)){
         pendingQuickConnection = null;
         clearQuickConnectVisual();
         discardPendingUndo();
@@ -10318,10 +10412,24 @@ function createQuickConnectedNode(type){
     }
     const anchorPort = pending.drag.fromPort === 'out' ? 'in' : 'out';
     const newNode = entry.create(pending.worldPoint, {select:true, skipUndo:true, deferRender:true, anchorPort});
-    const fromId = pending.drag.fromPort === 'out' ? source.id : newNode.id;
-    const toId = pending.drag.fromPort === 'out' ? newNode.id : source.id;
-    if(!connectInputNode(fromId, toId)){
+    if(pending.drag.aggregate){
+        selectedId = newNode.id;
+        selectedIds = [];
+        selectedImage = {nodeId:'', index:-1};
+    }
+    const connected = pending.drag.aggregate
+        ? connectSmartInputNodeBatch(aggregateSourceIds, newNode.id, sourceId => centeredSmartConnectionAnchors(sourceId, newNode.id))
+        : connectInputNode(
+            pending.drag.fromPort === 'out' ? source.id : newNode.id,
+            pending.drag.fromPort === 'out' ? newNode.id : source.id
+        );
+    if(!connected){
         nodes = nodes.filter(node => node.id !== newNode.id);
+        if(pending.drag.aggregate){
+            selectedId = '';
+            selectedIds = aggregateSourceIds.filter(id => nodes.some(node => node.id === id));
+            selectedImage = {nodeId:'', index:-1};
+        }
         pendingQuickConnection = null;
         clearQuickConnectVisual();
         discardPendingUndo();
@@ -10367,10 +10475,20 @@ function openQuickConnectMenu(drag, event){
     if(pendingQuickConnection) closeQuickConnectMenu({render:false});
     const menu = ensureQuickConnectMenu();
     pendingQuickConnection = {
-        drag:{fromId:drag.fromId, fromPort:drag.fromPort},
+        drag:{
+            fromId:drag.fromId,
+            fromPort:drag.fromPort,
+            aggregate:Boolean(drag.aggregate),
+            sourceIds:drag.aggregate ? Array.from(new Set(drag.sourceIds || [])) : [],
+            startWorld:drag.startWorld ? {...drag.startWorld} : null
+        },
         worldPoint:screenToWorld(event),
         clientPoint:{x:event.clientX, y:event.clientY}
     };
+    menu.querySelectorAll('[data-quick-connect-type]').forEach(button => {
+        const entry = QUICK_CONNECT_NODE_REGISTRY.find(item => item.type === button.dataset.quickConnectType);
+        button.hidden = !quickConnectEntryAcceptsDrag(entry, pendingQuickConnection.drag);
+    });
     menu.style.left = '0px';
     menu.style.top = '0px';
     menu.classList.add('open');
@@ -10382,7 +10500,7 @@ function openQuickConnectMenu(drag, event){
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     refreshConnectionLayer();
-    menu.querySelector('[data-quick-connect-type]')?.focus({preventScroll:true});
+    [...menu.querySelectorAll('[data-quick-connect-type]')].find(button => !button.hidden)?.focus({preventScroll:true});
     refreshIcons();
 }
 function handlePortDrop(drag, e){
@@ -10409,6 +10527,24 @@ function handlePortDrop(drag, e){
     if(targetId){
         const compatible = (drag.fromPort === 'out' && targetPort === 'in') || (drag.fromPort === 'in' && targetPort === 'out');
         if(!compatible){ discardPendingUndo(); render(); return; }
+        if(drag.aggregate){
+            const sourceIds = Array.from(new Set(drag.sourceIds || []));
+            const connected = connectSmartInputNodeBatch(
+                sourceIds,
+                targetId,
+                magnetic ? sourceId => centeredSmartConnectionAnchors(sourceId, targetId) : null
+            );
+            if(connected){
+                commitPendingUndo();
+                render();
+                scheduleSave();
+            } else {
+                discardPendingUndo();
+                toast('当前选中节点不能全部连接到这个目标');
+                render();
+            }
+            return;
+        }
         const fromId = drag.fromPort === 'out' ? drag.fromId : targetId;
         const toId = drag.fromPort === 'out' ? targetId : drag.fromId;
         const anchors = magnetic ? centeredSmartConnectionAnchors(fromId, toId) : {};
@@ -10423,6 +10559,7 @@ function handlePortDrop(drag, e){
         return;
     }
     if(!drag.moved){ discardPendingUndo(); render(); return; }
+    if(hit?.closest?.('.image-node')){ discardPendingUndo(); render(); return; }
     if(hit?.closest?.('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.smart-minimap')){
         discardPendingUndo(); render(); return;
     }
@@ -14793,12 +14930,40 @@ function addConnection(fromId, toId, kind='flow', anchors={}){
 }
 function canConnectSmartInputNodes(from, to){
     if(!from || !to || from.id === to.id) return false;
+    if(wouldCreateSmartCanvasReferenceCycle(from.id, to.id)) return false;
     if(to.type !== 'smart-loop') return true;
     const groupImages = isSmartGroupNode(from) ? imagesForNode(from).filter(img => img?.url) : [];
     const groupPrompts = isSmartGroupNode(from) ? promptTextItemsForNode(from).filter(Boolean) : [];
     const looksImage = isSmartImageNode(from) || groupImages.length > 0 || (from.type === 'smart-loop' && from.imageInput);
     const looksPrompt = from.type === 'smart-prompt' || from.type === 'smart-text' || groupPrompts.length > 0 || (from.type === 'smart-loop' && from.showPrompt);
     return looksImage || looksPrompt;
+}
+function smartInputBatchSourceNodes(sourceIds){
+    const ids = Array.from(new Set(sourceIds || []));
+    return ids.map(id => nodes.find(node => node.id === id)).filter(Boolean);
+}
+function canConnectSmartInputNodeBatch(sourceIds, targetOrId){
+    const ids = Array.from(new Set(sourceIds || []));
+    const sources = smartInputBatchSourceNodes(ids);
+    const target = typeof targetOrId === 'string' ? nodes.find(node => node.id === targetOrId) : targetOrId;
+    if(!target || !ids.length || sources.length !== ids.length) return false;
+    return sources.every(source => canConnectSmartInputNodes(source, target));
+}
+function connectSmartInputNodeBatch(sourceIds, targetId, anchorsForSource=null){
+    const ids = Array.from(new Set(sourceIds || []));
+    const target = nodes.find(node => node.id === targetId);
+    if(!canConnectSmartInputNodeBatch(ids, target)) return false;
+    const connectionsBefore = JSON.parse(JSON.stringify(canvas?.connections || []));
+    const targetBefore = JSON.parse(JSON.stringify(target));
+    for(const sourceId of ids){
+        const anchors = typeof anchorsForSource === 'function' ? (anchorsForSource(sourceId) || {}) : {};
+        if(connectInputNode(sourceId, target.id, anchors)) continue;
+        if(canvas) canvas.connections = connectionsBefore;
+        Object.keys(target).forEach(key => { delete target[key]; });
+        Object.assign(target, targetBefore);
+        return false;
+    }
+    return true;
 }
 function connectInputNode(fromId, toId, anchors={}){
     const from = nodes.find(n => n.id === fromId);

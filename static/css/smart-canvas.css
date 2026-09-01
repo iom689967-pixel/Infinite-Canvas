@@ -827,6 +827,12 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .node-port { position:absolute; top:50%; width:14px; height:14px; border-radius:50%; background:var(--card); border:1.8px solid var(--strong); transform:translateY(-50%); z-index:6; cursor:crosshair; opacity:0; pointer-events:none; transition:opacity .15s ease, background .15s ease, transform .15s ease, box-shadow .15s ease; box-shadow:0 4px 10px rgba(15,23,42,.18); }
 .node-port.port-in { left:-8px; }
 .node-port.port-out { right:-8px; }
+.multi-selection-bounds { position:absolute; z-index:16; border:1px dashed color-mix(in srgb, var(--strong) 62%, transparent); border-radius:14px; background:transparent; box-shadow:0 0 0 1px color-mix(in srgb, var(--card) 45%, transparent); pointer-events:none; }
+.multi-selection-bounds .aggregate-output-handle { right:-9px; width:16px; height:16px; box-sizing:border-box; opacity:1; pointer-events:auto; background:var(--card); border:2px solid var(--strong); box-shadow:0 0 0 4px color-mix(in srgb, var(--strong) 12%, transparent), 0 6px 14px var(--shadow); }
+.multi-selection-bounds .aggregate-output-handle::after { content:""; position:absolute; left:50%; top:50%; width:7px; height:7px; border-radius:50%; background:var(--strong); transform:translate(-50%,-50%); }
+.multi-selection-bounds .aggregate-output-handle:hover,.multi-selection-bounds .aggregate-output-handle:focus-visible { outline:0; background:var(--card); transform:translateY(-50%) scale(1.22); box-shadow:0 0 0 6px color-mix(in srgb, var(--strong) 18%, transparent), 0 7px 16px var(--shadow); }
+.world.smart-multi-selected .image-node.selected .node-port { opacity:0!important; pointer-events:none!important; }
+.shell.aggregate-port-dragging .multi-selection-bounds .aggregate-output-handle { opacity:1; pointer-events:none; background:var(--strong); }
 .magnetic-port-overlay { position:fixed; inset:0; z-index:95; pointer-events:none; overflow:visible; }
 .magnetic-port-overlay .floating-connection-port { position:absolute; width:16px; height:16px; box-sizing:border-box; border-radius:50%; pointer-events:none; background:var(--card); border:2px solid #7c7c84; box-shadow:0 4px 12px var(--shadow); transform:translate(-50%,-50%); opacity:.86; transition:background .1s ease, border-color .1s ease, box-shadow .1s ease, transform .1s ease, opacity .1s ease; }
 .magnetic-port-overlay .floating-connection-port::after { content:""; position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:var(--strong); transform:translate(-50%,-50%); }
