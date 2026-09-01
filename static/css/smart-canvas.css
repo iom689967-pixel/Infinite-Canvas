@@ -1186,6 +1186,26 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .run-btn:disabled { opacity:.55; cursor:wait; }
 .cascade-run-btn { width:76px; background:var(--card); color:var(--text); border:1px solid var(--line); }
 .cascade-run-btn:hover:not(:disabled) { border-color:var(--text); }
+.run-intent-control { position:relative; display:flex; align-items:center; justify-self:end; isolation:isolate; }
+.run-intent-control .run-btn { width:auto; min-width:92px; padding:0 10px 0 12px; border-radius:999px 0 0 999px; }
+.run-intent-control .run-btn:hover:not(:disabled) { transform:none; }
+.run-intent-control.single-mode .run-btn { min-width:56px; border-radius:999px; }
+.run-intent-toggle { width:26px; height:var(--ctrl-height); margin-left:1px; border-radius:0 999px 999px 0; background:var(--strong); color:var(--strong-text); display:flex; align-items:center; justify-content:center; transition:filter .12s ease, opacity .12s ease; }
+.run-intent-toggle:hover:not(:disabled) { filter:brightness(1.14); }
+.run-intent-toggle:disabled { opacity:.55; cursor:wait; }
+.run-intent-toggle i,.run-intent-toggle svg { width:11px !important; height:11px !important; stroke-width:2.2; }
+.run-intent-control.single-mode .run-intent-toggle { display:none; }
+.run-intent-menu { position:absolute; right:0; bottom:calc(100% + 9px); z-index:120; width:310px; padding:6px; border-radius:14px; background:var(--panel); border:1px solid var(--line); box-shadow:0 18px 48px var(--shadow); backdrop-filter:blur(18px); opacity:0; visibility:hidden; pointer-events:none; transform:translateY(5px) scale(.985); transform-origin:bottom right; transition:opacity .14s ease, transform .14s ease, visibility .14s ease; }
+.run-intent-control.open .run-intent-menu { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0) scale(1); }
+.run-intent-menu > button { width:100%; min-height:54px; padding:8px 9px; border-radius:10px; display:grid; grid-template-columns:24px minmax(0,1fr) 18px; align-items:center; gap:8px; color:var(--text); text-align:left; }
+.run-intent-menu > button:hover:not(:disabled),.run-intent-menu > button.active { background:var(--soft); }
+.run-intent-menu > button:disabled { opacity:.45; cursor:not-allowed; }
+.run-intent-menu > button > i,.run-intent-menu > button > svg { width:16px !important; height:16px !important; color:var(--muted); }
+.run-intent-menu > button span { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.run-intent-menu > button strong { font-size:11px; line-height:1.2; font-weight:850; }
+.run-intent-menu > button small { color:var(--muted); font-size:9.5px; line-height:1.35; font-weight:600; white-space:normal; }
+.run-intent-menu .run-intent-check { opacity:0; color:var(--text); }
+.run-intent-menu > button.active .run-intent-check { opacity:1; }
 .param-row { grid-area:params; min-width:0; margin-top:0; display:flex; align-items:center; gap:var(--ctrl-gap); overflow:visible; flex-wrap:wrap; row-gap:8px; }
 .param-row > select { flex:0 0 auto; width:auto; max-width:96px; }
 .param-row select,.dynamic-params select,.dynamic-params input,.dynamic-params textarea { height:var(--ctrl-height); min-width:0; border-radius:999px; border:1px solid transparent; background:transparent; color:var(--text); padding:0 var(--ctrl-xpad); font-size:var(--ctrl-font); line-height:1; font-weight:500; outline:none; transition:background .15s ease, border-color .15s ease; }

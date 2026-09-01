@@ -12,6 +12,9 @@ const mentionPreview = document.getElementById('mentionPreview');
 const engineSelect = document.getElementById('engineSelect');
 const dynamicParams = document.getElementById('dynamicParams');
 const runBtn = document.getElementById('runBtn');
+const runIntentControl = document.getElementById('runIntentControl');
+const runIntentToggle = document.getElementById('runIntentToggle');
+const runIntentMenu = document.getElementById('runIntentMenu');
 const cascadeRunBtn = document.getElementById('cascadeRunBtn');
 const fileInput = document.getElementById('fileInput');
 const apiKindToggle = document.getElementById('apiKindToggle');
@@ -210,6 +213,10 @@ const smartCascadeRuns = new Map();
 let smartLoopContext = null;
 let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
+const SMART_RUN_INTENT_REGENERATE = 'regenerate';
+const SMART_RUN_INTENT_CONTINUE_EDIT = 'continue-edit';
+let smartRunIntent = SMART_RUN_INTENT_REGENERATE;
+let smartRunIntentNodeId = '';
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
 const activeSmartTaskControllers = new Map();
@@ -4038,7 +4045,7 @@ function renderedInputMediaRefs(){
 }
 function currentSmartMediaRefs(node){
     if(!node) return [];
-    const request = buildPromptRequest(node, null, true, smartLoopContext);
+    const request = buildPromptRequest(node, null, true, smartLoopContext, {includeSelf:smartRunIncludeSelfForNode(node)});
     return (request.refs || []).filter(ref => ref?.url && ['image','video'].includes(mediaKindForItem(ref)));
 }
 function currentUploadMediaRefs(node){
@@ -4431,6 +4438,7 @@ function setDynamicSetting(key, value){
 }
 function closeAllSmartPopovers(){
     document.querySelectorAll('.smart-control.pinned, .smart-control.interacting').forEach(c => c.classList.remove('pinned', 'interacting'));
+    closeSmartRunIntentMenu();
 }
 // 悬浮打开弹层后点了里面的参数：标记 interacting，让它熬过重渲染不收起；鼠标真正离开该控件时才关闭。
 function markControlInteracting(el){
@@ -5704,11 +5712,89 @@ function mergeNodeGenerationState(base, local, remote){
     else delete result.activeGenerationId;
     return result;
 }
+function smartRunCanContinueFromCurrent(node){
+    if(!node || !isSmartImageNode(node) || isSmartGroupNode(node) || smartGenerationKind(node) === 'video') return false;
+    return selfReferenceImagesForNode(node).some(item => item?.url && mediaKindForItem(item) === 'image');
+}
+function smartRunSelfRequirement(node, runSettings=null){
+    const sourceSettings = runSettings || (node ? smartSettingsForNode(node) : settings);
+    if(validOutpaintSize(node)) return {required:true, reason:'扩图必须引用当前结果'};
+    if(sourceSettings?.engine === 'comfy' && ['enhance','edit'].includes(sourceSettings.comfyMode)){
+        return {required:true, reason:sourceSettings.comfyMode === 'enhance' ? '图片增强必须引用当前结果' : '图片编辑必须引用当前结果'};
+    }
+    if(sourceSettings?.engine === 'modelscope' && MS_GEN_MODELS[sourceSettings.msgenModel || 'zimage']?.supportsImage){
+        return {required:true, reason:'图片编辑模型必须引用当前结果'};
+    }
+    return {required:false, reason:''};
+}
+function smartRunIntentForNode(node=selectedNode(), runSettings=null){
+    const canContinue = smartRunCanContinueFromCurrent(node);
+    if(canContinue && smartRunSelfRequirement(node, runSettings).required) return SMART_RUN_INTENT_CONTINUE_EDIT;
+    if(!canContinue || !node?.id || smartRunIntentNodeId !== node.id) return SMART_RUN_INTENT_REGENERATE;
+    return smartRunIntent === SMART_RUN_INTENT_CONTINUE_EDIT ? SMART_RUN_INTENT_CONTINUE_EDIT : SMART_RUN_INTENT_REGENERATE;
+}
+function smartRunIncludeSelfForNode(node=selectedNode(), runSettings=null){
+    return smartRunCanContinueFromCurrent(node)
+        && (smartRunSelfRequirement(node, runSettings).required || smartRunIntentForNode(node, runSettings) === SMART_RUN_INTENT_CONTINUE_EDIT);
+}
+function closeSmartRunIntentMenu(){
+    runIntentControl?.classList.remove('open');
+    runIntentToggle?.setAttribute('aria-expanded', 'false');
+}
+function syncSmartRunIntentUi(node=selectedNode()){
+    if(!runIntentControl || !runBtn) return;
+    if(smartRunIntentNodeId !== (node?.id || '')){
+        smartRunIntentNodeId = node?.id || '';
+        smartRunIntent = SMART_RUN_INTENT_REGENERATE;
+        closeSmartRunIntentMenu();
+    }
+    const canContinue = smartRunCanContinueFromCurrent(node);
+    const requirement = smartRunSelfRequirement(node);
+    if(!canContinue) smartRunIntent = SMART_RUN_INTENT_REGENERATE;
+    else if(requirement.required) smartRunIntent = SMART_RUN_INTENT_CONTINUE_EDIT;
+    const intent = smartRunIntentForNode(node);
+    const canChooseIntent = Boolean(canContinue && isSmartRunnableNode(node));
+    const label = canChooseIntent
+        ? (intent === SMART_RUN_INTENT_CONTINUE_EDIT ? '继续编辑当前图' : '重新生成')
+        : '运行';
+    const description = intent === SMART_RUN_INTENT_CONTINUE_EDIT
+        ? (requirement.reason || '将当前采用结果作为参考图继续生成')
+        : '使用当前显式参考图重新生成，不引用当前结果';
+    const labelEl = runBtn.querySelector('[data-run-action-label]');
+    if(labelEl) labelEl.textContent = label;
+    runBtn.title = description;
+    runIntentControl.classList.toggle('single-mode', !canChooseIntent);
+    runIntentControl.dataset.intent = intent;
+    if(runIntentToggle){
+        runIntentToggle.disabled = runBtn.disabled || !canChooseIntent;
+        runIntentToggle.title = canChooseIntent ? `当前：${label}。点击选择运行方式` : '当前节点没有可继续编辑的采用图片';
+    }
+    runIntentMenu?.querySelectorAll('[data-run-intent]').forEach(option => {
+        const value = option.dataset.runIntent || '';
+        option.classList.toggle('active', value === intent);
+        option.disabled = value === SMART_RUN_INTENT_CONTINUE_EDIT ? !canContinue : Boolean(requirement.required);
+    });
+    if(!canChooseIntent) closeSmartRunIntentMenu();
+}
+function setSmartRunIntent(intent, node=selectedNode()){
+    if(!node || ![SMART_RUN_INTENT_REGENERATE, SMART_RUN_INTENT_CONTINUE_EDIT].includes(intent)) return false;
+    const requirement = smartRunSelfRequirement(node);
+    if(intent === SMART_RUN_INTENT_CONTINUE_EDIT && !smartRunCanContinueFromCurrent(node)) return false;
+    if(intent === SMART_RUN_INTENT_REGENERATE && requirement.required) return false;
+    smartRunIntentNodeId = node.id;
+    smartRunIntent = intent;
+    closeSmartRunIntentMenu();
+    syncSmartRunIntentUi(node);
+    if(inputThumbsRow) delete inputThumbsRow.dataset.thumbsSig;
+    renderInputThumbsRow(node);
+    return true;
+}
 function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
     // 只在“当前选中节点自己”忙时禁用运行：节点正在生成/排队，或它本身是正在跑的循环。
     // 不再因为“画布上有任意循环/级联在跑”就全局禁用——跑循环时仍可对其他节点点生成。
     runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
+    syncSmartRunIntentUi(node);
 }
 function mergeSmartNode(local, remote){
     const images = mergeSmartImageLists(local.images, remote.images);
@@ -16824,9 +16910,10 @@ function toggleInputRefBlocked(node, img){
     renderInputThumbsRow(node);
     scheduleSave();
 }
-function defaultReferenceImagesFor(node, consume=false, ctx=smartLoopContext){
+function defaultReferenceImagesFor(node, consume=false, ctx=smartLoopContext, options={}){
     if(!node) return [];
-    const self = selfReferenceImagesForNode(node, consume, ctx).filter(img => img?.url);
+    const includeSelf = Boolean(options?.includeSelf) && !smartImageUsesWorkflowInput(node, ctx);
+    const self = includeSelf ? selfReferenceImagesForNode(node, consume, ctx).filter(img => img?.url) : [];
     const upstream = (smartImageUsesWorkflowInput(node, ctx) ? workflowInputImagesFor(node, consume, ctx) : inputImagesFor(node, consume, ctx))
         .filter(img => img?.url);
     const manual = manualReferenceImagesFor(node);
@@ -16914,8 +17001,9 @@ function uniqueReferenceImages(images){
     });
     return refs;
 }
-function visibleReferenceImagesFor(node){
-    const base = defaultReferenceImagesFor(node);
+function visibleReferenceImagesFor(node, options={}){
+    const includeSelf = options?.includeSelf === undefined ? smartRunIncludeSelfForNode(node) : Boolean(options.includeSelf);
+    const base = defaultReferenceImagesFor(node, false, smartLoopContext, {includeSelf});
     return uniqueReferenceImages([...base, ...collectMentionedImagesFromPrompt()]);
 }
 function inputMentionCandidateImages(node){
@@ -16966,8 +17054,8 @@ function assetMentionCandidateImages(categoryId=''){
 function mentionCandidateImages(node, source=mentionSource){
     return source === 'asset' ? assetMentionCandidateImages(mentionAssetCategoryId) : inputMentionCandidateImages(node);
 }
-function referenceImagesFor(node){
-    return defaultReferenceImagesFor(node);
+function referenceImagesFor(node, options={}){
+    return defaultReferenceImagesFor(node, false, smartLoopContext, options);
 }
 function closeMentionPicker(){
     mentionPicker.classList.remove('open');
@@ -17318,12 +17406,12 @@ function originalPromptTextFromParts(parts){
     });
     return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
-function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
+function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext, options={}){
     const parts = collectPromptParts();
     const originalPrompt = originalPromptTextFromParts(parts);
     const blockedRefs = blockedInputRefKeys(node);
     const hasOverrideImages = Array.isArray(overrideDefaultImages);
-    const filteredDefaultImages = (hasOverrideImages ? overrideDefaultImages : defaultReferenceImagesFor(node, consumeDefault, ctx))
+    const filteredDefaultImages = (hasOverrideImages ? overrideDefaultImages : defaultReferenceImagesFor(node, consumeDefault, ctx, options))
         .filter(img => !blockedRefs.has(inputRefKey(img)));
     const defaultRefs = uniqueReferenceImages(filteredDefaultImages);
     const refs = defaultRefs.map((img, index) => ({...img, role:`image_${index + 1}`}));
@@ -18287,7 +18375,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     settings = runSettings;
     const outpaintSize = validOutpaintSize(requestNode);
     const selfRefs = sourceNode?.type === 'smart-loop' ? [] : selfReferenceImagesForNode(sourceNode, false, ctx).filter(img => img?.url);
-    const sourceRefs = (selfRefs.length ? selfRefs : defaultReferenceImagesFor(requestNode, false, ctx)).filter(img => img?.url);
+    const sourceRefs = (selfRefs.length ? selfRefs : defaultReferenceImagesFor(requestNode, false, ctx, {includeSelf:true})).filter(img => img?.url);
     const refsForRequest = sourceRefs.length
         ? sourceRefs
         : (inputRefs && inputRefs.length ? inputRefs : null);
@@ -18721,7 +18809,7 @@ async function runSmartCascade(targetNode=null){
                     await runBranch(target, refs);
                 }
             };
-            const rootRefs = defaultReferenceImagesFor(graph.root, true, ctx).filter(img => img?.url);
+            const rootRefs = defaultReferenceImagesFor(graph.root, true, ctx, {includeSelf:true}).filter(img => img?.url);
             producedRefs.set(graph.root.id, rootRefs);
             await runBranch(graph.root, rootRefs);
         };
@@ -18782,18 +18870,20 @@ function runSmartCascadeFromLoop(loopId){
     selectedImage = {nodeId:'', index:-1};
     runSmartCascade(tail);
 }
-async function runGeneration(){
+async function runGeneration(options={}){
     const node = selectedNode();
     if(node?.type === 'smart-minimax') return runMinimaxNode(node.id);
     if(!node) return;
     const initialRunSettings = smartSettingsForNode(node);
+    const includeSelf = Boolean(options?.includeSelf) || smartRunSelfRequirement(node, initialRunSettings).required;
+    setSmartRunIntent(includeSelf ? SMART_RUN_INTENT_CONTINUE_EDIT : SMART_RUN_INTENT_REGENERATE, node);
     try {
         await materializeSmartCanvasReferenceEdges(node.id, initialRunSettings);
     } catch(error){
         toast((error.message || String(error)).slice(0, 180));
         return;
     }
-    const request = buildPromptRequest(node, null, true, smartLoopContext);
+    const request = buildPromptRequest(node, null, true, smartLoopContext, {includeSelf});
     const prompt = request.prompt.trim();
     if(smartNodeInFlight(node)) return;
     const refs = request.refs;
@@ -21520,7 +21610,32 @@ composerResizeHandle?.addEventListener('mousedown', e => {
     document.body.classList.add('smart-composer-resize');
     capturePendingUndo();
 });
-runBtn.onclick = runGeneration;
+runBtn.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const node = selectedNode();
+    runGeneration({includeSelf:smartRunIncludeSelfForNode(node, smartSettingsForNode(node))});
+};
+runIntentToggle?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(runIntentToggle.disabled) return;
+    const open = !runIntentControl.classList.contains('open');
+    runIntentControl.classList.toggle('open', open);
+    runIntentToggle.setAttribute('aria-expanded', String(open));
+});
+runIntentMenu?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const option = event.target.closest('[data-run-intent]');
+    if(!option || option.disabled) return;
+    setSmartRunIntent(option.dataset.runIntent || SMART_RUN_INTENT_REGENERATE);
+});
+runIntentControl?.addEventListener('pointerdown', event => event.stopPropagation());
+runIntentControl?.addEventListener('mousedown', event => event.stopPropagation());
+document.addEventListener('click', event => {
+    if(!runIntentControl?.contains(event.target)) closeSmartRunIntentMenu();
+});
 cascadeRunBtn.onclick = () => {
     const node = selectedNode();
     const loopId = resolveSmartCascadeLoop(node?.id)?.node?.id || '';
@@ -21904,7 +22019,7 @@ composer.addEventListener('mousedown', event => event.stopPropagation());
 composer.addEventListener('click', event => {
     // 点「生成」按钮不要收起已展开的参数栏:否则每生成一次参数栏就被收起,需重新点开。
     // 参数控件(.smart-control)内部点击本就不关;运行按钮也排除,让参数栏熬过生成与重渲染。
-    if(!event.target.closest('.smart-control') && !event.target.closest('#runBtn') && !event.target.closest('#cascadeRunBtn')) closeAllSmartPopovers();
+    if(!event.target.closest('.smart-control') && !event.target.closest('.run-intent-control') && !event.target.closest('#cascadeRunBtn')) closeAllSmartPopovers();
     event.stopPropagation();
 });
 promptInput.addEventListener('input', maybeOpenMentionPicker);
