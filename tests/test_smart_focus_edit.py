@@ -49,11 +49,14 @@ class SmartFocusEditContractTests(unittest.TestCase):
             "nodeGenerationMetaFromAttempt",
             "applyNodeGenerationAttempt",
             "completeNodeGenerationAttempt",
+            "clearNodeGenerationTerminalState",
             "finishNodeGenerationAttempt",
         ))
         harness = f"""
 let tick = 1000;
 let selectedImage = {{nodeId:'', index:-1}};
+const activeSmartGenerationRuns = new Map();
+const smartNodeRunTokens = new Map();
 function nowMs(){{ return ++tick; }}
 function uid(){{ return `generation-${{tick}}`; }}
 function nodeGenerationReferenceSnapshot(refs){{ return (refs || []).map(item => ({{...item}})); }}
@@ -65,7 +68,8 @@ function mediaKindForUrls(){{ return 'image'; }}
 function cascadeOutputTitle(kind, count){{ return count > 1 ? 'Group' : 'Image'; }}
 function cloneSmartSettings(settings){{ return {{...(settings || {{}})}}; }}
 function attachRunMeta(node, meta){{ node.runPrompt = meta.displayPrompt; node.runSettings = meta.settings; }}
-function markSmartNodeComplete(node){{ node.pending = 0; node.running = false; node.runFinishedAt = nowMs(); }}
+function clearSmartNodeBusyState(node){{ smartNodeRunTokens.delete(node.id); node.pending = 0; node.running = false; node.queued = false; delete node.pendingTasks; return node; }}
+function markSmartNodeComplete(node){{ clearSmartNodeBusyState(node); node.runFinishedAt = nowMs(); }}
 {functions}
 const original = {{id:'v1', status:'success', createdAt:1, completedAt:2, outputKind:'image', outputs:[{{url:'/old.png'}}]}};
 const node = {{id:'target', w:320, h:220, scale:1, images:[{{url:'/old.png'}}], generationHistory:[original], currentGenerationId:'v1'}};

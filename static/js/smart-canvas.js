@@ -5706,11 +5706,12 @@ function mergeNodeGenerationState(base, local, remote){
     }
     const localActive = nodeGenerationAttempt(local);
     const remoteActive = nodeGenerationAttempt(remote);
-    const active = localActive?.status === 'running' && smartNodeInFlight(local)
+    const activeCandidate = localActive?.status === 'running' && smartNodeInFlight(local)
         ? localActive
         : remoteActive?.status === 'running' && smartNodeInFlight(remote)
             ? remoteActive
             : null;
+    const active = activeCandidate && history.find(item => item.id === activeCandidate.id && item.status === 'running');
     if(active) result.activeGenerationId = active.id;
     else delete result.activeGenerationId;
     return result;
@@ -5863,6 +5864,7 @@ function applyMergedServerCanvas(serverCanvas){
     nodes = mergedNodes;
     canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
     const cleanedState = clearCompletedNodeBusyStates();
+    const reconciledGenerationHistory = nodes.map(reconcileNodeGenerationHistory).some(Boolean);
     const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
     canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
     if(canvas.title !== serverCanvas.title && serverCanvas.title){
@@ -5872,7 +5874,7 @@ function applyMergedServerCanvas(serverCanvas){
     }
     render();
     if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
-    if(cleanedState || recoveredLoopOutputs) scheduleSave();
+    if(cleanedState || reconciledGenerationHistory || recoveredLoopOutputs) scheduleSave();
     resumeSmartPendingTasks();
     resumeJimengPendingNodes();
     return true;
@@ -16092,6 +16094,7 @@ function applyNodeGenerationAttempt(node, attempt, {layout=null}={}){
 function completeNodeGenerationAttempt(node, outputs, options={}){
     const attempt = nodeGenerationAttempt(node, options.generationId || '');
     if(!attempt || attempt.status !== 'running') return false;
+    if(node.activeGenerationId && node.activeGenerationId !== attempt.id) return false;
     const additions = normalizeNodeGenerationOutputs(outputs, options.kind || attempt.outputKind || 'image');
     const merged = cleanHistoryImages([...(attempt.outputs || []), ...additions]);
     if(!merged.length) return false;
@@ -16102,8 +16105,18 @@ function completeNodeGenerationAttempt(node, outputs, options={}){
     attempt.updatedAt = attempt.completedAt;
     attempt.error = '';
     markSmartNodeComplete(node, {createdAt:attempt.createdAt});
-    if(node.activeGenerationId === attempt.id) delete node.activeGenerationId;
+    clearNodeGenerationTerminalState(node, attempt.id);
     return applyNodeGenerationAttempt(node, attempt, {layout:attempt.layout});
+}
+function clearNodeGenerationTerminalState(node, generationId=''){
+    if(!node) return false;
+    const attempt = nodeGenerationAttempt(node, generationId);
+    if(attempt && !['success','failed','cancelled'].includes(attempt.status)) return false;
+    if(generationId && node.activeGenerationId && node.activeGenerationId !== generationId) return false;
+    if(generationId) activeSmartGenerationRuns.delete(generationId);
+    if(!generationId || node.activeGenerationId === generationId) delete node.activeGenerationId;
+    clearSmartNodeBusyState(node);
+    return true;
 }
 function finishNodeGenerationAttempt(node, status, error='', generationId=''){
     const attempt = nodeGenerationAttempt(node, generationId);
@@ -16113,7 +16126,7 @@ function finishNodeGenerationAttempt(node, status, error='', generationId=''){
     attempt.updatedAt = attempt.completedAt;
     if(attempt.status === 'cancelled') attempt.cancelledAt = attempt.completedAt;
     attempt.error = String(error || '').slice(0, 1200);
-    if(node.activeGenerationId === attempt.id) delete node.activeGenerationId;
+    clearNodeGenerationTerminalState(node, attempt.id);
     node.runFinishedAt = attempt.completedAt;
     if(!node.runStartedAt) node.runStartedAt = Number(attempt.createdAt || 0) || attempt.completedAt;
     node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
@@ -16153,12 +16166,35 @@ function reconcileNodeGenerationHistory(node){
             changed = true;
         }
     }
-    const active = nodeGenerationAttempt(node);
-    if(active && active.status === 'running' && !smartPendingTasks(node).length && !node.jimengPending && !node.running && !node.pending){
+    const pendingTasks = smartPendingTasks(node);
+    let active = nodeGenerationAttempt(node);
+    if(!active){
+        const resumableAttempt = pendingTasks
+            .map(task => nodeGenerationAttempt(node, task.generationId || ''))
+            .find(attempt => attempt?.status === 'running');
+        if(resumableAttempt){
+            node.activeGenerationId = resumableAttempt.id;
+            active = resumableAttempt;
+            changed = true;
+        }
+    }
+    const terminalFailureTask = pendingTasks.find(smartTaskHasTerminalFailure);
+    if(active?.status === 'running' && terminalFailureTask){
+        finishNodeGenerationAttempt(node, 'failed', terminalFailureTask.error || '生成任务失败', active.id);
+        changed = true;
+    } else if(active && active.status === 'running' && !smartPendingTasks(node).length && !node.jimengPending && !node.running && !node.pending){
         finishNodeGenerationAttempt(node, 'cancelled', '页面关闭或任务中断');
         changed = true;
     } else if(node.activeGenerationId && (!active || active.status !== 'running')){
-        delete node.activeGenerationId;
+        clearNodeGenerationTerminalState(node, node.activeGenerationId);
+        changed = true;
+    } else if(!node.activeGenerationId && current?.status === 'success' && smartNodeHasDisplayResult(node)
+        && !pendingTasks.some(task => nodeGenerationAttempt(node, task.generationId)?.status === 'running')
+        && (pendingTasks.length || node.pending || node.running || node.queued)){
+        clearSmartNodeBusyState(node);
+        changed = true;
+    } else if(!node.activeGenerationId && pendingTasks.length && pendingTasks.every(smartTaskHasTerminalFailure)){
+        clearSmartNodeBusyState(node);
         changed = true;
     }
     return changed;
@@ -19772,6 +19808,10 @@ function smartPendingTasks(node){
     if(!node || !Array.isArray(node.pendingTasks)) return [];
     return node.pendingTasks.filter(task => task && task.taskId);
 }
+function smartTaskHasTerminalFailure(task){
+    const status = String(task?.status || task?.upstreamStatus || '').trim().toLowerCase();
+    return ['fail','failed','error','canceled','cancelled'].includes(status);
+}
 function smartPendingStatusLabel(node){
     const statuses = smartPendingTasks(node).map(task => String(task.status || '').toLowerCase());
     if(statuses.includes('generating') || statuses.includes('running')) return 'Kie 正在生成';
@@ -20145,7 +20185,9 @@ async function pollSmartCanvasTask(taskId){
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
-                if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+                if(recoverTaskId && !smartTaskHasTerminalFailure({status:task.upstream_status})){
+                    throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+                }
                 throw new Error(task.error || tr('smart.errRunFailed'));
             }
         }
@@ -20162,9 +20204,9 @@ async function pollSmartCanvasTask(taskId){
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     if(!node || !taskId) return;
     const generationAttempt = nodeGenerationAttemptForTask(node, taskId);
-    // Local cancel is authoritative for adoption: a provider result that arrives
-    // after cancellation must never overwrite the current adopted image.
-    if(generationAttempt?.status === 'cancelled') return;
+    // Terminal and superseded attempts are authoritative: a late provider callback
+    // must never revive loading state or overwrite the current adopted image.
+    if(generationAttempt && (generationAttempt.status !== 'running' || node.activeGenerationId !== generationAttempt.id)) return;
     node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
     node.pending = Math.max(0, Number(node.pending || 0) - 1);
     if(generationAttempt?.status === 'running'){

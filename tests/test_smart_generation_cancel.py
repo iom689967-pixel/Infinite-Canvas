@@ -176,9 +176,10 @@ class SmartCanvasCancelFrontendContractTests(unittest.TestCase):
         complete = function_source("completeNodeGenerationAttempt")
         run = function_source("runGeneration")
         self.assertLess(
-            finalizer.index("generationAttempt?.status === 'cancelled'"),
+            finalizer.index("generationAttempt.status !== 'running'"),
             finalizer.index("node.pendingTasks ="),
         )
+        self.assertIn("node.activeGenerationId !== generationAttempt.id", finalizer)
         self.assertIn("attempt.status !== 'running'", complete)
         self.assertIn("generationRunToken?.cancelRequested", run)
         self.assertIn("lateTaskIds.forEach(cancelSmartCanvasTask)", run)
