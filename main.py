@@ -11309,8 +11309,25 @@ async def generate_kie_provider_image(
     status_callback=None,
 ):
     reference_audits = []
+    async def report_status(status, raw=None):
+        if status_callback is None:
+            return
+        value = status_callback(status, raw or {})
+        if hasattr(value, "__await__"):
+            await value
+
+    def ensure_not_cancelled(upstream_task_id=""):
+        if cancel_event is not None and cancel_event.is_set():
+            raise KieTaskCancelled(
+                "Kie 任务已停止本地提交或等待",
+                task_id=upstream_task_id,
+            )
+
     try:
+        await report_status("preparing")
+        ensure_not_cancelled()
         reference_urls, reference_audits = await kie_public_reference_urls(model, reference_images)
+        ensure_not_cancelled()
         create_payload, request_meta = build_kie_create_payload(
             model,
             prompt,
@@ -11319,6 +11336,7 @@ async def generate_kie_provider_image(
             resolution=resolution,
             output_format=output_format,
         )
+        ensure_not_cancelled()
         print(json.dumps({
             "event": "kie_create_request",
             "payload": create_payload,
@@ -11326,7 +11344,11 @@ async def generate_kie_provider_image(
         }, ensure_ascii=False), flush=True)
         client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
         # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
+        await report_status("submitting")
+        ensure_not_cancelled()
         task_id, _create_raw = await client.create_task(create_payload)
+        await report_status("submitted", {"taskId": task_id})
+        ensure_not_cancelled(task_id)
         result = await poll_kie_task(
             client,
             task_id,
@@ -11336,6 +11358,7 @@ async def generate_kie_provider_image(
             cancel_event=cancel_event,
             on_status=status_callback,
         )
+        ensure_not_cancelled(task_id)
         urls = result.get("resultUrls") or []
         raw = {
             "taskId": task_id,
@@ -14871,18 +14894,25 @@ async def query_image_task(payload: ImageTaskQueryRequest):
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
+            CANVAS_TASKS[task_id]["status"] = "preparing" if payload.provider_id == "kie" else "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
         cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
 
         def update_upstream_status(status, _raw):
-            normalized = "queued" if status in {"waiting", "queuing"} else "generating" if status == "generating" else status
+            raw = _raw if isinstance(_raw, dict) else {}
+            upstream_task_id = str(raw.get("taskId") or raw.get("task_id") or "").strip()
+            normalized = "queued" if status in {"waiting", "queuing", "submitted"} else "generating" if status == "generating" else status
             with CANVAS_TASK_LOCK:
-                if task_id in CANVAS_TASKS and CANVAS_TASKS[task_id].get("status") != "canceled":
-                    CANVAS_TASKS[task_id]["status"] = normalized or "running"
-                    CANVAS_TASKS[task_id]["upstream_status"] = status
-                    CANVAS_TASKS[task_id]["updated_at"] = time.time()
+                task = CANVAS_TASKS.get(task_id)
+                if not task:
+                    return
+                if upstream_task_id:
+                    task["upstream_task_id"] = upstream_task_id
+                if task.get("status") != "canceled":
+                    task["status"] = normalized or "running"
+                    task["upstream_status"] = status
+                task["updated_at"] = time.time()
 
         result = await build_online_image_result(
             payload,
@@ -14988,14 +15018,43 @@ async def cancel_canvas_image_task(task_id: str):
         if not task:
             raise HTTPException(status_code=404, detail="画布任务不存在")
         if task.get("status") in {"succeeded", "failed", "canceled"}:
-            return {"task_id": task_id, "status": task.get("status")}
+            return {
+                "task_id": task_id,
+                "status": task.get("status"),
+                "upstream_task_id": task.get("upstream_task_id") or "",
+                "upstream_cancel_supported": False,
+            }
+        previous_status = str(task.get("status") or "")
         task["status"] = "canceled"
         task["error"] = "任务已取消"
+        task["canceled_at"] = time.time()
         task["updated_at"] = time.time()
+        upstream_task_id = task.get("upstream_task_id") or ""
     cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
     if cancel_event:
         cancel_event.set()
-    return {"task_id": task_id, "status": "canceled"}
+    # 参考准备阶段还没有向 Kie 提交，可以直接终止后台协程；进入 submitting
+    # 后则让 createTask 响应返回，以便记录 upstream taskId，再由 cancel_event 停止轮询。
+    hard_cancel = previous_status in {"queued", "preparing"} and not upstream_task_id
+    runner = CANVAS_TASK_RUNNERS.get(task_id)
+    if hard_cancel and runner and not runner.done():
+        runner.cancel()
+        def cleanup_canceled_runner(_done):
+            CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
+            CANVAS_TASK_RUNNERS.pop(task_id, None)
+        runner.add_done_callback(cleanup_canceled_runner)
+    return {
+        "task_id": task_id,
+        "status": "canceled",
+        "cancel_scope": "pre-submit" if hard_cancel else "local-only",
+        "upstream_task_id": upstream_task_id,
+        "upstream_cancel_supported": False,
+        "message": (
+            "生成已在提交前取消，未创建 Kie 任务"
+            if hard_cancel else
+            "已停止本地等待；任务可能已提交服务商并继续执行"
+        ),
+    }
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
