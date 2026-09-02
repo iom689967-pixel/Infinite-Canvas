@@ -43,6 +43,7 @@ class SmartFocusEditContractTests(unittest.TestCase):
     def setUpClass(cls):
         functions = "\n".join(function_source(name) for name in (
             "focusEditReferenceSnapshot",
+            "liveNodeGenerationState",
             "nodeGenerationHistoryItems",
             "createNodeGenerationAttempt",
             "nodeGenerationAttempt",
@@ -56,6 +57,7 @@ class SmartFocusEditContractTests(unittest.TestCase):
 let tick = 1000;
 let selectedImage = {{nodeId:'', index:-1}};
 const activeSmartGenerationRuns = new Map();
+const cancellingSmartGenerationIds = new Set();
 const smartNodeRunTokens = new Map();
 function nowMs(){{ return ++tick; }}
 function uid(){{ return `generation-${{tick}}`; }}

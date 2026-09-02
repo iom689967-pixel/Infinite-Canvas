@@ -72,6 +72,7 @@ class SmartNodeGenerationHistoryContractTests(unittest.TestCase):
 
     def test_04_running_does_not_replace_current_and_failure_keeps_old_image(self):
         functions = "\n".join(function_source(name) for name in (
+            "liveNodeGenerationState",
             "nodeGenerationHistoryItems",
             "createNodeGenerationAttempt",
             "nodeGenerationAttempt",
@@ -84,6 +85,7 @@ class SmartNodeGenerationHistoryContractTests(unittest.TestCase):
 let tick = 1000;
 let selectedImage = {{nodeId:'', index:-1}};
 const activeSmartGenerationRuns = new Map();
+const cancellingSmartGenerationIds = new Set();
 const smartNodeRunTokens = new Map();
 function nowMs(){{ return ++tick; }}
 function uid(){{ return `generation-${{tick}}`; }}

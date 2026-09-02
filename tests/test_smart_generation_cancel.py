@@ -189,7 +189,7 @@ class SmartCanvasCancelFrontendContractTests(unittest.TestCase):
             run.index("const supersededByNewAttempt = generationWasSuperseded()"),
             run.index("if(!supersededByNewAttempt) pendingNode.pending = 0"),
         )
-        self.assertIn("pendingNode.activeGenerationId !== generationAttempt.id", run)
+        self.assertIn("livePendingNode.activeGenerationId !== generationAttempt.id", run)
 
     def test_09_cancelled_is_distinct_from_failure_and_survives_refresh(self):
         finish = function_source("finishNodeGenerationAttempt")

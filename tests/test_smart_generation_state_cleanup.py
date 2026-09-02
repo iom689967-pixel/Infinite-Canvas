@@ -52,6 +52,7 @@ class SmartGenerationStateCleanupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         functions = "\n".join(function_source(name) for name in (
+            "liveNodeGenerationState",
             "nodeGenerationHistoryItems",
             "nodeGenerationAttempt",
             "applyNodeGenerationAttempt",
@@ -63,6 +64,7 @@ class SmartGenerationStateCleanupTests(unittest.TestCase):
         cls.terminal = run_node(f"""
 let tick = 1000;
 let selectedImage = {{nodeId:'', index:-1}};
+let nodes = [];
 const activeSmartGenerationRuns = new Map();
 const cancellingSmartGenerationIds = new Set();
 const smartNodeRunTokens = new Map();
@@ -97,12 +99,15 @@ function busyNode(id, status='running'){{
   return {{id, pending:1, running:true, queued:true, pendingTasks:[{{taskId:`${{id}}-task`, generationId:attempt.id}}], activeGenerationId:attempt.id, generationHistory:[attempt], images:[{{url:'/old.png'}}], currentGenerationId:'old'}};
 }}
 const success = busyNode('success');
+nodes = [success];
 activeSmartGenerationRuns.set(success.activeGenerationId, {{}});
 completeNodeGenerationAttempt(success, [{{url:'/new.png'}}], {{generationId:success.activeGenerationId, kind:'image'}});
 const failed = busyNode('failed');
+nodes = [failed];
 activeSmartGenerationRuns.set(failed.activeGenerationId, {{}});
 finishNodeGenerationAttempt(failed, 'failed', 'boom', failed.activeGenerationId);
 const cancelled = busyNode('cancelled');
+nodes = [cancelled];
 activeSmartGenerationRuns.set(cancelled.activeGenerationId, {{}});
 finishNodeGenerationAttempt(cancelled, 'cancelled', 'stop', cancelled.activeGenerationId);
 function state(node){{ return {{
@@ -120,6 +125,7 @@ function state(node){{ return {{
 console.log(JSON.stringify({{success:state(success), failed:state(failed), cancelled:state(cancelled)}}));
 """)
         reconcile_functions = "\n".join(function_source(name) for name in (
+            "liveNodeGenerationState",
             "nodeGenerationHistoryItems",
             "nodeGenerationAttempt",
             "smartPendingTasks",
@@ -130,7 +136,9 @@ console.log(JSON.stringify({{success:state(success), failed:state(failed), cance
         ))
         cls.reloaded = run_node(f"""
 let tick = 2000;
+let nodes = [];
 const activeSmartGenerationRuns = new Map();
+const cancellingSmartGenerationIds = new Set();
 const smartNodeRunTokens = new Map();
 function nowMs(){{ return ++tick; }}
 function clearSmartNodeBusyState(node){{ node.pending=0; node.running=false; node.queued=false; delete node.pendingTasks; return node; }}
@@ -143,6 +151,7 @@ const failedAttempt = {{id:'failed-attempt', status:'running', createdAt:3, comp
 const failed = {{id:'failed', images:[{{url:'/old.png'}}], generationHistory:[failedAttempt], activeGenerationId:failedAttempt.id, pending:1, running:false, queued:false, pendingTasks:[{{taskId:'failed-task', generationId:failedAttempt.id, status:'fail', error:'terminal upstream failure'}}]}};
 const resumedAttempt = {{id:'resumed-attempt', status:'running', createdAt:4, completedAt:0, outputs:[], taskIds:['resumed-task'], references:[]}};
 const resumed = {{id:'resumed', images:[{{url:'/old.png'}}], generationHistory:[resumedAttempt], pending:1, running:false, queued:false, pendingTasks:[{{taskId:'resumed-task', generationId:resumedAttempt.id, status:'generating'}}]}};
+nodes = [success, failed, resumed];
 const successChanged = reconcileNodeGenerationHistory(success);
 const failedChanged = reconcileNodeGenerationHistory(failed);
 const resumedChanged = reconcileNodeGenerationHistory(resumed);
@@ -177,6 +186,10 @@ console.log(JSON.stringify({{success:state(success, successChanged), failed:stat
 
     def test_07_late_callback_cannot_restore_terminal_attempt(self):
         finalizer = function_source("finalizeSmartPendingTask")
+        self.assertLess(
+            finalizer.index("liveNodeGenerationState(node)"),
+            finalizer.index("nodeGenerationAttemptForTask"),
+        )
         self.assertIn("generationAttempt.status !== 'running'", finalizer)
         self.assertLess(
             finalizer.index("generationAttempt.status !== 'running'"),
@@ -216,6 +229,82 @@ console.log(JSON.stringify({{success:state(success, successChanged), failed:stat
             poll.index("!smartTaskHasTerminalFailure({status:task.upstream_status})"),
             poll.index("throw new ImageTaskRecoverSignal"),
         )
+
+    def test_11_terminal_callback_updates_current_live_node_after_merge_replacement(self):
+        functions = "\n".join(function_source(name) for name in (
+            "liveNodeGenerationState",
+            "nodeGenerationHistoryItems",
+            "nodeGenerationAttempt",
+            "applyNodeGenerationAttempt",
+            "completeNodeGenerationAttempt",
+            "clearNodeGenerationTerminalState",
+        ))
+        result = run_node(f"""
+let tick = 3000;
+let selectedImage = {{nodeId:'', index:-1}};
+const activeSmartGenerationRuns = new Map();
+const cancellingSmartGenerationIds = new Set();
+const smartNodeRunTokens = new Map();
+function nowMs(){{ return ++tick; }}
+function clearSmartNodeBusyState(node){{ node.pending=0; node.running=false; node.queued=false; delete node.pendingTasks; return node; }}
+function markSmartNodeComplete(node){{ clearSmartNodeBusyState(node); node.runFinishedAt=nowMs(); }}
+function normalizeNodeGenerationOutputs(outputs){{ return (outputs || []).map(item => ({{...item}})); }}
+function cleanHistoryImages(items){{ return (items || []).filter(item => item?.url); }}
+function mediaKindForUrls(){{ return 'image'; }}
+function nodeGenerationLayoutSnapshot(node){{ return {{width:node.w, height:node.h, scale:node.scale}}; }}
+function cascadeOutputTitle(){{ return 'Image'; }}
+function nodeGenerationMetaFromAttempt(attempt){{ return {{createdAt:attempt.createdAt}}; }}
+function attachRunMeta(){{}}
+{functions}
+const staleAttempt = {{id:'attempt-a', status:'running', createdAt:1, outputs:[], outputKind:'image'}};
+const stale = {{id:'node-1', activeGenerationId:'attempt-a', generationHistory:[staleAttempt], pending:1, running:false, pendingTasks:[{{taskId:'task-a', generationId:'attempt-a'}}], images:[{{url:'/old.png'}}]}};
+const live = JSON.parse(JSON.stringify(stale));
+let nodes = [live];
+completeNodeGenerationAttempt(stale, [{{url:'/new.png'}}], {{generationId:'attempt-a', kind:'image'}});
+console.log(JSON.stringify({{
+  liveStatus:live.generationHistory[0].status,
+  liveImage:live.images[0].url,
+  liveActive:Object.prototype.hasOwnProperty.call(live, 'activeGenerationId'),
+  livePending:live.pending,
+  staleStatus:stale.generationHistory[0].status
+}}));
+""")
+        self.assertEqual(result, {
+            "liveStatus": "success",
+            "liveImage": "/new.png",
+            "liveActive": False,
+            "livePending": 0,
+            "staleStatus": "running",
+        })
+
+    def test_12_old_attempt_cannot_clear_new_live_attempt(self):
+        functions = "\n".join(function_source(name) for name in (
+            "liveNodeGenerationState",
+            "nodeGenerationHistoryItems",
+            "nodeGenerationAttempt",
+            "clearNodeGenerationTerminalState",
+        ))
+        result = run_node(f"""
+const activeSmartGenerationRuns = new Map();
+const cancellingSmartGenerationIds = new Set();
+function clearSmartNodeBusyState(node){{ node.pending=0; node.running=false; delete node.pendingTasks; return node; }}
+{functions}
+const stale = {{id:'node-1', activeGenerationId:'attempt-a', generationHistory:[{{id:'attempt-a', status:'cancelled'}}], pending:1, pendingTasks:[{{taskId:'task-a'}}]}};
+const live = {{id:'node-1', activeGenerationId:'attempt-b', generationHistory:[{{id:'attempt-a', status:'cancelled'}},{{id:'attempt-b', status:'running'}}], pending:1, running:false, pendingTasks:[{{taskId:'task-b', generationId:'attempt-b'}}]}};
+let nodes = [live];
+const cleared = clearNodeGenerationTerminalState(stale, 'attempt-a');
+console.log(JSON.stringify({{cleared, active:live.activeGenerationId, pending:live.pending, task:live.pendingTasks[0].taskId, status:live.generationHistory[1].status}}));
+""")
+        self.assertEqual(result, {
+            "cleared": False,
+            "active": "attempt-b",
+            "pending": 1,
+            "task": "task-b",
+            "status": "running",
+        })
+        resume = function_source("resumeSmartPendingNode")
+        self.assertIn("nodeGenerationAttempt(node, generationAttemptId)", resume)
+        self.assertIn("node.activeGenerationId === activeAttempt.id", resume)
 
 
 if __name__ == "__main__":
