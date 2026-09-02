@@ -25,8 +25,16 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
             now_fn=lambda: self.clock[0],
         )
         self.paths = {}
+        self.lightweight_validate = AsyncMock(return_value=(200, "image/png"))
+        self.lightweight_patcher = patch.object(
+            uploads,
+            "validate_reference_availability_lightweight",
+            self.lightweight_validate,
+        )
+        self.lightweight_patcher.start()
 
     def tearDown(self):
+        self.lightweight_patcher.stop()
         self.temp_dir.cleanup()
 
     def add_image(self, name, color):
@@ -91,6 +99,10 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["kie_url"], urls[0])
         self.assertEqual(entry["validated_at"], self.clock[0])
         self.assertEqual(entry["created_at"], self.clock[0])
+        self.assertEqual(
+            entry["expires_at"],
+            self.clock[0] + uploads.KIE_REFERENCE_ABSOLUTE_TTL_SECONDS,
+        )
         self.assertEqual(entry["last_used_at"], self.clock[0])
         self.assertGreater(entry["size"], 0)
         self.assertEqual(entry["mime_type"], "image/png")

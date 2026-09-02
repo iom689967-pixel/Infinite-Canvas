@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ KIE_UPLOAD_BASE_URL = "https://kieai.redpandaai.co"
 KIE_STREAM_UPLOAD_PATH = "/api/file-stream-upload"
 KIE_UPLOAD_PATH = "images/infinite-canvas"
 KIE_REFERENCE_CACHE_TTL_SECONDS = 24 * 60 * 60
+KIE_REFERENCE_ABSOLUTE_TTL_SECONDS = 23 * 60 * 60
 KIE_REFERENCE_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "kie_reference_cache.json"
 
 
@@ -37,6 +39,24 @@ def _safe_timestamp(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _parse_expiry_timestamp(value):
+    if value in (None, ""):
+        return 0.0
+    numeric = _safe_timestamp(value)
+    if numeric > 0:
+        return numeric / 1000.0 if numeric > 10_000_000_000 else numeric
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _cache_ttl_from_env():
@@ -128,13 +148,23 @@ class KieReferenceUploadCache:
             if not isinstance(entry, dict):
                 return "miss", None
             validated_at = _safe_timestamp(entry.get("validated_at"))
+            created_at = _safe_timestamp(entry.get("created_at"))
             expires_at = _safe_timestamp(entry.get("expires_at"))
             url = str(entry.get("kie_url") or "").strip()
             if entry.get("sha256") != digest or not url.startswith("https://") or validated_at <= 0:
                 entries.pop(digest, None)
                 self._write_payload_unlocked(entries, payload["sources"])
                 return "invalid", None
-            if (expires_at > 0 and now >= expires_at) or now - validated_at >= self.ttl_seconds:
+            if expires_at <= 0:
+                if created_at <= 0:
+                    return "absolute_expired", dict(entry)
+                expires_at = created_at + KIE_REFERENCE_ABSOLUTE_TTL_SECONDS
+                entry = {**entry, "expires_at": expires_at}
+                entries[digest] = entry
+                self._write_payload_unlocked(entries, payload["sources"])
+            if now >= expires_at:
+                return "absolute_expired", dict(entry)
+            if now - validated_at >= self.ttl_seconds:
                 return "expired", dict(entry)
             return "hit", dict(entry)
 
@@ -144,19 +174,23 @@ class KieReferenceUploadCache:
             payload = self._read_payload_unlocked()
             entries = payload["entries"]
             previous = entries.get(digest) if isinstance(entries.get(digest), dict) else {}
+            same_upload = str(previous.get("kie_url") or "") == str(url or "")
+            created_at = _safe_timestamp(previous.get("created_at"), now) if same_upload else now
+            absolute_expiry = _safe_timestamp(expires_at)
+            if absolute_expiry <= 0 and same_upload:
+                absolute_expiry = _safe_timestamp(previous.get("expires_at"))
+            if absolute_expiry <= 0:
+                absolute_expiry = created_at + KIE_REFERENCE_ABSOLUTE_TTL_SECONDS
             entry = {
                 "sha256": digest,
                 "kie_url": str(url or ""),
                 "validated_at": _safe_timestamp(validated_at, now),
-                "created_at": _safe_timestamp(previous.get("created_at"), now),
+                "created_at": created_at,
+                "expires_at": absolute_expiry,
                 "last_used_at": now,
                 "size": int(size or 0),
                 "mime_type": str(mime_type or ""),
             }
-            if expires_at is not None and _safe_timestamp(expires_at) > 0:
-                entry["expires_at"] = _safe_timestamp(expires_at)
-            elif _safe_timestamp(previous.get("expires_at")) > 0:
-                entry["expires_at"] = _safe_timestamp(previous.get("expires_at"))
             entries[digest] = entry
             return self._write_payload_unlocked(entries, payload["sources"])
 
@@ -526,7 +560,19 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
             http_status=response.status_code,
             content_type=response_type,
         )
-    return public_url, response.status_code, str(data.get("mimeType") or meta["mime_type"])
+    expires_at = 0.0
+    for key in ("expiresAt", "expires_at", "expiry"):
+        expires_at = _parse_expiry_timestamp(data.get(key))
+        if expires_at > 0:
+            break
+    return public_url, response.status_code, str(data.get("mimeType") or meta["mime_type"]), expires_at
+
+
+def _unpack_upload_result(value):
+    values = tuple(value or ())
+    if len(values) < 3:
+        raise ValueError("Kie upload result must contain URL, status, and MIME type")
+    return values[0], values[1], values[2], _safe_timestamp(values[3]) if len(values) > 3 else 0.0
 
 
 async def _validate_kie_public_url(client, url, *, index, filename):
@@ -559,6 +605,51 @@ async def _validate_kie_public_url(client, url, *, index, filename):
             content_type=content_type,
         )
     return response.status_code, content_type
+
+
+async def validate_reference_availability_lightweight(client, url, *, index, filename):
+    """Validate an already-uploaded reference without downloading the full image."""
+    try:
+        async with client.stream(
+            "GET",
+            url,
+            headers={"Accept": "image/*", "Range": "bytes=0-31"},
+        ) as response:
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if response.status_code not in {200, 206}:
+                raise KieReferenceError(
+                    "Kie 临时图片 URL 当前不可用",
+                    index=index,
+                    filename=filename,
+                    stage="kie-read",
+                    http_status=response.status_code,
+                    content_type=content_type,
+                )
+            prefix = b""
+            async for chunk in response.aiter_bytes(chunk_size=32):
+                if chunk:
+                    prefix += chunk[: max(0, 32 - len(prefix))]
+                if len(prefix) >= 32:
+                    break
+            if not content_type.startswith("image/") or not _magic_image_type(prefix):
+                raise KieReferenceError(
+                    "Kie 临时图片 URL 返回了非图片内容",
+                    index=index,
+                    filename=filename,
+                    stage="kie-read",
+                    http_status=response.status_code,
+                    content_type=content_type,
+                )
+            return response.status_code, content_type
+    except KieReferenceError:
+        raise
+    except (httpx.HTTPError, AttributeError) as exc:
+        raise KieReferenceError(
+            f"Kie 临时图片 URL 轻量检查失败：{exc}",
+            index=index,
+            filename=filename,
+            stage="kie-read",
+        ) from exc
 
 
 def _cached_normalized_meta(entry):
@@ -595,6 +686,7 @@ async def _resolve_normalized_upload(
         "cache_lookup_ms": 0.0,
         "upload_ms": 0.0,
         "validate_ms": 0.0,
+        "absolute_expired": 0,
     }
     cache_lock = _reference_hash_lock(cache.path, digest)
     cache_wait_started = time.perf_counter()
@@ -646,6 +738,11 @@ async def _resolve_normalized_upload(
                     "cache_status": "revalidated",
                     "cache_hit": 1,
                 })
+        elif lookup_state == "absolute_expired":
+            _log_reference_cache("ABSOLUTE_EXPIRED", digest)
+            cache.invalidate(digest)
+            _log_reference_cache("REUPLOAD_EXPIRED", digest)
+            result["absolute_expired"] = 1
         elif lookup_state == "invalid":
             _log_reference_cache("INVALIDATE", digest)
 
@@ -654,14 +751,16 @@ async def _resolve_normalized_upload(
             result["cache_miss"] = 1
             result["cache_status"] = "miss"
             upload_started = time.perf_counter()
-            public_url, upload_status, upload_type = await _upload_normalized_image(
-                client,
-                api_key,
-                normalized,
-                meta,
-                index=index,
-                filename=filename,
-                content_hash=digest,
+            public_url, upload_status, upload_type, expires_at = _unpack_upload_result(
+                await _upload_normalized_image(
+                    client,
+                    api_key,
+                    normalized,
+                    meta,
+                    index=index,
+                    filename=filename,
+                    content_hash=digest,
+                )
             )
             result["upload_ms"] = (time.perf_counter() - upload_started) * 1000
             validate_started = time.perf_counter()
@@ -682,6 +781,7 @@ async def _resolve_normalized_upload(
                 size=meta["bytes"],
                 mime_type=upload_type or meta["mime_type"],
                 validated_at=cache.now(),
+                expires_at=expires_at or None,
             ):
                 _log_reference_cache("STORE", digest)
     return result
@@ -760,7 +860,171 @@ async def _resolve_source_cache_hit(
                 }
                 result["verify_status"] = verify_status
                 result["verify_type"] = verify_type
+        elif state == "absolute_expired":
+            _log_reference_cache("ABSOLUTE_EXPIRED", digest)
+            _log_reference_cache("REUPLOAD_EXPIRED", digest)
+            cache.invalidate(digest)
+            result["state"] = "absolute_expired"
+            result["entry"] = None
     return result
+
+
+async def _read_reference_for_reupload(client, context, *, resolve_local_path, max_bytes):
+    source_url = context["source_url"]
+    source_form = context["source_form"]
+    index = context["index"]
+    filename = context["filename"]
+    local_source = None
+    if source_form == "data:image/base64":
+        content, source_type = _decode_data_url(source_url, index=index, filename=filename)
+    elif source_form in {"public HTTPS URL", "public HTTP URL"}:
+        content, source_type, _source_status = await _download_public_image(
+            client,
+            source_url,
+            index=index,
+            filename=filename,
+            max_bytes=max_bytes,
+        )
+    else:
+        local_path = str((context.get("local_source") or {}).get("path") or resolve_local_path(source_url) or "")
+        if not local_path or not os.path.isfile(local_path):
+            raise KieReferenceError(
+                f"无法解析本地图片来源（实际形式：{source_form}）",
+                index=index,
+                filename=filename,
+            )
+        try:
+            source_fingerprint, local_source = _local_source_fingerprint(local_path)
+            with open(local_source["path"], "rb") as handle:
+                content = handle.read(max_bytes + 1)
+        except OSError as exc:
+            raise KieReferenceError(
+                f"本地图片读取失败：{exc}", index=index, filename=filename
+            ) from exc
+        if len(content) > max_bytes:
+            raise KieReferenceError(
+                f"本地图片超过 {max_bytes} bytes",
+                index=index,
+                filename=filename,
+                content_type=_magic_image_type(content),
+            )
+        source_type = _magic_image_type(content)
+        context["source_fingerprint"] = source_fingerprint
+        context["local_source"] = local_source
+    normalized, meta = normalize_image_bytes(
+        content,
+        index=index,
+        filename=filename,
+        max_bytes=max_bytes,
+    )
+    return normalized, meta, local_source, source_type
+
+
+async def _selective_reupload_unavailable_reference(
+    cache,
+    client,
+    api_key,
+    context,
+    *,
+    unavailable_url,
+    failure,
+    resolve_local_path,
+    max_bytes,
+):
+    old_digest = context["digest"]
+    index = context["index"]
+    filename = context["filename"]
+    cache_lock = _reference_hash_lock(cache.path, old_digest)
+    async with cache_lock:
+        state, current_entry = cache.lookup(old_digest)
+        current_url = str((current_entry or {}).get("kie_url") or "")
+        if current_url and current_url != unavailable_url and state in {"hit", "expired"}:
+            try:
+                verify_status, verify_type = await validate_reference_availability_lightweight(
+                    client,
+                    current_url,
+                    index=index,
+                    filename=filename,
+                )
+            except KieReferenceError:
+                pass
+            else:
+                return {
+                    "public_url": current_url,
+                    "upload_status": None,
+                    "upload_type": str((current_entry or {}).get("mime_type") or verify_type),
+                    "verify_status": verify_status,
+                    "verify_type": verify_type,
+                    "digest": old_digest,
+                    "meta": _cached_normalized_meta(current_entry),
+                    "upload_ms": 0.0,
+                    "validate_ms": 0.0,
+                }
+        cache.invalidate(old_digest)
+        if getattr(failure, "http_status", None) in {404, 410}:
+            _log_reference_cache("PRE_SUBMIT_404", old_digest)
+        else:
+            _log_reference_cache("PRE_SUBMIT_INVALID", old_digest)
+        _log_reference_cache("INVALIDATE_SINGLE", old_digest)
+        _log_reference_cache("REUPLOAD_UNAVAILABLE", old_digest)
+        normalize_started = time.perf_counter()
+        normalized, meta, local_source, _source_type = await _read_reference_for_reupload(
+            client,
+            context,
+            resolve_local_path=resolve_local_path,
+            max_bytes=max_bytes,
+        )
+        normalize_ms = (time.perf_counter() - normalize_started) * 1000
+        digest = hashlib.sha256(normalized).hexdigest()
+        upload_started = time.perf_counter()
+        public_url, upload_status, upload_type, expires_at = _unpack_upload_result(
+            await _upload_normalized_image(
+                client,
+                api_key,
+                normalized,
+                meta,
+                index=index,
+                filename=filename,
+                content_hash=digest,
+            )
+        )
+        upload_ms = (time.perf_counter() - upload_started) * 1000
+        validate_started = time.perf_counter()
+        verify_status, verify_type = await _validate_kie_public_url(
+            client,
+            public_url,
+            index=index,
+            filename=filename,
+        )
+        validate_ms = (time.perf_counter() - validate_started) * 1000
+        if cache.store(
+            digest,
+            public_url,
+            size=meta["bytes"],
+            mime_type=upload_type or meta["mime_type"],
+            validated_at=cache.now(),
+            expires_at=expires_at or None,
+        ):
+            _log_reference_cache("STORE", digest)
+        if local_source and context.get("source_fingerprint"):
+            cache.store_source(
+                context["source_fingerprint"],
+                digest,
+                size=local_source["size"],
+                mtime_ns=local_source["mtime_ns"],
+            )
+        return {
+            "public_url": public_url,
+            "upload_status": upload_status,
+            "upload_type": upload_type,
+            "verify_status": verify_status,
+            "verify_type": verify_type,
+            "digest": digest,
+            "meta": meta,
+            "normalize_ms": normalize_ms,
+            "upload_ms": upload_ms,
+            "validate_ms": validate_ms,
+        }
 
 
 async def prepare_kie_references(
@@ -775,12 +1039,18 @@ async def prepare_kie_references(
     prepared_urls = []
     audits = []
     timing_rows = []
+    reference_contexts = []
     cache_hits = 0
     cache_misses = 0
     source_cache_hits = 0
     source_cache_misses = 0
     normalize_skipped_count = 0
     stale_normalize_avoided_count = 0
+    absolute_expired_count = 0
+    pre_submit_invalid_count = 0
+    selective_reupload_count = 0
+    valid_reference_reuse_count = 0
+    pre_submit_validation_ms = 0.0
     total_started = time.perf_counter()
     cache = cache or _default_reference_cache()
     timeout = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
@@ -803,6 +1073,7 @@ async def prepare_kie_references(
             source_cache_status = "ineligible"
             stale_validate_ms = 0.0
             stale_normalize_avoided = False
+            absolute_expired = False
             normalize_ms = 0.0
             cache_lookup_ms = 0.0
             cache_wait_ms = 0.0
@@ -897,6 +1168,9 @@ async def prepare_kie_references(
                             verify_status = source_resolution["verify_status"] or 200
                             verify_type = source_resolution["verify_type"] or upload_type
                             meta = _cached_normalized_meta(cache_entry)
+                        elif source_resolution["state"] == "absolute_expired":
+                            absolute_expired = True
+                            source_cache_status = "absolute_expired"
                         else:
                             if source_resolution["state"] != "stale_invalid":
                                 _log_reference_source_cache("STALE_INVALID", source_fingerprint)
@@ -979,6 +1253,10 @@ async def prepare_kie_references(
                 cache_lookup_ms += resolution["cache_lookup_ms"]
                 upload_ms += resolution["upload_ms"]
                 validate_ms += resolution["validate_ms"]
+                absolute_expired = absolute_expired or bool(resolution["absolute_expired"])
+            if absolute_expired:
+                absolute_expired_count += 1
+                selective_reupload_count += 1
             prepared_urls.append(public_url)
             reference_total_ms = (time.perf_counter() - reference_started) * 1000
             timing = {
@@ -991,6 +1269,9 @@ async def prepare_kie_references(
                 "source_cache_lookup_ms": round(source_cache_lookup_ms, 3),
                 "source_cache_wait_ms": round(source_cache_wait_ms, 3),
                 "stale_validate_ms": round(stale_validate_ms, 3),
+                "absolute_expired": absolute_expired,
+                "pre_submit_validation_ms": 0.0,
+                "selective_reupload": absolute_expired,
                 "normalize_ms": round(normalize_ms, 3),
                 "cache_wait_ms": round(cache_wait_ms, 3),
                 "cache_lookup_ms": round(cache_lookup_ms, 3),
@@ -1018,6 +1299,88 @@ async def prepare_kie_references(
                 "stale_normalize_avoided": stale_normalize_avoided,
                 "timing": timing,
             })
+            reference_contexts.append({
+                "index": index,
+                "filename": filename,
+                "source_url": source_url,
+                "source_form": source_form,
+                "source_fingerprint": source_fingerprint,
+                "local_source": local_source,
+                "digest": digest,
+            })
+
+        for position, (public_url, audit, context) in enumerate(
+            zip(prepared_urls, audits, reference_contexts)
+        ):
+            if audit["cache_status"] != "hit":
+                continue
+            guard_started = time.perf_counter()
+            try:
+                verify_status, verify_type = await validate_reference_availability_lightweight(
+                    client,
+                    public_url,
+                    index=context["index"],
+                    filename=context["filename"],
+                )
+            except KieReferenceError as guard_error:
+                guard_ms = (time.perf_counter() - guard_started) * 1000
+                pre_submit_validation_ms += guard_ms
+                pre_submit_invalid_count += 1
+                recovered = await _selective_reupload_unavailable_reference(
+                    cache,
+                    client,
+                    api_key,
+                    context,
+                    unavailable_url=public_url,
+                    failure=guard_error,
+                    resolve_local_path=resolve_local_path,
+                    max_bytes=max_bytes,
+                )
+                selective_reupload_count += 1
+                cache_hits = max(0, cache_hits - 1)
+                cache_misses += 1
+                if audit["source_cache_status"] == "hit" and normalize_skipped_count:
+                    normalize_skipped_count -= 1
+                prepared_urls[position] = recovered["public_url"]
+                audit.update({
+                    "public_url": recovered["public_url"],
+                    "upload_http_status": recovered["upload_status"],
+                    "upload_content_type": recovered["upload_type"],
+                    "verify_http_status": recovered["verify_status"],
+                    "verify_content_type": recovered["verify_type"],
+                    "cache_status": "reuploaded_unavailable",
+                    "cache_hash": recovered["digest"][:8],
+                    "normalized": recovered["meta"],
+                })
+                audit["timing"]["hash"] = recovered["digest"][:8]
+                audit["timing"]["cache_status"] = "reuploaded_unavailable"
+                audit["timing"]["pre_submit_validation_ms"] = round(guard_ms, 3)
+                audit["timing"]["normalize_ms"] = round(
+                    audit["timing"]["normalize_ms"] + recovered.get("normalize_ms", 0.0), 3
+                )
+                audit["timing"]["upload_ms"] = round(
+                    audit["timing"]["upload_ms"] + recovered["upload_ms"], 3
+                )
+                audit["timing"]["validate_ms"] = round(
+                    audit["timing"]["validate_ms"] + recovered["validate_ms"], 3
+                )
+                audit["timing"]["total_reference_prepare_ms"] = round(
+                    audit["timing"]["total_reference_prepare_ms"]
+                    + (time.perf_counter() - guard_started) * 1000,
+                    3,
+                )
+                audit["timing"]["selective_reupload"] = True
+            else:
+                guard_ms = (time.perf_counter() - guard_started) * 1000
+                pre_submit_validation_ms += guard_ms
+                valid_reference_reuse_count += 1
+                audit["verify_http_status"] = verify_status
+                audit["verify_content_type"] = verify_type
+                audit["timing"]["pre_submit_validation_ms"] = round(guard_ms, 3)
+                audit["timing"]["total_reference_prepare_ms"] = round(
+                    audit["timing"]["total_reference_prepare_ms"] + guard_ms,
+                    3,
+                )
     finally:
         if owns_client:
             await client.aclose()
@@ -1031,6 +1394,11 @@ async def prepare_kie_references(
         "source_cache_misses": source_cache_misses,
         "normalize_skipped_count": normalize_skipped_count,
         "stale_normalize_avoided_count": stale_normalize_avoided_count,
+        "absolute_expired_count": absolute_expired_count,
+        "pre_submit_invalid_count": pre_submit_invalid_count,
+        "selective_reupload_count": selective_reupload_count,
+        "valid_reference_reuse_count": valid_reference_reuse_count,
+        "pre_submit_validation_ms": round(pre_submit_validation_ms, 3),
         "references": timing_rows,
     }, ensure_ascii=False), flush=True)
     return prepared_urls, audits

@@ -26,8 +26,16 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
             now_fn=lambda: self.clock[0],
         )
         self.paths = {}
+        self.lightweight_validate = AsyncMock(return_value=(200, "image/png"))
+        self.lightweight_patcher = patch.object(
+            uploads,
+            "validate_reference_availability_lightweight",
+            self.lightweight_validate,
+        )
+        self.lightweight_patcher.start()
 
     def tearDown(self):
+        self.lightweight_patcher.stop()
         self.temp_dir.cleanup()
 
     def add_image(self, name, color, *, size=(8, 6)):
