@@ -18,7 +18,13 @@ from providers.kie.models import (
     build_routed_model_input,
 )
 from providers.kie.uploads import KieReferenceError, classify_reference_url, normalize_image_bytes
-from providers.kie.tasks import KieTaskCancelled, KieTaskError, parse_result_urls, poll_task
+from providers.kie.tasks import (
+    KieTaskCancelled,
+    KieTaskError,
+    _poll_interval_for_elapsed,
+    parse_result_urls,
+    poll_task,
+)
 
 
 class FakeResponse:
@@ -140,6 +146,42 @@ class KieModelTests(unittest.TestCase):
 
 
 class KieClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_poll_interval_uses_three_stage_schedule(self):
+        self.assertEqual(_poll_interval_for_elapsed(0), 2.5)
+        self.assertEqual(_poll_interval_for_elapsed(59.999), 2.5)
+        self.assertEqual(_poll_interval_for_elapsed(60), 4.0)
+        self.assertEqual(_poll_interval_for_elapsed(179.999), 4.0)
+        self.assertEqual(_poll_interval_for_elapsed(180), 6.0)
+        self.assertEqual(_poll_interval_for_elapsed(600), 6.0)
+        self.assertEqual(_poll_interval_for_elapsed(180, max_interval=5), 5.0)
+
+    async def test_poll_task_applies_fast_then_medium_cadence(self):
+        class FakeClock:
+            def __init__(self):
+                self.now = 0.0
+                self.sleeps = []
+
+            def monotonic(self):
+                return self.now
+
+            async def sleep(self, delay):
+                self.sleeps.append(delay)
+                self.now += delay
+
+        clock = FakeClock()
+        client = FakeTaskClient([
+            *({"data": {"state": "generating"}} for _ in range(26)),
+            {"data": {"state": "success", "resultJson": json.dumps({"resultUrls": ["https://e.test/a.png"]})}},
+        ])
+        with patch("providers.kie.tasks.time.monotonic", side_effect=clock.monotonic), patch(
+            "providers.kie.tasks.asyncio.sleep", side_effect=clock.sleep
+        ):
+            result = await poll_task(client, "task-schedule", timeout_seconds=300)
+
+        self.assertEqual(result["resultUrls"], ["https://e.test/a.png"])
+        self.assertEqual(clock.sleeps[:24], [2.5] * 24)
+        self.assertEqual(clock.sleeps[24:], [4.0] * 3)
+
     async def test_create_once_and_query_paths(self):
         http = FakeHTTPClient([
             FakeResponse({"code": 200, "data": {"taskId": "task-1"}}),

@@ -11,6 +11,10 @@ KIE_WAITING_STATUSES = {"waiting", "queuing"}
 KIE_GENERATING_STATUSES = {"generating"}
 KIE_SUCCESS_STATUS = "success"
 KIE_FAILED_STATUS = "fail"
+KIE_POLL_FAST_WINDOW_SECONDS = 60.0
+KIE_POLL_MEDIUM_WINDOW_SECONDS = 180.0
+KIE_POLL_MEDIUM_INTERVAL_SECONDS = 4.0
+KIE_POLL_SLOW_INTERVAL_SECONDS = 6.0
 
 
 class KieTaskError(RuntimeError):
@@ -58,6 +62,25 @@ def task_failure(payload, task_id=""):
     return KieTaskError(message, task_id=task_id, fail_code=code, raw=payload)
 
 
+def _poll_interval_for_elapsed(
+    elapsed_seconds,
+    *,
+    initial_interval=2.5,
+    max_interval=12.0,
+):
+    """Return the bounded three-stage polling interval for elapsed task time."""
+    elapsed = max(0.0, float(elapsed_seconds or 0.0))
+    initial = max(0.05, float(initial_interval or 2.5))
+    cap = max(0.05, float(max_interval or 12.0))
+    if elapsed < KIE_POLL_FAST_WINDOW_SECONDS:
+        desired = initial
+    elif elapsed < KIE_POLL_MEDIUM_WINDOW_SECONDS:
+        desired = max(initial, KIE_POLL_MEDIUM_INTERVAL_SECONDS)
+    else:
+        desired = max(initial, KIE_POLL_SLOW_INTERVAL_SECONDS)
+    return min(cap, desired)
+
+
 async def poll_task(
     client,
     task_id,
@@ -69,8 +92,15 @@ async def poll_task(
     cancel_event=None,
     on_status=None,
 ):
-    deadline = time.monotonic() + max(1.0, float(timeout_seconds or 900))
-    interval = max(0.05, float(initial_interval or 2.5))
+    started_at = time.monotonic()
+    deadline = started_at + max(1.0, float(timeout_seconds or 900))
+    interval = _poll_interval_for_elapsed(
+        0.0,
+        initial_interval=initial_interval,
+        max_interval=max_interval,
+    )
+    # Retain the legacy keyword for caller compatibility; cadence is now time-phased.
+    _ = backoff
     last_payload = {}
     first_query = True
     last_logged_status = ""
@@ -117,5 +147,9 @@ async def poll_task(
         if status not in KIE_WAITING_STATUSES | KIE_GENERATING_STATUSES:
             message = task_data(last_payload).get("failMsg") or last_payload.get("msg") or f"未知任务状态：{status or '(empty)'}"
             raise KieTaskError(message, task_id=task_id, raw=last_payload)
-        interval = min(float(max_interval or 12.0), interval * max(1.0, float(backoff or 1.35)))
+        interval = _poll_interval_for_elapsed(
+            time.monotonic() - started_at,
+            initial_interval=initial_interval,
+            max_interval=max_interval,
+        )
     raise TimeoutError(f"Kie 任务超过 {int(timeout_seconds)} 秒仍未完成，taskId={task_id}")
