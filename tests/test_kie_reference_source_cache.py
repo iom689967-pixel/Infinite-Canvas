@@ -152,12 +152,13 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
             second_audits[0]["source_fingerprint"],
         )
 
-    async def test_04_source_hit_with_expired_upload_falls_back_to_normalize(self):
+    async def test_04_source_stale_with_valid_url_skips_normalize_and_upload(self):
         reference = self.add_image("expired-source.png", (90, 80, 70))
         upload = self.upload_mock()
         validate = self.validate_mock()
+        output = io.StringIO()
 
-        with contextlib.redirect_stdout(io.StringIO()), patch.object(
+        with contextlib.redirect_stdout(output), patch.object(
             uploads, "normalize_image_bytes", wraps=uploads.normalize_image_bytes
         ) as normalize, patch.object(
             uploads, "_upload_normalized_image", upload
@@ -166,14 +167,119 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
             self.clock[0] += 101
             _urls, audits = await self.prepare([reference])
 
-        self.assertEqual(normalize.call_count, 2)
+        self.assertEqual(normalize.call_count, 1)
         self.assertEqual(upload.await_count, 1)
         self.assertEqual(validate.await_count, 2)
-        self.assertEqual(audits[0]["source_cache_status"], "stale")
+        self.assertEqual(audits[0]["source_cache_status"], "stale_valid")
         self.assertEqual(audits[0]["cache_status"], "revalidated")
-        self.assertGreaterEqual(audits[0]["timing"]["normalize_ms"], 0.0)
+        self.assertEqual(audits[0]["timing"]["normalize_ms"], 0.0)
+        self.assertEqual(audits[0]["timing"]["upload_ms"], 0.0)
+        self.assertGreaterEqual(audits[0]["timing"]["stale_validate_ms"], 0.0)
+        metrics = self.metrics_from(output)
+        self.assertEqual(metrics["normalize_skipped_count"], 1)
+        self.assertEqual(metrics["stale_normalize_avoided_count"], 1)
+        self.assertIn("[KieRefSourceCache] STALE_VALIDATE source=", output.getvalue())
+        self.assertIn("[KieRefSourceCache] STALE_VALID source=", output.getvalue())
 
-    async def test_05_version_one_upload_cache_loads_and_gains_source_mapping(self):
+    async def test_05_source_stale_with_invalid_url_normalizes_and_uploads(self):
+        reference = self.add_image("invalid-stale-source.png", (80, 70, 60))
+        upload = AsyncMock(side_effect=[
+            ("https://kie.test/old.png", 200, "image/png"),
+            ("https://kie.test/new.png", 200, "image/png"),
+        ])
+        validate = AsyncMock(side_effect=[
+            (200, "image/png"),
+            uploads.KieReferenceError(
+                "cached URL unavailable",
+                index=1,
+                filename="invalid-stale-source.png",
+                stage="kie-read",
+                http_status=404,
+            ),
+            (200, "image/png"),
+        ])
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output), patch.object(
+            uploads, "normalize_image_bytes", wraps=uploads.normalize_image_bytes
+        ) as normalize, patch.object(
+            uploads, "_upload_normalized_image", upload
+        ), patch.object(uploads, "_validate_kie_public_url", validate):
+            await self.prepare([reference])
+            self.clock[0] += 101
+            urls, audits = await self.prepare([reference])
+
+        self.assertEqual(urls, ["https://kie.test/new.png"])
+        self.assertEqual(normalize.call_count, 2)
+        self.assertEqual(upload.await_count, 2)
+        self.assertEqual(validate.await_count, 3)
+        self.assertEqual(audits[0]["source_cache_status"], "stale_invalid")
+        self.assertGreaterEqual(audits[0]["timing"]["normalize_ms"], 0.0)
+        self.assertEqual(self.metrics_from(output)["stale_normalize_avoided_count"], 0)
+        self.assertIn("[KieRefSourceCache] STALE_INVALID source=", output.getvalue())
+
+    async def test_06_corrupt_source_mapping_safely_falls_back(self):
+        reference = self.add_image("corrupt-mapping.png", (6, 7, 8))
+        upload = self.upload_mock()
+        validate = self.validate_mock()
+
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(
+            uploads, "normalize_image_bytes", wraps=uploads.normalize_image_bytes
+        ) as normalize, patch.object(
+            uploads, "_upload_normalized_image", upload
+        ), patch.object(uploads, "_validate_kie_public_url", validate):
+            first_urls, _ = await self.prepare([reference])
+            payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            next(iter(payload["sources"].values()))["normalized_sha256"] = "corrupt"
+            self.cache_path.write_text(json.dumps(payload), encoding="utf-8")
+            second_urls, audits = await self.prepare([reference])
+
+        self.assertEqual(first_urls, second_urls)
+        self.assertEqual(normalize.call_count, 2)
+        self.assertEqual(upload.await_count, 1)
+        self.assertEqual(validate.await_count, 1)
+        self.assertEqual(audits[0]["source_cache_status"], "miss")
+
+    async def test_07_concurrent_same_stale_source_validates_once(self):
+        reference = self.add_image("concurrent-stale.png", (17, 18, 19))
+        upload = self.upload_mock()
+        validate_calls = 0
+
+        async def delayed_validate(*_args, **_kwargs):
+            nonlocal validate_calls
+            validate_calls += 1
+            if validate_calls > 1:
+                await asyncio.sleep(0.03)
+            return 200, "image/png"
+
+        validate = AsyncMock(side_effect=delayed_validate)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(
+            uploads, "normalize_image_bytes", wraps=uploads.normalize_image_bytes
+        ) as normalize, patch.object(
+            uploads, "_upload_normalized_image", upload
+        ), patch.object(uploads, "_validate_kie_public_url", validate):
+            await self.prepare([reference])
+            self.clock[0] += 101
+            results = await asyncio.gather(
+                self.prepare([reference]),
+                self.prepare([reference]),
+            )
+
+        self.assertEqual(normalize.call_count, 1)
+        self.assertEqual(upload.await_count, 1)
+        self.assertEqual(validate.await_count, 2)
+        self.assertEqual(results[0][0], results[1][0])
+        statuses = {results[0][1][0]["source_cache_status"], results[1][1][0]["source_cache_status"]}
+        self.assertEqual(statuses, {"stale_valid", "hit"})
+        metrics = [
+            json.loads(line)
+            for line in output.getvalue().splitlines()
+            if '"event": "kie_reference_prepare_metrics"' in line
+        ]
+        self.assertEqual(sum(item["stale_normalize_avoided_count"] for item in metrics[-2:]), 1)
+
+    async def test_08_version_one_upload_cache_loads_and_gains_source_mapping(self):
         reference = self.add_image("legacy-cache.png", (1, 2, 3))
         normalized, meta = uploads.normalize_image_bytes(
             self.paths[reference["url"]].read_bytes(),
@@ -216,7 +322,7 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(digest, payload["entries"])
         self.assertEqual(len(payload["sources"]), 1)
 
-    async def test_06_corrupt_cache_degrades_and_rebuilds_both_levels(self):
+    async def test_09_corrupt_cache_degrades_and_rebuilds_both_levels(self):
         reference = self.add_image("corrupt-source.png", (3, 2, 1))
         self.cache_path.parent.mkdir(parents=True)
         self.cache_path.write_text("{not valid json", encoding="utf-8")
@@ -234,7 +340,7 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["entries"]), 1)
         self.assertEqual(len(payload["sources"]), 1)
 
-    async def test_07_concurrent_same_source_normalizes_once(self):
+    async def test_10_concurrent_same_source_normalizes_once(self):
         reference = self.add_image("concurrent-source.png", (11, 22, 33))
 
         async def delayed_upload(_client, _api_key, _content, meta, *, content_hash, **_kwargs):
@@ -260,7 +366,7 @@ class KieReferenceSourceCacheTests(unittest.IsolatedAsyncioTestCase):
         statuses = {results[0][1][0]["source_cache_status"], results[1][1][0]["source_cache_status"]}
         self.assertEqual(statuses, {"miss", "hit"})
 
-    async def test_08_concurrent_different_sources_do_not_share_source_lock(self):
+    async def test_11_concurrent_different_sources_do_not_share_source_lock(self):
         first = self.add_image("source-a.png", (120, 1, 1))
         second = self.add_image("source-b.png", (1, 120, 1))
         active = 0

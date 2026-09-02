@@ -306,6 +306,7 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
                 "source_fingerprint_ms",
                 "source_cache_lookup_ms",
                 "source_cache_wait_ms",
+                "stale_validate_ms",
                 "normalize_ms",
                 "cache_lookup_ms",
                 "upload_ms",
@@ -313,6 +314,7 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
             ):
                 self.assertIn(key, timing)
         self.assertEqual(metric_rows[1]["normalize_skipped_count"], 1)
+        self.assertIn("stale_normalize_avoided_count", metric_rows[1])
 
 
 if __name__ == "__main__":

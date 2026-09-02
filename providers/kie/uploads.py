@@ -687,12 +687,23 @@ async def _resolve_normalized_upload(
     return result
 
 
-async def _resolve_source_cache_hit(cache, fingerprint, *, digest):
+async def _resolve_source_cache_hit(
+    cache,
+    fingerprint,
+    *,
+    digest,
+    client,
+    index,
+    filename,
+):
     result = {
         "state": "miss",
         "entry": None,
         "cache_wait_ms": 0.0,
         "cache_lookup_ms": 0.0,
+        "stale_validate_ms": 0.0,
+        "verify_status": None,
+        "verify_type": "",
     }
     cache_lock = _reference_hash_lock(cache.path, digest)
     wait_started = time.perf_counter()
@@ -707,6 +718,48 @@ async def _resolve_source_cache_hit(cache, fingerprint, *, digest):
             _log_reference_cache("HIT", digest)
             cache.touch(digest)
             cache.touch_source(fingerprint)
+        elif state == "expired":
+            _log_reference_source_cache("STALE_VALIDATE", fingerprint)
+            cached_url = str((entry or {}).get("kie_url") or "")
+            validate_started = time.perf_counter()
+            try:
+                verify_status, verify_type = await _validate_kie_public_url(
+                    client,
+                    cached_url,
+                    index=index,
+                    filename=filename,
+                )
+            except KieReferenceError:
+                result["stale_validate_ms"] = (time.perf_counter() - validate_started) * 1000
+                cache.invalidate(digest)
+                _log_reference_cache("INVALIDATE", digest)
+                _log_reference_source_cache("STALE_INVALID", fingerprint)
+                result["state"] = "stale_invalid"
+                result["entry"] = None
+            else:
+                result["stale_validate_ms"] = (time.perf_counter() - validate_started) * 1000
+                now = cache.now()
+                mime_type = str((entry or {}).get("mime_type") or verify_type or "image/png")
+                cache.store(
+                    digest,
+                    cached_url,
+                    size=int((entry or {}).get("size") or 0),
+                    mime_type=mime_type,
+                    validated_at=now,
+                )
+                cache.touch_source(fingerprint)
+                _log_reference_cache("HIT", digest)
+                _log_reference_source_cache("STALE_VALID", fingerprint)
+                result["state"] = "stale_valid"
+                result["entry"] = {
+                    **(entry or {}),
+                    "kie_url": cached_url,
+                    "mime_type": mime_type,
+                    "validated_at": now,
+                    "last_used_at": now,
+                }
+                result["verify_status"] = verify_status
+                result["verify_type"] = verify_type
     return result
 
 
@@ -727,6 +780,7 @@ async def prepare_kie_references(
     source_cache_hits = 0
     source_cache_misses = 0
     normalize_skipped_count = 0
+    stale_normalize_avoided_count = 0
     total_started = time.perf_counter()
     cache = cache or _default_reference_cache()
     timeout = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
@@ -747,6 +801,8 @@ async def prepare_kie_references(
             source_cache_lookup_ms = 0.0
             source_cache_wait_ms = 0.0
             source_cache_status = "ineligible"
+            stale_validate_ms = 0.0
+            stale_normalize_avoided = False
             normalize_ms = 0.0
             cache_lookup_ms = 0.0
             cache_wait_ms = 0.0
@@ -811,30 +867,43 @@ async def prepare_kie_references(
                     if source_lookup_state == "hit":
                         digest = str(source_entry.get("normalized_sha256") or "")
                         source_resolution = await _resolve_source_cache_hit(
-                            cache, source_fingerprint, digest=digest
+                            cache,
+                            source_fingerprint,
+                            digest=digest,
+                            client=client,
+                            index=index,
+                            filename=filename,
                         )
                         cache_wait_ms += source_resolution["cache_wait_ms"]
                         cache_lookup_ms += source_resolution["cache_lookup_ms"]
-                        if source_resolution["state"] == "hit":
+                        stale_validate_ms += source_resolution["stale_validate_ms"]
+                        validate_ms += source_resolution["stale_validate_ms"]
+                        if source_resolution["state"] in {"hit", "stale_valid"}:
                             cache_entry = source_resolution["entry"] or {}
-                            _log_reference_source_cache("HIT", source_fingerprint)
-                            source_cache_status = "hit"
+                            if source_resolution["state"] == "hit":
+                                _log_reference_source_cache("HIT", source_fingerprint)
+                                source_cache_status = "hit"
+                            else:
+                                source_cache_status = "stale_valid"
+                                stale_normalize_avoided = True
+                                stale_normalize_avoided_count += 1
                             source_cache_hits += 1
                             normalize_skipped_count += 1
                             cache_hits += 1
-                            cache_status = "hit"
+                            cache_status = "hit" if source_resolution["state"] == "hit" else "revalidated"
                             public_url = str(cache_entry.get("kie_url") or "")
                             upload_type = str(cache_entry.get("mime_type") or "image/png")
                             source_type = upload_type
-                            verify_status = 200
-                            verify_type = upload_type
+                            verify_status = source_resolution["verify_status"] or 200
+                            verify_type = source_resolution["verify_type"] or upload_type
                             meta = _cached_normalized_meta(cache_entry)
                         else:
-                            _log_reference_source_cache("STALE", source_fingerprint)
-                            source_cache_status = "stale"
+                            if source_resolution["state"] != "stale_invalid":
+                                _log_reference_source_cache("STALE_INVALID", source_fingerprint)
+                            source_cache_status = "stale_invalid"
                     elif source_lookup_state == "invalid":
-                        _log_reference_source_cache("STALE", source_fingerprint)
-                        source_cache_status = "stale"
+                        _log_reference_source_cache("MISS", source_fingerprint)
+                        source_cache_status = "miss"
                     else:
                         _log_reference_source_cache("MISS", source_fingerprint)
                         source_cache_status = "miss"
@@ -921,6 +990,7 @@ async def prepare_kie_references(
                 "source_fingerprint_ms": round(source_fingerprint_ms, 3),
                 "source_cache_lookup_ms": round(source_cache_lookup_ms, 3),
                 "source_cache_wait_ms": round(source_cache_wait_ms, 3),
+                "stale_validate_ms": round(stale_validate_ms, 3),
                 "normalize_ms": round(normalize_ms, 3),
                 "cache_wait_ms": round(cache_wait_ms, 3),
                 "cache_lookup_ms": round(cache_lookup_ms, 3),
@@ -945,6 +1015,7 @@ async def prepare_kie_references(
                 "cache_hash": digest[:8],
                 "source_cache_status": source_cache_status,
                 "source_fingerprint": source_fingerprint[:8],
+                "stale_normalize_avoided": stale_normalize_avoided,
                 "timing": timing,
             })
     finally:
@@ -959,6 +1030,7 @@ async def prepare_kie_references(
         "source_cache_hits": source_cache_hits,
         "source_cache_misses": source_cache_misses,
         "normalize_skipped_count": normalize_skipped_count,
+        "stale_normalize_avoided_count": stale_normalize_avoided_count,
         "references": timing_rows,
     }, ensure_ascii=False), flush=True)
     return prepared_urls, audits
