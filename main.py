@@ -36,7 +36,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Uplo
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
 from providers.kie import (
     KIE_BASE_URL,
@@ -624,7 +624,8 @@ TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIA
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
-LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
+MAX_LLM_TEXT_CHARS = int(os.getenv("MAX_LLM_TEXT_CHARS", "100000"))
+LLM_MESSAGE_MAX_LENGTH = MAX_LLM_TEXT_CHARS
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 
@@ -651,6 +652,28 @@ def friendly_validation_error(errors):
         else:
             parts.append(f"{label}格式不正确：{msg}")
     return "\n".join(parts) or "请求参数不正确。"
+
+def validate_llm_text_length(value, field_path):
+    if isinstance(value, str) and len(value) > MAX_LLM_TEXT_CHARS:
+        raise ValueError(f"{field_path} 最多允许 {MAX_LLM_TEXT_CHARS} 个字符")
+
+def validate_llm_message_content(value, field_path):
+    validate_llm_text_length(value, field_path)
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            part_path = f"{field_path}[{index}]"
+            if isinstance(item, dict):
+                if "text" in item:
+                    validate_llm_text_length(item.get("text"), f"{part_path}.text")
+                if "content" in item:
+                    validate_llm_message_content(item.get("content"), f"{part_path}.content")
+            else:
+                validate_llm_text_length(item, part_path)
+    elif isinstance(value, dict):
+        if "text" in value:
+            validate_llm_text_length(value.get("text"), f"{field_path}.text")
+        if "content" in value:
+            validate_llm_message_content(value.get("content"), f"{field_path}.content")
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -3038,7 +3061,7 @@ class ApiProviderPayload(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str = ""
     message: str = Field(min_length=1, max_length=LLM_MESSAGE_MAX_LENGTH)
-    system_prompt: str = ""
+    system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     image_model: str = ""
     image_provider: str = ""
@@ -3068,13 +3091,21 @@ class MsGenerateRequest(BaseModel):
 
 class CanvasLLMRequest(BaseModel):
     message: str = Field(min_length=1, max_length=LLM_MESSAGE_MAX_LENGTH)
-    system_prompt: str = ""
+    system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     messages: List[Dict[str, Any]] = []
     provider: str = "comfly"
     ms_model: str = ""
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
     videos: List[str] = []   # 可以是 /output/*.mp4、/assets/*.mp4 本地路径 或 http(s) URL 或 data URL
+
+    @field_validator("messages")
+    @classmethod
+    def validate_messages_text_length(cls, messages):
+        for index, item in enumerate(messages or []):
+            if isinstance(item, dict):
+                validate_llm_message_content(item.get("content"), f"messages[{index}].content")
+        return messages
 
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"

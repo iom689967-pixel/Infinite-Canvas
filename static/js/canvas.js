@@ -512,7 +512,7 @@ let imageEditZoom = 1.0;
 let imageEditBaseW = 0; // zoom=1 时图片显示宽度
 let imageEditBaseH = 0;
 let textSelectionGuard = null;
-const PROMPT_TEXT_MAX_LENGTH = 20000;
+const PROMPT_TEXT_MAX_LENGTH = 100000;
 const CLIENT_ID = 'canvas_' + Math.random().toString(36).slice(2);
 const ZOOM_PREVIEW_NODE_DEFAULT_SCALE = 1;
 const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
