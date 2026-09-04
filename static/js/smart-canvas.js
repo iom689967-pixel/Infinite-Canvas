@@ -12100,9 +12100,8 @@ function bindNodeEvents(root=world){
                 return n ? {id:n.id, ox:Number(n.x) || 0, oy:Number(n.y) || 0} : null;
             }).filter(Boolean);
             const activationThreshold = (nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') ? 4 : 0;
-            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), ctrlGroup:Boolean(e.ctrlKey), activationThreshold, activated:activationThreshold === 0};
+            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), ctrlGroup:Boolean(e.ctrlKey), activationThreshold, activated:activationThreshold === 0, undoCaptured:false};
             if(dragState.activated) document.body.classList.add('smart-node-drag');
-            capturePendingUndo();
         };
         el.querySelectorAll('.node-port').forEach(port => {
             port.addEventListener('mousedown', e => {
@@ -12179,6 +12178,23 @@ function restoreDraggedNodePosition(){
             n.y = item.oy;
         }
     });
+}
+function activateNodeDrag(e){
+    if(!dragState) return false;
+    const distance = Math.hypot(e.clientX - dragState.startX, e.clientY - dragState.startY);
+    if(!dragState.activated){
+        if(distance < (dragState.activationThreshold || 0)) return false;
+        dragState.activated = true;
+        document.body.classList.add('smart-node-drag');
+    }
+    // A detached thumbnail already committed the pre-detach snapshot as the same undo operation.
+    if(dragState.thumbDetached) return true;
+    if(!dragState.undoCaptured){
+        if(distance <= 0) return false;
+        capturePendingUndo();
+        dragState.undoCaptured = true;
+    }
+    return true;
 }
 function pruneSmartGroupMembershipsForNode(node){
     if(!node || !node.id) return false;
@@ -21504,12 +21520,7 @@ window.onmousemove = e => {
     if(!dragState) return;
     const node = nodes.find(n => n.id === dragState.id);
     if(!node) return;
-    if(!dragState.activated){
-        const distance = Math.hypot(e.clientX - dragState.startX, e.clientY - dragState.startY);
-        if(distance < (dragState.activationThreshold || 0)) return;
-        dragState.activated = true;
-        document.body.classList.add('smart-node-drag');
-    }
+    if(!activateNodeDrag(e)) return;
     const moveDx = (e.clientX - dragState.startX) / viewport.scale;
     const moveDy = (e.clientY - dragState.startY) / viewport.scale;
     (dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}]).forEach(item => {
@@ -21619,6 +21630,13 @@ window.onmouseup = e => {
     }
     if(dragState){
         const draggedNode = nodes.find(n => n.id === dragState.id);
+        if(!dragState.thumbDetached && !dragState.undoCaptured){
+            discardPendingUndo();
+            clearDropHighlight();
+            loopInsertPreview = null;
+            dragState = null;
+            return;
+        }
         let stateChanged = false;
         const hit = document.elementFromPoint(e.clientX, e.clientY);
         const droppedOnAssetPanel = assetLibraryOpen && hit && assetPanel?.contains(hit);
