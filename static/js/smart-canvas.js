@@ -7039,7 +7039,7 @@ function quickConnectTemporaryConnectionSvg(){
     const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
     const curve = `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`;
     const color = 'rgba(100,116,139,0.62)';
-    return `<path class="quick-connect-temp conn-line" d="${curve}" stroke="${color}" stroke-width="1.9" fill="none"></path><circle class="quick-connect-temp quick-connect-temp-end conn-end" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle>`;
+    return `<path class="quick-connect-temp conn-line" data-preview-source-id="${escapeAttr(source.id)}" d="${curve}" stroke="${color}" stroke-width="1.9" fill="none"></path><circle class="quick-connect-temp quick-connect-temp-end conn-end" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle>`;
 }
 function normalizedSmartConnectionAnchor(anchor, fallbackSide){
     if(!anchor || typeof anchor !== 'object') return null;
@@ -7077,6 +7077,36 @@ function smartConnectionAnchorPoint(rect, anchor, fallbackSide){
         y:rect.y + rect.height * normalized.ratio
     };
 }
+function smartConnectionGeometry(fromNode, toNode, kind='flow', fromAnchor=null, toAnchor=null){
+    if(!fromNode || !toNode) return null;
+    const fr = nodeRect(fromNode), tr = nodeRect(toNode);
+    const isHistory = kind === 'history';
+    const normalizedFrom = isHistory ? null : normalizedSmartConnectionAnchor(fromAnchor, 'right');
+    const normalizedTo = isHistory ? null : normalizedSmartConnectionAnchor(toAnchor, 'left');
+    const fromPoint = isHistory
+        ? {x:fr.x + fr.width / 2, y:fr.y + fr.height}
+        : smartConnectionAnchorPoint(fr, normalizedFrom, 'right');
+    const toPoint = isHistory
+        ? {x:tr.x + tr.width / 2, y:tr.y}
+        : smartConnectionAnchorPoint(tr, normalizedTo, 'left');
+    const fx = fromPoint.x;
+    const fy = fromPoint.y;
+    const tx = toPoint.x;
+    const ty = toPoint.y;
+    const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
+    const dy = Math.max(36, Math.abs(ty - fy) * 0.45);
+    return {
+        curve:isHistory
+            ? `M${fx} ${fy} C ${fx} ${fy+dy}, ${tx} ${ty-dy}, ${tx} ${ty}`
+            : `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`,
+        tx,
+        ty,
+        mx:(fx + tx) / 2,
+        my:(fy + ty) / 2,
+        fromSide:normalizedFrom?.side || 'right',
+        toSide:normalizedTo?.side || 'left'
+    };
+}
 function renderConnections(){
     const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
     const validSelectionKeys = new Set(conns.map(smartConnectionSelectionKey));
@@ -7111,7 +7141,6 @@ function renderConnections(){
         const fromNode = nodes.find(n => n.id === item.from);
         const toNode = nodes.find(n => n.id === item.toId);
         if(!fromNode || !toNode) return '';
-        const fr = nodeRect(fromNode), tr = nodeRect(toNode);
         const kind = item.kind;
         const isHistory = kind === 'history';
         const dataIndex = item.indices.join(',');
@@ -7125,18 +7154,9 @@ function renderConnections(){
         const isCascade = !isHistory && (edgeKeys.some(k => cascadeKeys.has(k)) || Boolean(cascadeState) || isInsertPreview);
         const isPendingLine = !isCascade && item.targets.some(t => nodes.find(n => n.id === t)?.pending);
         const isSelectedLine = item.selectionKeys.some(key => selectedConnectionKeys.has(key));
-        const fromPoint = isHistory ? {x:fr.x + fr.width / 2, y:fr.y + fr.height} : smartConnectionAnchorPoint(fr, item.fromAnchor, 'right');
-        const toPoint = isHistory ? {x:tr.x + tr.width / 2, y:tr.y} : smartConnectionAnchorPoint(tr, item.toAnchor, 'left');
-        const fx = fromPoint.x;
-        const fy = fromPoint.y;
-        const tx = toPoint.x;
-        const ty = toPoint.y;
-        const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
-        const dy = Math.max(36, Math.abs(ty - fy) * 0.45);
-        const curve = isHistory
-            ? `M${fx} ${fy} C ${fx} ${fy+dy}, ${tx} ${ty-dy}, ${tx} ${ty}`
-            : `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`;
-        const mx = (fx + tx) / 2, my = (fy + ty) / 2;
+        const geometry = smartConnectionGeometry(fromNode, toNode, kind, item.fromAnchor, item.toAnchor);
+        if(!geometry) return '';
+        const {curve, tx, ty, mx, my, fromSide, toSide} = geometry;
         const cls = [
             isPendingLine ? 'conn-pending' : '',
             isCascade ? 'conn-cascade' : '',
@@ -7149,7 +7169,8 @@ function renderConnections(){
         const color = isCascade ? '#16a34a' : isHistory ? 'rgba(100,116,139,0.46)' : kind === 'input' ? 'rgba(100,116,139,0.62)' : 'rgba(148,163,184,0.62)';
         const opacity = isPendingLine ? '.82' : '1';
         const width = kind === 'input' ? '1.9' : '1.6';
-        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
+        const geometryAttrs = `data-edge-from="${escapeAttr(item.from)}" data-edge-to="${escapeAttr(item.toId)}" data-edge-kind="${escapeAttr(kind)}" data-edge-from-side="${fromSide}" data-edge-to-side="${toSide}"`;
+        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" data-edge-role="visual" ${geometryAttrs} d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" data-edge-role="hit" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" data-edge-role="endpoint" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" data-edge-role="cut" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
     return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}${quickConnectTemporaryConnectionSvg()}</svg>`;
 }
@@ -7168,13 +7189,129 @@ function scheduleConnectionLayerRefresh(){
     connectionLayerRaf = requestAnimationFrame(refreshConnectionLayer);
 }
 let interactionLayerRaf = 0;
+let interactionLayerNeedsFullRefresh = false;
+let pendingInteractionMovedNodeIds = new Set();
+let connectionDomEntriesByIndex = new Map();
+function smartConnectionDomIndices(spec){
+    return String(spec || '').split(',')
+        .map(value => Number(value))
+        .filter(index => Number.isInteger(index) && index >= 0);
+}
+function cacheConnectionDomElements(elements=world.querySelectorAll('svg.connection-layer [data-conn-index]')){
+    const entriesBySpec = new Map();
+    Array.from(elements || []).forEach(element => {
+        const spec = String(element.dataset?.connIndex || '');
+        if(!spec) return;
+        let entry = entriesBySpec.get(spec);
+        if(!entry){
+            entry = {spec, indices:smartConnectionDomIndices(spec), visual:null, hit:null, endpoint:null, cut:null};
+            entriesBySpec.set(spec, entry);
+        }
+        const role = element.dataset?.edgeRole
+            || (element.classList?.contains('conn-line') ? 'visual'
+                : element.classList?.contains('conn-hit') ? 'hit'
+                : element.classList?.contains('conn-end') ? 'endpoint'
+                : element.classList?.contains('conn-cut') ? 'cut' : '');
+        if(role && Object.hasOwn(entry, role)) entry[role] = element;
+    });
+    const next = new Map();
+    entriesBySpec.forEach(entry => entry.indices.forEach(index => next.set(index, entry)));
+    connectionDomEntriesByIndex = next;
+    return next;
+}
+function smartConnectionHasVisibleDom(connection){
+    if(!connection || !nodes.some(node => node.id === connection.from) || !nodes.some(node => node.id === connection.to)) return false;
+    if((connection.kind || 'flow') === 'history') return true;
+    const fromScope = smartGroupScopeId(connection.from);
+    const toScope = smartGroupScopeId(connection.to);
+    return !(fromScope && fromScope === toScope);
+}
+function setSmartConnectionDomAttribute(element, name, value){
+    if(!element) return false;
+    const next = String(value);
+    if(element.getAttribute(name) === next) return false;
+    element.setAttribute(name, next);
+    return true;
+}
+function updateQuickConnectTemporaryConnectionsForMovedNodes(movedNodeIds){
+    const moved = movedNodeIds instanceof Set ? movedNodeIds : new Set(movedNodeIds || []);
+    const pending = pendingQuickConnection;
+    if(!pending?.drag || !pending.worldPoint) return 0;
+    const sourceIds = pending.drag.aggregate
+        ? Array.from(new Set(pending.drag.sourceIds || []))
+        : [pending.drag.fromId];
+    let updated = 0;
+    sourceIds.filter(id => moved.has(id)).forEach(sourceId => {
+        const sourceNode = nodes.find(node => node.id === sourceId);
+        const path = world.querySelector(`svg.connection-layer path.quick-connect-temp[data-preview-source-id="${CSS.escape(sourceId)}"]`);
+        if(!sourceNode || !path) return;
+        const sourcePoint = smartConnectionAnchorPoint(
+            nodeRect(sourceNode),
+            null,
+            pending.drag.aggregate || pending.drag.fromPort === 'out' ? 'right' : 'left'
+        );
+        const curve = pending.drag.aggregate || pending.drag.fromPort === 'out'
+            ? smartTemporaryOutputConnectionCurve(sourcePoint, pending.worldPoint)
+            : smartTemporaryOutputConnectionCurve(pending.worldPoint, sourcePoint);
+        if(setSmartConnectionDomAttribute(path, 'd', curve)) updated += 1;
+    });
+    return updated;
+}
+function updateConnectionsForMovedNodes(movedNodeIds){
+    const moved = new Set(Array.from(movedNodeIds || []).filter(Boolean));
+    const connections = canvas?.connections || [];
+    const result = {ok:true, scanned:connections.length, incident:0, updated:0, visualWrites:0, hitWrites:0, endpointWrites:0, cutWrites:0, quickConnectWrites:0};
+    if(!moved.size) return result;
+    const incidentIndices = [];
+    connections.forEach((connection, index) => {
+        if(moved.has(connection.from) || moved.has(connection.to)) incidentIndices.push(index);
+    });
+    result.incident = incidentIndices.length;
+    if(incidentIndices.length && !connectionDomEntriesByIndex.size) cacheConnectionDomElements();
+    const entries = new Set();
+    for(const index of incidentIndices){
+        const connection = connections[index];
+        if(!smartConnectionHasVisibleDom(connection)) continue;
+        const entry = connectionDomEntriesByIndex.get(index);
+        if(!entry){ result.ok = false; return result; }
+        entries.add(entry);
+    }
+    for(const entry of entries){
+        const visual = entry.visual;
+        if(!visual || !entry.hit || !entry.endpoint || !entry.cut){ result.ok = false; return result; }
+        const fromNode = nodes.find(node => node.id === visual.dataset.edgeFrom);
+        const toNode = nodes.find(node => node.id === visual.dataset.edgeTo);
+        const kind = visual.dataset.edgeKind || 'flow';
+        const fromAnchor = kind === 'history' ? null : {side:visual.dataset.edgeFromSide || 'right', ratio:.5};
+        const toAnchor = kind === 'history' ? null : {side:visual.dataset.edgeToSide || 'left', ratio:.5};
+        const geometry = smartConnectionGeometry(fromNode, toNode, kind, fromAnchor, toAnchor);
+        if(!geometry){ result.ok = false; return result; }
+        if(setSmartConnectionDomAttribute(visual, 'd', geometry.curve)) result.visualWrites += 1;
+        if(setSmartConnectionDomAttribute(entry.hit, 'd', geometry.curve)) result.hitWrites += 1;
+        if(setSmartConnectionDomAttribute(entry.endpoint, 'cx', geometry.tx)) result.endpointWrites += 1;
+        if(setSmartConnectionDomAttribute(entry.endpoint, 'cy', geometry.ty)) result.endpointWrites += 1;
+        if(setSmartConnectionDomAttribute(entry.cut, 'transform', `translate(${geometry.mx} ${geometry.my})`)) result.cutWrites += 1;
+        result.updated += 1;
+    }
+    result.quickConnectWrites = updateQuickConnectTemporaryConnectionsForMovedNodes(moved);
+    return result;
+}
 // 拖动/缩放节点时，每个 mousemove 都全量重建连线 SVG + 小地图会掉帧；
 // 用 requestAnimationFrame 把它们合并成每帧最多刷新一次（节点本身的位移仍是即时的）。
-function scheduleInteractionLayerRefresh(){
+function scheduleInteractionLayerRefresh(movedNodeIds=null){
+    if(movedNodeIds === null){
+        interactionLayerNeedsFullRefresh = true;
+    } else {
+        Array.from(movedNodeIds || []).forEach(id => { if(id) pendingInteractionMovedNodeIds.add(id); });
+    }
     if(interactionLayerRaf) return;
     interactionLayerRaf = requestAnimationFrame(() => {
         interactionLayerRaf = 0;
-        refreshConnectionLayer();
+        const needsFullRefresh = interactionLayerNeedsFullRefresh;
+        const movedIds = new Set(pendingInteractionMovedNodeIds);
+        interactionLayerNeedsFullRefresh = false;
+        pendingInteractionMovedNodeIds.clear();
+        if(needsFullRefresh || !updateConnectionsForMovedNodes(movedIds).ok) refreshConnectionLayer();
         renderMinimap();
     });
 }
@@ -7194,7 +7331,7 @@ function moveNodeElementsDuringDrag(){
         positionComposerForNode(active);
     }
     syncAggregateSelectionOverlay();
-    scheduleInteractionLayerRefresh();
+    scheduleInteractionLayerRefresh(groupItems.map(item => item.id));
 }
 function updateNodeElementDuringResize(node){
     if(!node) return;
@@ -10329,7 +10466,9 @@ function measureSmartNodeImages(root=world, options={}){
     });
 }
 function bindConnectionEvents(){
-    world.querySelectorAll('[data-conn-index]').forEach(el => {
+    const elements = Array.from(world.querySelectorAll('[data-conn-index]'));
+    cacheConnectionDomElements(elements);
+    elements.forEach(el => {
         if(el.classList.contains('conn-hit')){
             el.addEventListener('dblclick', e => {
                 e.preventDefault(); e.stopPropagation();
@@ -21630,6 +21769,7 @@ window.onmouseup = e => {
     }
     if(dragState){
         const draggedNode = nodes.find(n => n.id === dragState.id);
+        const needsLoopPreviewRefresh = Boolean(loopInsertPreview);
         if(!dragState.thumbDetached && !dragState.undoCaptured){
             discardPendingUndo();
             clearDropHighlight();
@@ -21740,7 +21880,7 @@ window.onmouseup = e => {
         dragState = null;
         if(stateChanged){
             scheduleSave();
-            scheduleConnectionLayerRefresh();
+            if(needsLoopPreviewRefresh) scheduleConnectionLayerRefresh();
         }
     }
 };
