@@ -8919,7 +8919,7 @@ function nodeBodyHtml(node, layout){
     if(node.pending && imgs.length === 0){
         const count = Math.max(1, Number(node.pending) || 1);
         const statusLabel = smartPendingStatusLabel(node);
-        if(count <= 1 && statusLabel) return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px"><div class="jimeng-pending-overlay"><div class="jimeng-pending-spinner"><i data-lucide="loader-2"></i></div><div class="jimeng-pending-text">${escapeHtml(statusLabel)}</div><div class="jimeng-pending-sub">删除节点或关闭页面会停止本地轮询</div></div></div>`;
+        if(count <= 1 && statusLabel) return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px"><div class="jimeng-pending-overlay"><div class="jimeng-pending-spinner"><i data-lucide="loader-2"></i></div><div class="jimeng-pending-text" data-generation-runtime-label="1">${escapeHtml(statusLabel)}</div><div class="jimeng-pending-sub">删除节点或关闭页面会停止本地轮询</div></div></div>`;
         if(count <= 1) return `<div class="loading-cell single" style="width:${layout.width}px;height:${layout.height}px"></div>`;
         const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(count))));
         const rows = Math.ceil(count / cols);
@@ -9553,7 +9553,6 @@ async function runFocusEdit(){
     target.runStartedAt = nowMs();
     target.runTimerHidden = false;
     render();
-    scheduleSave();
     const previousSettings = cloneSmartSettings(settings);
     try {
         const mock = focusEditMockRuntime();
@@ -9587,10 +9586,9 @@ async function runFocusEdit(){
             target.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:submitted.providerId, model:submitted.model, status:'queued', generationId:attempt.id}));
             bindNodeGenerationAttemptTasks(target, taskIds, {providerId:submitted.providerId, model:submitted.model});
             target.pending = taskIds.length;
-            render();
-            scheduleSave();
+            updateGenerationRuntimeUI(target.id, {generationId:attempt.id});
             await saveCanvas();
-            await resumeSmartPendingNode(target);
+            await resumeSmartPendingNode(target, {deferTerminalRender:true});
             if(token.cancelRequested && nodeGenerationAttempt(target, attempt.id)?.status === 'running') throw new SmartTaskCancelledSignal();
             const completed = nodeGenerationAttempt(target, attempt.id);
             if(completed?.status === 'failed') throw new Error(completed.error || '焦点编辑失败');
@@ -9771,17 +9769,71 @@ function adoptNodeGenerationHistory(nodeId, generationId){
     toast('已采纳到当前节点');
 }
 function nodeGenerationRunningOverlayHtml(node){
-    const attempt = nodeGenerationAttempt(node) || nodeGenerationHistoryItems(node).find(item => item?.id && cancellingSmartGenerationIds.has(item.id));
-    const cancelling = Boolean(attempt?.id && cancellingSmartGenerationIds.has(attempt.id));
-    if(!attempt || (attempt.status !== 'running' && !cancelling)) return '';
-    const statusLabel = smartPendingStatusLabel(node) || (node.running ? '准备中' : '生成中');
-    const hasAdoptedImage = (node.images || []).some(image => image?.url);
-    return `<div class="node-generation-running-overlay">
+    const runtime = smartGenerationRuntimeState(node);
+    if(!runtime.visible) return '';
+    return `<div class="node-generation-running-overlay" data-generation-runtime="1" data-generation-id="${escapeAttr(runtime.generationId)}" data-generation-runtime-status="${escapeAttr(runtime.status)}">
         <i data-lucide="loader-2"></i>
-        <strong>${escapeHtml(cancelling ? '取消中...' : statusLabel)}</strong>
-        <span>${hasAdoptedImage ? '当前采用版本仍可供下游使用' : '任务完成前不会写入节点结果'}</span>
-        <button type="button" class="node-generation-cancel" data-cancel-generation="${escapeAttr(node.id)}" ${cancelling ? 'disabled' : ''}>${cancelling ? '取消中...' : '取消生成'}</button>
+        <strong data-generation-runtime-label="1">${escapeHtml(runtime.label)}</strong>
+        <span data-generation-runtime-detail="1">${escapeHtml(runtime.detail)}</span>
+        <button type="button" class="node-generation-cancel" data-generation-runtime-cancel="1" data-cancel-generation="${escapeAttr(node.id)}" ${runtime.cancelling ? 'disabled' : ''}>${runtime.cancelling ? '取消中...' : '取消生成'}</button>
     </div>`;
+}
+function smartGenerationRuntimeState(node, generationId=''){
+    const requestedAttempt = generationId ? nodeGenerationAttempt(node, generationId) : null;
+    const attempt = requestedAttempt || nodeGenerationAttempt(node) || nodeGenerationHistoryItems(node).find(item => item?.id && cancellingSmartGenerationIds.has(item.id));
+    const cancelling = Boolean(attempt?.id && cancellingSmartGenerationIds.has(attempt.id));
+    const visible = Boolean(attempt && (attempt.status === 'running' || cancelling));
+    const status = smartPendingRuntimeStatus(node) || (cancelling ? 'cancelling' : (node?.running ? 'preparing' : (attempt?.status === 'running' ? 'generating' : String(attempt?.status || ''))));
+    return {
+        attempt,
+        cancelling,
+        visible,
+        generationId:attempt?.id || generationId || '',
+        status,
+        label:cancelling ? '取消中...' : (smartPendingStatusLabel(node) || (node?.running ? '准备中' : '生成中')),
+        detail:(node?.images || []).some(image => image?.url) ? '当前采用版本仍可供下游使用' : '任务完成前不会写入节点结果'
+    };
+}
+function updateGenerationRuntimeUI(nodeId, options={}){
+    const node = nodes.find(item => item.id === nodeId);
+    if(!node) return false;
+    const expectedGenerationId = String(options.generationId || '');
+    if(expectedGenerationId && node.activeGenerationId && node.activeGenerationId !== expectedGenerationId) return false;
+    const nodeEl = world.querySelector(`.image-node[data-id="${CSS.escape(nodeId)}"]`);
+    if(!nodeEl) return false;
+    const runtime = smartGenerationRuntimeState(node, expectedGenerationId);
+    const imageCount = (node.images || []).filter(image => image?.url).length;
+    const isJimengPending = Boolean(node.jimengPending && node.jimengPending.submitId && imageCount === 0);
+    const isQueued = Boolean(node.queued && imageCount === 0 && !node.pending && !isJimengPending);
+    const isPending = Boolean((node.pending || isQueued || isJimengPending) && imageCount === 0);
+    nodeEl.classList.toggle('node-running', Boolean(node.running));
+    nodeEl.classList.toggle('node-pending', isPending);
+    nodeEl.classList.toggle('node-generation-running', runtime.visible);
+    nodeEl.dataset.generationId = runtime.visible ? runtime.generationId : '';
+    nodeEl.dataset.generationRuntimeStatus = runtime.status;
+    const overlay = nodeEl.querySelector('[data-generation-runtime]');
+    if(overlay){
+        overlay.hidden = !runtime.visible;
+        overlay.dataset.generationId = runtime.generationId;
+        overlay.dataset.generationRuntimeStatus = runtime.status;
+    }
+    nodeEl.querySelectorAll('[data-generation-runtime-label]').forEach(label => {
+        if(label.textContent !== runtime.label) label.textContent = runtime.label;
+    });
+    const detail = nodeEl.querySelector('[data-generation-runtime-detail]');
+    if(detail && detail.textContent !== runtime.detail) detail.textContent = runtime.detail;
+    const cancel = nodeEl.querySelector('[data-generation-runtime-cancel]');
+    if(cancel){
+        cancel.disabled = runtime.cancelling;
+        const cancelLabel = runtime.cancelling ? '取消中...' : '取消生成';
+        if(cancel.textContent !== cancelLabel) cancel.textContent = cancelLabel;
+    }
+    const timer = nodeEl.querySelector('[data-run-timer]');
+    if(timer){
+        timer.hidden = Boolean(node.runTimerHidden);
+        timer.classList.toggle('done', Boolean(!node.pending && !node.running && !node.jimengPending && node.runFinishedAt));
+    }
+    return true;
 }
 async function runJimengUpscale(node, index){
     node = liveSmartNode(node) || node;
@@ -9965,12 +10017,14 @@ function render(){
         const isHistory = isHistoryGroupNode(node);
         const isGroup = isImageNode && imgs.length > 1;
         const isPending = ((node.pending || isQueued || isJimengPending) && imgs.length === 0);
-        const hasActiveGeneration = nodeGenerationAttempt(node)?.status === 'running';
+        const activeGeneration = nodeGenerationAttempt(node);
+        const hasActiveGeneration = activeGeneration?.status === 'running';
+        const generationRuntimeStatus = smartPendingRuntimeStatus(node) || (node.running ? 'preparing' : (hasActiveGeneration ? 'generating' : ''));
         const body = nodeBodyHtml(node, layout);
         const deleteBtn = (isGroup || isMinimax) ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isText ? '双击编辑文本' : isGeneration ? '选择节点后编辑生成参数' : isSmartGroup ? '双击添加 · 拖入归组 · 选中后生成' : isMinimax ? 'Timeline editing' : isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
         const focusSourceNodeId = focusEditSession.referenceElement?.sourceNodeId || focusEditSession.candidateContext?.sourceNodeId || '';
-        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${focusEditActive() && node.id === focusEditSession.targetNodeId ? 'focus-edit-target' : ''} ${focusEditActive() && node.id === focusSourceNodeId ? 'focus-edit-source' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''} ${hasActiveGeneration ? 'node-generation-running' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
+        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isText ? 'text-smart-node' : ''} ${isGeneration ? 'generation-smart-node' : ''} ${node.type === 'smart-video-generation' ? 'video-generation-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isMinimax ? 'minimax-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${focusEditActive() && node.id === focusEditSession.targetNodeId ? 'focus-edit-target' : ''} ${focusEditActive() && node.id === focusSourceNodeId ? 'focus-edit-source' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''} ${hasActiveGeneration ? 'node-generation-running' : ''}" data-id="${escapeHtml(node.id)}" data-node-type="${escapeAttr(node.type || 'smart-image')}" data-generation-id="${escapeAttr(hasActiveGeneration ? activeGeneration.id : '')}" data-generation-runtime-status="${escapeAttr(generationRuntimeStatus)}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
 
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
             ${!isEmpty && !isGroup && !isMinimax ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
@@ -18088,7 +18142,8 @@ function coolNodeRunningState(node, ms=2000){
         const current = nodes.find(n => n.id === node.id);
         if(current){
             current.running = false;
-            render();
+            updateGenerationRuntimeUI(current.id, {generationId:current.activeGenerationId || ''});
+            syncRunButtonState();
         }
     }, ms);
     return token;
@@ -19021,6 +19076,10 @@ async function runGeneration(options={}){
         cancelRequested:false
     } : null;
     if(generationRunToken) activeSmartGenerationRuns.set(generationAttempt.id, generationRunToken);
+    const usesCanvasImageTask = Boolean(generationAttempt && (
+        isApiLikeEngine(settings.engine)
+        || (settings.engine === 'runninghub' && runningHubSelectedModel(settings))
+    ));
     if(extracted) pendingNode._runMetaTargetId = extracted.id;
     if(!branchNode){
         pendingNode.pending = Math.max(1, Number(expectedCount) || 1);
@@ -19043,7 +19102,7 @@ async function runGeneration(options={}){
         syncRunButtonState();
     }
     render();
-    scheduleSave();
+    if(!usesCanvasImageTask) scheduleSave();
     const generationWasSuperseded = () => {
         const livePendingNode = liveNodeGenerationState(pendingNode);
         return Boolean(
@@ -19102,11 +19161,11 @@ async function runGeneration(options={}){
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
             pendingNode.running = false;
-            render();
-            scheduleSave();
+            if(generationAttempt) updateGenerationRuntimeUI(pendingNode.id, {generationId:generationAttempt.id});
+            else render();
             await saveCanvas();
             pendingNode = liveNodeGenerationState(pendingNode) || pendingNode;
-            await resumeSmartPendingNode(pendingNode, {run:runLog, runLogStart});
+            await resumeSmartPendingNode(pendingNode, {run:runLog, runLogStart, deferTerminalRender:Boolean(generationAttempt)});
             pendingNode = liveNodeGenerationState(pendingNode) || pendingNode;
             throwIfSmartGenerationCancelled(generationRunToken);
             if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode)){
@@ -19835,37 +19894,53 @@ function smartTaskHasTerminalFailure(task){
     const status = String(task?.status || task?.upstreamStatus || '').trim().toLowerCase();
     return ['fail','failed','error','canceled','cancelled'].includes(status);
 }
+function smartPendingRuntimeStatus(node){
+    const statuses = smartPendingTasks(node).map(task => String(task.status || '').trim().toLowerCase());
+    if(statuses.includes('generating') || statuses.includes('running')) return 'generating';
+    if(statuses.includes('waiting')) return 'waiting';
+    if(statuses.includes('queued') || statuses.includes('queuing')) return 'queued';
+    if(statuses.includes('submitting')) return 'submitting';
+    if(statuses.includes('preparing')) return 'preparing';
+    return '';
+}
 function smartPendingStatusLabel(node){
-    const statuses = smartPendingTasks(node).map(task => String(task.status || '').toLowerCase());
-    if(statuses.includes('generating') || statuses.includes('running')) return 'Kie 正在生成';
-    if(statuses.includes('waiting')) return 'Kie 等待中';
-    if(statuses.includes('queued') || statuses.includes('queuing')) return 'Kie 排队中';
-    if(statuses.includes('submitting')) return '正在提交任务';
-    if(statuses.includes('preparing')) return '正在准备参考图';
+    const status = smartPendingRuntimeStatus(node);
+    if(status === 'generating') return 'Kie 正在生成';
+    if(status === 'waiting') return 'Kie 等待中';
+    if(status === 'queued') return 'Kie 排队中';
+    if(status === 'submitting') return '正在提交任务';
+    if(status === 'preparing') return '正在准备参考图';
     return '';
 }
 function updateSmartPendingTaskStatus(taskId, status, upstreamTaskId=''){
-    let changed = false;
+    const changedNodes = new Map();
+    let saveRequired = false;
     nodes.forEach(node => {
         smartPendingTasks(node).forEach(task => {
             if(task.taskId !== taskId) return;
+            const generationId = String(task.generationId || '');
+            const attempt = generationId ? nodeGenerationAttempt(node, generationId) : null;
+            if(generationId && (!attempt || attempt.status !== 'running' || (node.activeGenerationId && node.activeGenerationId !== generationId))) return;
+            let changed = false;
             if(task.status !== status){ task.status = status; changed = true; }
             if(upstreamTaskId && task.upstreamTaskId !== upstreamTaskId){
+                const firstUpstreamTaskId = !task.upstreamTaskId;
                 task.upstreamTaskId = upstreamTaskId;
-                const attempt = nodeGenerationAttemptForTask(node, taskId);
-                if(attempt){
-                    attempt.upstreamTaskIds = Array.from(new Set([...(attempt.upstreamTaskIds || []), upstreamTaskId]));
-                    attempt.upstreamTaskId = attempt.upstreamTaskId || upstreamTaskId;
-                    attempt.updatedAt = nowMs();
+                const taskAttempt = attempt || nodeGenerationAttemptForTask(node, taskId);
+                if(taskAttempt){
+                    taskAttempt.upstreamTaskIds = Array.from(new Set([...(taskAttempt.upstreamTaskIds || []), upstreamTaskId]));
+                    taskAttempt.upstreamTaskId = taskAttempt.upstreamTaskId || upstreamTaskId;
+                    taskAttempt.updatedAt = nowMs();
                 }
+                if(firstUpstreamTaskId) saveRequired = true;
                 changed = true;
             }
+            if(changed) changedNodes.set(node.id, generationId);
         });
     });
-    if(changed){
-        render();
-        scheduleSave();
-    }
+    changedNodes.forEach((generationId, nodeId) => updateGenerationRuntimeUI(nodeId, {generationId}));
+    if(saveRequired) scheduleSave();
+    return {changed:changedNodes.size > 0, updatedNodes:changedNodes.size, saveRequired};
 }
 class SmartTaskCancelledSignal extends Error {
     constructor(){
@@ -19902,31 +19977,33 @@ async function cancelSmartImageGeneration(nodeId){
     const node = nodes.find(item => item.id === nodeId);
     const attempt = nodeGenerationAttempt(node);
     if(!node || !attempt || attempt.status !== 'running' || cancellingSmartGenerationIds.has(attempt.id)) return false;
-    cancellingSmartGenerationIds.add(attempt.id);
-    const token = activeSmartGenerationRuns.get(attempt.id);
+    const generationId = attempt.id;
+    cancellingSmartGenerationIds.add(generationId);
+    const token = activeSmartGenerationRuns.get(generationId);
     if(token) token.cancelRequested = true;
     const tasks = smartPendingTasks(node).slice();
-    finishNodeGenerationAttempt(node, 'cancelled', '用户取消生成', attempt.id);
-    render();
+    finishNodeGenerationAttempt(node, 'cancelled', '用户取消生成', generationId);
+    updateGenerationRuntimeUI(nodeId, {generationId});
     scheduleSave();
     const results = await Promise.allSettled(tasks.map(task => cancelSmartCanvasTask(task.taskId)));
     let localOnly = tasks.some(task => ['submitting','queued','waiting','queuing','generating','running'].includes(String(task.status || '').toLowerCase()));
+    const liveNode = nodes.find(item => item.id === nodeId);
+    const liveAttempt = nodeGenerationAttempt(liveNode, generationId);
+    let upstreamChanged = false;
     results.forEach(result => {
         const data = result.status === 'fulfilled' ? result.value : null;
         const upstreamTaskId = String(data?.upstream_task_id || '').trim();
-        if(upstreamTaskId){
-            attempt.upstreamTaskIds = Array.from(new Set([...(attempt.upstreamTaskIds || []), upstreamTaskId]));
-            attempt.upstreamTaskId = attempt.upstreamTaskId || upstreamTaskId;
+        if(upstreamTaskId && liveAttempt){
+            const nextIds = Array.from(new Set([...(liveAttempt.upstreamTaskIds || []), upstreamTaskId]));
+            upstreamChanged = upstreamChanged || nextIds.length !== (liveAttempt.upstreamTaskIds || []).length;
+            liveAttempt.upstreamTaskIds = nextIds;
+            liveAttempt.upstreamTaskId = liveAttempt.upstreamTaskId || upstreamTaskId;
         }
         if(data?.cancel_scope === 'local-only') localOnly = true;
     });
-    node.pending = 0;
-    node.running = false;
-    node.queued = false;
-    delete node.pendingTasks;
-    cancellingSmartGenerationIds.delete(attempt.id);
-    render();
-    scheduleSave();
+    cancellingSmartGenerationIds.delete(generationId);
+    if(upstreamChanged) scheduleSave();
+    updateGenerationRuntimeUI(nodeId, {generationId});
     toast(localOnly ? '已停止本地等待；任务已提交服务商，可能仍会继续执行。' : '生成已取消');
     return true;
 }
@@ -20280,6 +20357,7 @@ async function resumeSmartPendingNode(node, logContext={}){
     if(!node || !tasks.length) return;
     const nodeId = node.id;
     const generationAttemptId = tasks.find(task => task.generationId)?.generationId || node?.activeGenerationId || '';
+    let terminalRenderRequired = false;
     const logTaskFailure = (message, task) => {
         if(!logContext?.run || !message) return;
         const runMs = Math.max(0, nowMs() - Number(logContext.runLogStart || nowMs()));
@@ -20292,7 +20370,8 @@ async function resumeSmartPendingNode(node, logContext={}){
     };
     node.pending = Math.max(tasks.length, Number(node.pending || 0) || tasks.length);
     node.running = false;
-    render();
+    if(generationAttemptId) updateGenerationRuntimeUI(nodeId, {generationId:generationAttemptId});
+    else render();
     const failures = [];
     const cancellations = [];
     await Promise.all(tasks.map(async task => {
@@ -20302,8 +20381,13 @@ async function resumeSmartPendingNode(node, logContext={}){
             node = liveNodeGenerationState(node);
             if(!node || node.id !== nodeId) return;
             finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image');
-            render();
-            scheduleSave();
+            if(generationAttemptId){
+                const completedAttempt = nodeGenerationAttempt(node, generationAttemptId);
+                if(completedAttempt && completedAttempt.status !== 'running') terminalRenderRequired = true;
+            } else {
+                render();
+                scheduleSave();
+            }
         } catch(e) {
             node = liveNodeGenerationState(node);
             if(!node || node.id !== nodeId) return;
@@ -20319,8 +20403,10 @@ async function resumeSmartPendingNode(node, logContext={}){
                 node.pending = node.pendingTasks.length;
                 if(!node.pendingTasks.length) delete node.pendingTasks;
                 cancellations.push(e);
-                render();
-                scheduleSave();
+                if(!generationAttemptId){
+                    render();
+                    scheduleSave();
+                }
                 return;
             }
             if(e && e.jimengPending && e.submitId){
@@ -20363,8 +20449,10 @@ async function resumeSmartPendingNode(node, logContext={}){
             logTaskFailure(e.message || tr('smart.errRunFailed'), liveTask);
             if(e && typeof e === 'object') e.smartGenerationLogged = true;
             toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
-            render();
-            scheduleSave();
+            if(!generationAttemptId){
+                render();
+                scheduleSave();
+            }
         }
     }));
     node = liveNodeGenerationState(node);
@@ -20385,6 +20473,9 @@ async function resumeSmartPendingNode(node, logContext={}){
         if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
         node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
         node.runTimerHidden = false;
+        terminalRenderRequired = true;
+    }
+    if(terminalRenderRequired && !logContext.deferTerminalRender){
         render();
         scheduleSave();
     }

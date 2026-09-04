@@ -163,13 +163,19 @@ class SmartCanvasCancelFrontendContractTests(unittest.TestCase):
 
     def test_07_cancel_marks_history_before_stopping_tasks_and_is_idempotent(self):
         cancel = function_source("cancelSmartImageGeneration")
+        finish = function_source("finishNodeGenerationAttempt")
+        terminal_cleanup = function_source("clearNodeGenerationTerminalState")
+        busy_cleanup = function_source("clearSmartNodeBusyState")
         self.assertIn("cancellingSmartGenerationIds.has(attempt.id)", cancel)
         self.assertLess(
             cancel.index("finishNodeGenerationAttempt(node, 'cancelled'"),
             cancel.index("Promise.allSettled"),
         )
         self.assertIn("token.cancelRequested = true", cancel)
-        self.assertIn("delete node.pendingTasks", cancel)
+        self.assertIn("clearNodeGenerationTerminalState", finish)
+        self.assertIn("clearSmartNodeBusyState", terminal_cleanup)
+        self.assertIn("delete node.pendingTasks", busy_cleanup)
+        self.assertIn("const liveNode = nodes.find", cancel)
 
     def test_08_late_success_and_old_attempt_cannot_adopt(self):
         finalizer = function_source("finalizeSmartPendingTask")

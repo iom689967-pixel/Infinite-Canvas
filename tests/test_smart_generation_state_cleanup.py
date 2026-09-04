@@ -59,6 +59,7 @@ class SmartGenerationStateCleanupTests(unittest.TestCase):
             "completeNodeGenerationAttempt",
             "clearNodeGenerationTerminalState",
             "finishNodeGenerationAttempt",
+            "smartGenerationRuntimeState",
             "nodeGenerationRunningOverlayHtml",
         ))
         cls.terminal = run_node(f"""
@@ -90,6 +91,7 @@ function nodeGenerationLayoutSnapshot(node){{ return {{width:node.w, height:node
 function cascadeOutputTitle(kind, count){{ return count > 1 ? 'Group' : 'Image'; }}
 function nodeGenerationMetaFromAttempt(attempt){{ return {{createdAt:attempt.createdAt}}; }}
 function attachRunMeta(){{}}
+function smartPendingRuntimeStatus(){{ return ''; }}
 function smartPendingStatusLabel(){{ return ''; }}
 function escapeHtml(value){{ return String(value || ''); }}
 function escapeAttr(value){{ return String(value || ''); }}
