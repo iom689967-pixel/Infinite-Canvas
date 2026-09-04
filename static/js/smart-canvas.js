@@ -1428,29 +1428,87 @@ function clearImageClickTimer(){
 }
 let smartSelectionUiNodeIds = new Set();
 let smartSelectionUiImage = {nodeId:'', index:-1};
-function syncSelectionUi(){
-    const ids = selectedNodeIds();
-    const nextIds = new Set(ids);
-    const touchedIds = new Set([...smartSelectionUiNodeIds, ...nextIds]);
-    if(smartSelectionUiImage.nodeId) touchedIds.add(smartSelectionUiImage.nodeId);
-    if(selectedImage.nodeId) touchedIds.add(selectedImage.nodeId);
-    world.classList.toggle('smart-multi-selected', ids.length > 1);
-    smartArrangeBtn?.classList.toggle('visible', ids.length > 0);
+let smartSelectionUiConnectionKeys = new Set();
+function smartSelectionUiState(){
+    return {
+        nodeIds:selectedNodeIds(),
+        image:{nodeId:selectedImage.nodeId || '', index:Number(selectedImage.index ?? -1)},
+        connectionKeys:new Set(selectedConnectionKeys)
+    };
+}
+function trackedSmartSelectionUiState(){
+    return {
+        nodeIds:[...smartSelectionUiNodeIds],
+        image:{...smartSelectionUiImage},
+        connectionKeys:new Set(smartSelectionUiConnectionKeys)
+    };
+}
+function normalizeSmartSelectionUiState(state){
+    const value = state || {};
+    return {
+        nodeIds:new Set(value.nodeIds || []),
+        image:{nodeId:value.image?.nodeId || '', index:Number(value.image?.index ?? -1)},
+        connectionKeys:new Set(value.connectionKeys || [])
+    };
+}
+function smartSelectionSetsEqual(left, right){
+    return left.size === right.size && [...left].every(value => right.has(value));
+}
+function smartSelectionUiStatesEqual(previous, next){
+    return smartSelectionSetsEqual(previous.nodeIds, next.nodeIds)
+        && smartSelectionSetsEqual(previous.connectionKeys, next.connectionKeys)
+        && previous.image.nodeId === next.image.nodeId
+        && previous.image.index === next.image.index;
+}
+function syncSmartConnectionSelectionUi(previousKeys, nextKeys){
+    if(smartSelectionSetsEqual(previousKeys, nextKeys)) return;
+    const connections = canvas?.connections || [];
+    world.querySelectorAll?.('svg.connection-layer path.conn-line[data-conn-index]').forEach(path => {
+        const selected = String(path.dataset.connIndex || '').split(',').some(rawIndex => {
+            const index = Number(rawIndex);
+            const connection = Number.isInteger(index) ? connections[index] : null;
+            return Boolean(connection && nextKeys.has(smartConnectionSelectionKey(connection)));
+        });
+        path.classList.toggle('conn-selected', selected);
+    });
+}
+function rememberSmartSelectionUiState(state=smartSelectionUiState()){
+    const current = normalizeSmartSelectionUiState(state);
+    smartSelectionUiNodeIds = new Set(current.nodeIds);
+    smartSelectionUiImage = {...current.image};
+    smartSelectionUiConnectionKeys = new Set(current.connectionKeys);
+}
+function updateSmartSelectionUI(previousSelection, nextSelection=smartSelectionUiState(), options={}){
+    const previous = normalizeSmartSelectionUiState(previousSelection || trackedSmartSelectionUiState());
+    const next = normalizeSmartSelectionUiState(nextSelection);
+    if(smartSelectionUiStatesEqual(previous, next)) return false;
+    const touchedIds = new Set(
+        [...previous.nodeIds, ...next.nodeIds].filter(id => previous.nodeIds.has(id) !== next.nodeIds.has(id))
+    );
+    if(previous.image.nodeId !== next.image.nodeId || previous.image.index !== next.image.index){
+        if(previous.image.nodeId) touchedIds.add(previous.image.nodeId);
+        if(next.image.nodeId) touchedIds.add(next.image.nodeId);
+    }
+    world.classList.toggle('smart-multi-selected', next.nodeIds.size > 1);
+    smartArrangeBtn?.classList.toggle('visible', next.nodeIds.size > 0);
     smartNodeElementsByIds(touchedIds).forEach(el => {
         const id = el.dataset.id || '';
-        el.classList.toggle('selected', isNodeSelected(id));
+        el.classList.toggle('selected', next.nodeIds.has(id));
         el.querySelectorAll('.thumb-item,.image-wrap').forEach(item => {
             const targetNodeId = item.dataset.refNodeId || id;
             const index = Number(item.dataset.refImageIndex ?? item.dataset.imageIndex ?? 0);
-            item.classList.toggle('image-selected', selectedImage.nodeId === targetNodeId && selectedImage.index === index);
+            item.classList.toggle('image-selected', next.image.nodeId === targetNodeId && next.image.index === index);
         });
     });
-    smartSelectionUiNodeIds = nextIds;
-    smartSelectionUiImage = {nodeId:selectedImage.nodeId || '', index:Number(selectedImage.index ?? -1)};
-    syncSmartSelectedImageResolution(world);
+    syncSmartConnectionSelectionUi(previous.connectionKeys, next.connectionKeys);
+    rememberSmartSelectionUiState(next);
     syncRunButtonState();
     syncAggregateSelectionOverlay();
-    scheduleConnectionLayerRefresh();
+    if(options.updateComposer !== false) updateComposer();
+    return true;
+}
+function syncSelectionUi(options={}){
+    return updateSmartSelectionUI(trackedSmartSelectionUiState(), smartSelectionUiState(), options);
 }
 function isNodeSelected(id){
     return selectedId === id || selectedIds.includes(id);
@@ -3174,7 +3232,7 @@ function renderDynamicParams(){
     restoreDynamicParamsScroll(scrollState);
     updatePromptPlaceholder();
     persistActiveSmartSettings();
-    if(window.lucide) lucide.createIcons();
+    refreshLucideIconsWithin(dynamicParams);
 }
 function renderApiParams(){
     const providers = imageProviders();
@@ -9985,10 +10043,12 @@ function runTimePillHtml(node){
     const cls = running ? '' : ' done';
     return `<span class="run-time-pill${cls}" data-run-timer="${escapeHtml(node.id)}">${formatRunDuration(nodeRunElapsedMs(node))}</span>`;
 }
-function hideRunTimerForNode(node){
+function hideRunTimerForNode(node, options={}){
     if(!node || node.runTimerHidden || node.pending || node.running || node.jimengPending || !node.runFinishedAt) return false;
     node.runTimerHidden = true;
-    scheduleSave();
+    const nodeId = CSS.escape(String(node.id || ''));
+    world.querySelector?.(`[data-run-timer="${nodeId}"]`)?.remove();
+    if(options.save !== false) scheduleSave();
     return true;
 }
 function refreshRunTimerPills(){
@@ -10108,6 +10168,7 @@ function render(){
     restoreMediaPlaybackStates(mediaStates);
     bindNodeEvents();
     syncAggregateSelectionOverlay();
+    rememberSmartSelectionUiState();
     bindConnectionEvents();
     updateComposer();
     renderMinimap();
@@ -10581,13 +10642,13 @@ function bindLoopNodeControls(el, node){
 function bindMinimaxNodeControls(el, node){
     const focusMinimaxNode = () => {
         if(selectedId === node.id && selectedIds.length === 0 && selectedImage.nodeId === '') return;
-        hideRunTimerForNode(node);
+        const previousSelection = smartSelectionUiState();
+        hideRunTimerForNode(node, {save:false});
         selectedId = node.id;
         selectedIds = [];
         selectedImage = {nodeId:'', index:-1};
         if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
-        syncSelectionUi();
-        updateComposer();
+        updateSmartSelectionUI(previousSelection);
     };
     el.querySelectorAll('.minimax-library-list').forEach(scroller => {
         scroller.addEventListener('wheel', e => e.stopPropagation(), {passive:true});
@@ -11705,9 +11766,11 @@ function bindNodeEvents(root=world){
             el.ondblclick = e => {
                 e.preventDefault();
                 e.stopPropagation();
+                const previousSelection = smartSelectionUiState();
                 selectedId = id;
                 selectedIds = [];
                 selectedImage = {nodeId:'', index:-1};
+                updateSmartSelectionUI(previousSelection, smartSelectionUiState(), {updateComposer:false});
                 openCreateMenu(e, {groupId:id});
             };
         }
@@ -11716,19 +11779,25 @@ function bindNodeEvents(root=world){
             if(focusEditActive()) return;
             if(Date.now() < suppressNodeClickUntil) return;
             const node = nodes.find(n => n.id === id);
-            hideRunTimerForNode(node);
+            const previousSelection = smartSelectionUiState();
+            const append = Boolean(e.shiftKey || e.metaKey || e.ctrlKey);
             const alreadySelected = selectedId === id && selectedIds.length === 0 && selectedImage.nodeId === '';
-            selectedId = id;
-            selectedIds = [];
-            selectedConnectionKeys.clear();
+            hideRunTimerForNode(node, {save:false});
+            if(!append && alreadySelected) return;
+            if(append){
+                const nextIds = new Set(previousSelection.nodeIds);
+                if(nextIds.has(id)) nextIds.delete(id);
+                else nextIds.add(id);
+                selectedIds = [...nextIds];
+                selectedId = selectedIds.length === 1 ? selectedIds[0] : '';
+            } else {
+                selectedId = id;
+                selectedIds = [];
+                selectedConnectionKeys.clear();
+            }
             selectedImage = {nodeId:'', index:-1};
             if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
-            if(alreadySelected){
-                syncSelectionUi();
-                updateComposer();
-                return;
-            }
-            render();
+            updateSmartSelectionUI(previousSelection);
         };
         if(nodeForControls?.type === 'smart-prompt' || nodeForControls?.type === 'smart-text') {
             el.ondblclick = e => {
@@ -11747,14 +11816,14 @@ function bindNodeEvents(root=world){
         }, true);
         nodeDrop?.addEventListener('click', e => {
             e.preventDefault(); e.stopPropagation();
-            hideRunTimerForNode(nodes.find(n => n.id === id));
+            const previousSelection = smartSelectionUiState();
+            hideRunTimerForNode(nodes.find(n => n.id === id), {save:false});
             selectedId = id;
             selectedIds = [];
             selectedImage = {nodeId:'', index:-1};
             pendingGroupUploadPoint = null;
             uploadTargetId = id;
-            syncSelectionUi();
-            updateComposer();
+            updateSmartSelectionUI(previousSelection);
             pickMediaForSmartNode(id);
         });
         el.querySelectorAll('.node-delete').forEach(btn => {
@@ -11926,15 +11995,18 @@ function bindNodeEvents(root=world){
                     return;
                 }
                 clearImageClickTimer();
+                const targetNodeId = target.targetNodeId;
+                const targetImageIndex = target.imageIndex;
                 imageClickTimer = setTimeout(() => {
                     imageClickTimer = null;
-                hideRunTimerForNode(owner);
-                selectedId = id;
-                selectedIds = [];
-                // Composer 绑定节点本身；这里记录图层焦点，用于交叠时置顶和工具栏目标。
-                selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
+                    const previousSelection = smartSelectionUiState();
+                    hideRunTimerForNode(nodes.find(n => n.id === id), {save:false});
+                    selectedId = id;
+                    selectedIds = [];
+                    // Composer 绑定节点本身；这里记录图层焦点，用于交叠时置顶和工具栏目标。
+                    selectedImage = {nodeId:targetNodeId, index:targetImageIndex};
                     if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
-                    syncSelectionUi();
+                    updateSmartSelectionUI(previousSelection, smartSelectionUiState(), {updateComposer:false});
                     scheduleComposerUpdate(180);
                 }, 220);
             });
@@ -15214,7 +15286,7 @@ function renderInputThumbsRow(node){
     if(!dedup.length){
         inputThumbsRow.innerHTML = sourceTabs;
         bindInputThumbReferenceActions(mentionCandidatesByKey);
-        refreshIcons();
+        refreshLucideIconsWithin(inputThumbsRow);
         return;
     }
     const mediaCounters = {image:0, video:0, audio:0, text:0, file:0};
@@ -15253,7 +15325,7 @@ function renderInputThumbsRow(node){
     bindSmartPreviewImageFallbacks(inputThumbsRow);
     bindInputThumbsDrag(node, dedup, manualRefKeys, canvasRefKeys);
     bindInputThumbReferenceActions(mentionCandidatesByKey);
-    refreshIcons();
+    refreshLucideIconsWithin(inputThumbsRow);
 }
 function bindInputThumbReferenceActions(mentionCandidatesByKey=new Map()){
     inputThumbsRow?.querySelectorAll('[data-input-reference-source]').forEach(btn => {
@@ -18406,7 +18478,7 @@ function syncCascadeRunButton(node=selectedNode()){
     cascadeRunBtn.innerHTML = runningForNode
         ? `<i data-lucide="square"></i><span>${escapeHtml(smartCascadeStopText(Boolean(loopRunState?.stopRequested)))}</span>`
         : `<i data-lucide="workflow"></i><span>${escapeHtml(tr('smart.loopRunAll'))}</span>`;
-    refreshIcons();
+    refreshLucideIconsWithin(cascadeRunBtn);
 }
 function loadNodePromptDraftToInput(node){
     if(node?.promptDraftHtml) {
@@ -20682,6 +20754,7 @@ function smartEdgeKeysIntersectingSelectionRect(rect){
 function finishSelection(event){
     if(!selectionState) return;
     const state = selectionState;
+    const previousSelection = smartSelectionUiState();
     const hits = [];
     const edgeHits = new Set();
     if(state.moved){
@@ -20703,7 +20776,7 @@ function finishSelection(event){
     selectedImage = {nodeId:'', index:-1};
     resetSmartSelectionGesture();
     selectionJustFinished = true;
-    render();
+    updateSmartSelectionUI(previousSelection);
     setTimeout(() => { selectionJustFinished = false; }, 0);
 }
 function groupSelectedNodes(){
@@ -21116,7 +21189,7 @@ shell.onmousedown = e => {
         startScreen:{x:e.clientX, y:e.clientY},
         startWorld:screenToWorld(e),
         moved:false,
-        append:Boolean(e.shiftKey),
+        append:Boolean(e.shiftKey || e.metaKey || e.ctrlKey),
         initialIds:selectedNodeIds(),
         initialConnectionKeys:new Set(selectedConnectionKeys)
     };
@@ -21149,9 +21222,11 @@ shell.oncontextmenu = e => {
     e.stopPropagation();
     const groupEl = e.target.closest('.image-node.smart-group-node');
     if(groupEl?.dataset?.id){
+        const previousSelection = smartSelectionUiState();
         selectedId = groupEl.dataset.id;
         selectedIds = [];
         selectedImage = {nodeId:'', index:-1};
+        updateSmartSelectionUI(previousSelection, smartSelectionUiState(), {updateComposer:false});
         openCreateMenu(e, {groupId:groupEl.dataset.id});
         return;
     }
@@ -21171,8 +21246,9 @@ shell.onclick = e => {
     if(didPan || e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
     if(document.getElementById('imageEditModal')?.classList.contains('open')) return;
     closeCreateMenu();
+    const previousSelection = smartSelectionUiState();
     clearSelection();
-    render();
+    updateSmartSelectionUI(previousSelection);
 };
 minimap?.addEventListener('mousedown', e => {
     if(e.button !== 0) return;
@@ -21644,8 +21720,10 @@ window.onmouseup = e => {
         clearDropHighlight();
         loopInsertPreview = null;
         dragState = null;
-        scheduleSave();
-        scheduleConnectionLayerRefresh();
+        if(stateChanged){
+            scheduleSave();
+            scheduleConnectionLayerRefresh();
+        }
     }
 };
 function cancelSmartNodeDrag(){
