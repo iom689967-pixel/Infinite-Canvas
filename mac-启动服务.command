@@ -16,7 +16,6 @@ xattr -r -d com.apple.quarantine main.py 2>/dev/null
 
 # 设置执行权限（修正：原脚本引用了不存在的 启动服务.command/启动服务.py）
 chmod +x *.command 2>/dev/null
-chmod +x main.py 2>/dev/null
 
 echo "权限已修复！"
 echo ""
