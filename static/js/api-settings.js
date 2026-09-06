@@ -3207,7 +3207,7 @@ async function testConnection(){
         });
         if(data.ok){
             const detectedProtocol = String(data.protocol || '').toLowerCase();
-            if(detectedProtocol && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
+            if(detectedProtocol && currentProtocol !== 'gemini' && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
                 applyDetectedProtocol(detectedProtocol);
             }
             // "验证地址" only checks reachability. Protocol and image-interface
@@ -3421,7 +3421,8 @@ async function fetchModels(){
         });
         setFetchedModelState(data);
         const detectedProtocol = String(data.protocol || '').toLowerCase();
-        if(detectedProtocol && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
+        const currentProtocol = String(protocolInput?.value || item.protocol || '').toLowerCase();
+        if(detectedProtocol && currentProtocol !== 'gemini' && detectedProtocol !== currentProtocol){
             applyDetectedProtocol(detectedProtocol);
         }
         if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);

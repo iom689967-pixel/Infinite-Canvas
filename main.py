@@ -1322,6 +1322,35 @@ def provider_endpoint_url(provider, key, default_path):
             return f"{base_url}{default_path[len(prefix):]}"
     return f"{base_url}{default_path}"
 
+def gemini_api_root_url(base_url):
+    """Return the provider root before Gemini's /v1beta path.
+
+    Accept both a clean provider root and older saved values that already end in
+    /v1 or /v1beta, including accidentally duplicated version suffixes.
+    """
+    root = str(base_url or "").strip().rstrip("/")
+    suffixes = ("/v1beta/models", "/v1/models", "/v1beta", "/v1")
+    while root:
+        lowered = root.lower()
+        matched = next((suffix for suffix in suffixes if lowered.endswith(suffix)), "")
+        if not matched:
+            break
+        root = root[:-len(matched)].rstrip("/")
+    return root
+
+def gemini_gateway_models_url(base_url):
+    """Return a gateway's root OpenAI-compatible model catalog, when present.
+
+    Native Google Gemini URLs have no path before /v1beta and therefore keep
+    using only /v1beta/models. A gateway mounted below a path (for example
+    /antigravity) may expose its complete catalog at the host-level /v1/models.
+    """
+    root = gemini_api_root_url(base_url)
+    parsed = urllib.parse.urlsplit(root)
+    if not parsed.scheme or not parsed.netloc or not parsed.path.strip("/"):
+        return ""
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/v1/models", "", ""))
+
 def runninghub_endpoint_url(provider, path):
     base_url = str((provider or {}).get("base_url") or RUNNINGHUB_DEFAULT_BASE_URL).strip().rstrip("/")
     return f"{base_url}{path}"
@@ -3952,7 +3981,7 @@ def resolve_chat_provider(provider: str, model: str, ms_model: str):
         # Keep the configured base URL for its OpenAI-compatible models only.
         if is_apimart_provider(api_provider):
             base_root = "https://api.apimart.ai"
-        base = base_root if base_root.endswith("/v1beta") else base_root + "/v1beta"
+        base = gemini_api_root_url(base_root) + "/v1beta"
     elif protocol == "volcengine":
         base = base_root if base_root.endswith("/api/v3") else base_root + "/api/v3"
     elif protocol == "runninghub":
@@ -4061,6 +4090,15 @@ def unwrap_apimart_response(raw):
 
 def text_from_chat_response(data):
     data = unwrap_apimart_response(data)
+    candidates = data.get("candidates") or []
+    if candidates:
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or []
+        return "\n".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and part.get("text")
+        )
     choices = data.get("choices") or []
     if not choices:
         return ""
@@ -4075,6 +4113,67 @@ def text_from_chat_response(data):
                 parts.append(item.get("text") or item.get("content") or "")
         return "\n".join(part for part in parts if part)
     return str(content)
+
+def chat_usage_from_response(data):
+    data = unwrap_apimart_response(data) if isinstance(data, dict) else {}
+    return data.get("usage") or data.get("usageMetadata")
+
+def gemini_part_from_openai_content(part):
+    if not isinstance(part, dict):
+        return None
+    part_type = str(part.get("type") or "").strip().lower()
+    if part_type == "text" or (not part_type and part.get("text") is not None):
+        text = str(part.get("text") or part.get("content") or "")
+        return {"text": text} if text else None
+    media = part.get("image_url") if part_type == "image_url" else part.get("video_url") if part_type == "video_url" else None
+    if isinstance(media, dict):
+        media = media.get("url")
+    media = str(media or "").strip()
+    if not media:
+        return None
+    if media.startswith("data:") and ";base64," in media:
+        header, encoded = media.split(";base64,", 1)
+        mime_type = header[5:] or ("video/mp4" if part_type == "video_url" else "image/png")
+        return {"inlineData": {"mimeType": mime_type, "data": encoded}}
+    if media.startswith(("http://", "https://")):
+        mime_type = mimetypes.guess_type(urllib.parse.urlsplit(media).path)[0]
+        mime_type = mime_type or ("video/mp4" if part_type == "video_url" else "image/png")
+        return {"fileData": {"mimeType": mime_type, "fileUri": media}}
+    return None
+
+def gemini_contents_from_openai_messages(messages):
+    system_parts = []
+    contents = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower()
+        content = message.get("content")
+        raw_parts = content if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
+        parts = [part for part in (gemini_part_from_openai_content(item) for item in raw_parts) if part]
+        if not parts:
+            continue
+        if role == "system":
+            system_parts.extend(parts)
+            continue
+        contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
+    body = {"contents": contents}
+    if system_parts:
+        body["systemInstruction"] = {"parts": system_parts}
+    return body
+
+def chat_upstream_request(provider, chat_base, model, messages, *, stream=False):
+    """Build one request for the provider's already-selected chat protocol."""
+    if effective_protocol(provider, model) == "gemini":
+        root = gemini_api_root_url(chat_base)
+        model_name = urllib.parse.quote(gemini_model_name(model), safe="")
+        return f"{root}/v1beta/models/{model_name}:generateContent", gemini_contents_from_openai_messages(messages)
+    body = {"model": model, "messages": messages}
+    if stream:
+        body["stream"] = True
+    elif is_apimart_provider(provider):
+        body["stream"] = False
+    return f"{chat_base}/chat/completions", body
 
 def text_delta_from_chat_chunk(data):
     choices = data.get("choices") or []
@@ -11781,11 +11880,9 @@ async def decide_chat_agent_action(payload, conversation, refs):
     })
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if is_apimart_provider(provider_cfg):
-                req_body["stream"] = False
+            request_url, req_body = chat_upstream_request(provider_cfg, chat_base, model, upstream_messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -11828,7 +11925,6 @@ async def build_chat_text_reply(payload, conversation):
             "raw": raw,
         }
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    is_apimart = is_apimart_provider(provider_cfg)
     upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
     for item in conversation["messages"][-MAX_HISTORY_MESSAGES:]:
         msg = upstream_message_from_record(item)
@@ -11836,10 +11932,8 @@ async def build_chat_text_reply(payload, conversation):
             upstream_messages.append(msg)
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if is_apimart:
-                req_body["stream"] = False
-            response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body)
+            request_url, req_body = chat_upstream_request(provider_cfg, chat_base, model, upstream_messages)
+            response = await client.post(request_url, headers=chat_hdrs, json=req_body)
             response.raise_for_status()
             raw = response.json()
     except httpx.HTTPStatusError as exc:
@@ -11855,7 +11949,7 @@ async def build_chat_text_reply(payload, conversation):
         "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
         "created_at": now_ms(),
         "model": model,
-        "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
+        "raw_usage": chat_usage_from_response(raw_data),
     }
 
 # --- 路由接口 ---
@@ -13542,7 +13636,7 @@ def api_key_from_payload(payload, protocol: str = ""):
 
 def upstream_models_url(base_url: str, protocol: str):
     if protocol == "gemini":
-        return f"{base_url}/models" if base_url.endswith("/v1beta") else f"{base_url}/v1beta/models"
+        return f"{gemini_api_root_url(base_url)}/v1beta/models"
     if protocol == "volcengine":
         return f"{base_url}/models" if base_url.endswith("/api/v3") else f"{base_url}/api/v3/models"
     if protocol == "runninghub":
@@ -13773,6 +13867,18 @@ def classify_upstream_model(mid):
         return "image"
     return "chat"
 
+def group_gemini_models(model_ids):
+    ids = sorted({
+        str(model_id).strip()
+        for model_id in model_ids or []
+        if str(model_id).strip().lower().startswith("gemini-")
+    })
+    grouped = {"image": [], "chat": [], "video": []}
+    for model_id in ids:
+        target = "image" if "image" in model_id.lower() else "chat"
+        grouped[target].append(model_id)
+    return grouped, ids
+
 def parse_upstream_models(raw, protocol="openai"):
     items = raw.get("data") if isinstance(raw, dict) else None
     if not items and isinstance(raw, dict):
@@ -13789,14 +13895,42 @@ def parse_upstream_models(raw, protocol="openai"):
             mid = ""
         if mid:
             mid = str(mid)
-            if protocol == "gemini" and mid.startswith("models/"):
+            if protocol == "gemini" and mid.lower().startswith("models/"):
                 mid = mid[len("models/"):]
             ids.append(mid)
     ids = sorted(set(ids))
+    if protocol == "gemini":
+        return group_gemini_models(ids)
     grouped = {"image": [], "chat": [], "video": []}
     for mid in ids:
         grouped[classify_upstream_model(mid)].append(mid)
     return grouped, ids
+
+async def supplement_gemini_gateway_models(client, base_url, api_key, grouped, ids):
+    """Merge a path-mounted Gemini gateway's host-level model catalog.
+
+    The native endpoint remains authoritative for Gemini connectivity. If the
+    optional OpenAI-compatible catalog is unavailable, the native result is
+    returned unchanged.
+    """
+    catalog_url = gemini_gateway_models_url(base_url)
+    if not catalog_url:
+        return grouped, ids, None
+    source = {"url": catalog_url, "status": 0, "model_count": 0}
+    try:
+        response = await client.get(catalog_url, headers=upstream_model_headers(api_key, "openai"))
+        source["status"] = response.status_code
+        if response.status_code >= 400 or looks_like_html_response(response.text):
+            return grouped, ids, source
+        # The gateway may return either OpenAI `data[].id` or Gemini
+        # `models[].name`; Gemini parsing accepts both and removes `models/`.
+        _, catalog_ids = parse_upstream_models(response.json(), "gemini")
+        source["model_count"] = len(catalog_ids)
+    except (httpx.HTTPError, ValueError):
+        return grouped, ids, source
+    source["accepted_model_count"] = len(catalog_ids)
+    merged, merged_ids = group_gemini_models([*ids, *catalog_ids])
+    return merged, merged_ids, source
 
 def apply_agnes_model_defaults(base_url, grouped, ids):
     if "apihub.agnes-ai.com" not in str(base_url or "").strip().lower():
@@ -13814,7 +13948,7 @@ def apply_agnes_model_defaults(base_url, grouped, ids):
 
 @app.post("/api/providers/test-connection")
 async def test_provider_connection(payload: TestConnectionPayload):
-    """测试请求地址是否可用：调上游 /v1/models。验证通过时同时把模型清单按类别返回，避免再调一次拉取接口。"""
+    """按所选协议测试模型列表端点；验证通过时同时返回分类模型清单。"""
     protocol = protocol_from_payload(payload)
     if protocol == "kie":
         return await validate_kie_settings(payload, check_reachability=True)
@@ -13899,6 +14033,13 @@ async def test_provider_connection(payload: TestConnectionPayload):
                 return {"ok": False, "status": resp.status_code, "message": resp.text[:300]}
             data = resp.json() if resp.text else {}
             grouped, ids = parse_upstream_models(data, protocol)
+            model_sources = [{"url": url, "status": resp.status_code, "model_count": len(ids)}]
+            if protocol == "gemini":
+                grouped, ids, catalog_source = await supplement_gemini_gateway_models(
+                    client, base_url, api_key, grouped, ids
+                )
+                if catalog_source:
+                    model_sources.append(catalog_source)
             grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
             grouped = apply_locked_recommended_model_rules(base_url, grouped)
             if protocol == "volcengine" and not ids:
@@ -13908,11 +14049,13 @@ async def test_provider_connection(payload: TestConnectionPayload):
             return {
                 "ok": True,
                 "status": resp.status_code,
+                "protocol": protocol,
                 "model_count": len(ids),
                 "image_models": grouped["image"],
                 "chat_models": grouped["chat"],
                 "video_models": grouped["video"],
                 "all": ids,
+                "model_sources": model_sources,
                 "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(getattr(payload, "image_request_mode", "")),
             }
     except httpx.HTTPError as e:
@@ -13929,8 +14072,7 @@ async def test_provider_connection(payload: TestConnectionPayload):
 
 @app.post("/api/providers/probe-async")
 async def probe_async_endpoint(payload: TestConnectionPayload):
-    """验证异步协议：用假 task_id 请求 GET /v1/tasks/{fake_id}。
-    收到 400 Invalid task ID = 端点存在且 Key 有效；401/403 = Key 无效；404/连接失败 = 不支持异步端点。"""
+    """验证所选协议；Gemini 直接检查 /v1beta/models，其余协议沿用异步端点探测。"""
     base_url = (payload.base_url or "").strip().rstrip("/")
     protocol = protocol_from_payload(payload)
     if protocol == "kie":
@@ -13952,6 +14094,18 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
             "status_code": 200 if status.get("installed") else 0,
             "message": status.get("message") or "Antigravity CLI 本机检测完成",
             "raw": status,
+        }
+    if protocol == "gemini":
+        result = await test_provider_connection(payload)
+        return {
+            **result,
+            "protocol": "gemini",
+            "status_code": result.get("status") or 0,
+            "message": result.get("message") or (
+                f"Gemini 模型目录可用，找到 {result.get('model_count') or 0} 个模型"
+                if result.get("ok") else
+                "Gemini /v1beta/models 验证未通过"
+            ),
         }
     if not base_url:
         raise HTTPException(status_code=400, detail="请先填写请求地址")
@@ -14142,6 +14296,7 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         key_name = "方舟 API Key" if protocol == "volcengine" else "API Key"
         raise HTTPException(status_code=400, detail=f"请先填写或保存 {key_name}")
     url = upstream_models_url(base_url, protocol)
+    model_sources = []
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
@@ -14191,6 +14346,14 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
                         }
                 raise HTTPException(status_code=resp.status_code, detail=f"上游 {endpoint_label} 失败：{resp.text[:300]}")
             raw = resp.json()
+            grouped, ids = parse_upstream_models(raw, protocol)
+            model_sources.append({"url": url, "status": resp.status_code, "model_count": len(ids)})
+            if protocol == "gemini":
+                grouped, ids, catalog_source = await supplement_gemini_gateway_models(
+                    client, base_url, api_key, grouped, ids
+                )
+                if catalog_source:
+                    model_sources.append(catalog_source)
     except httpx.HTTPError as e:
         if protocol == "volcengine":
             try:
@@ -14215,7 +14378,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             except Exception:
                 pass
         raise HTTPException(status_code=502, detail=f"请求上游模型列表失败：{e}")
-    grouped, ids = parse_upstream_models(raw, protocol)
+    if protocol != "gemini":
+        grouped, ids = parse_upstream_models(raw, protocol)
     grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
     grouped = apply_locked_recommended_model_rules(base_url, grouped)
     if protocol == "volcengine" and not ids:
@@ -14231,10 +14395,12 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         }
     return {
         "total": len(ids),
+        "protocol": protocol,
         "image_models": grouped["image"],
         "chat_models": grouped["chat"],
         "video_models": grouped["video"],
         "all": ids,
+        "model_sources": model_sources,
         "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(image_request_mode),
     }
 
@@ -16457,9 +16623,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
         text, raw = await gemini_cli_chat_text(payload, payload.messages)
         return {"text": text, "model": model, "raw_usage": None, "raw": raw}
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    # 判断协议：APIMart 异步 vs 标准 OpenAI
     _llm_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-    _is_apimart = is_apimart_provider(_llm_provider)
     system_prompt = (payload.system_prompt or "").strip()
     upstream_messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
     for item in payload.messages[-MAX_HISTORY_MESSAGES:]:
@@ -16504,11 +16668,9 @@ async def canvas_llm(payload: CanvasLLMRequest):
     raw = None
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if _is_apimart:
-                req_body["stream"] = False   # APIMart 默认流式，强制关闭
+            request_url, req_body = chat_upstream_request(_llm_provider, chat_base, model, upstream_messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -16532,7 +16694,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
-    return {"text": text, "model": model, "raw_usage": raw_data.get("usage")}
+    return {"text": text, "model": model, "raw_usage": chat_usage_from_response(raw_data)}
 
 # --- 对话管理 ---
 
@@ -17457,7 +17619,6 @@ async def caption_image_with_provider(abs_path, prompt, provider_id, model, ms_m
         text, _raw = await gemini_cli_chat_text(payload, [])
         return text, resolved_model
     chat_base, chat_hdrs, resolved_model = resolve_chat_provider(provider_id, model, ms_model)
-    is_apimart = is_apimart_provider(llm_provider)
     prompt_text = (prompt or "描述图片").strip() or "描述图片"
     data_url = image_path_to_data_url(abs_path, max_size=1024)
     messages = [{
@@ -17470,11 +17631,9 @@ async def caption_image_with_provider(abs_path, prompt, provider_id, model, ms_m
     raw = None
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": resolved_model, "messages": messages}
-            if is_apimart:
-                req_body["stream"] = False
+            request_url, req_body = chat_upstream_request(llm_provider, chat_base, resolved_model, messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -17916,7 +18075,6 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             return {"conversation": conversation, "message": assistant_message}
         chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
         _conv_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-        _conv_is_apimart = is_apimart_provider(_conv_provider)
         history = conversation["messages"][-MAX_HISTORY_MESSAGES:]
         upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
         for item in history:
@@ -17925,11 +18083,9 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
                 upstream_messages.append(msg)
         try:
             async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                conv_req_body = {"model": model, "messages": upstream_messages}
-                if _conv_is_apimart:
-                    conv_req_body["stream"] = False
+                request_url, conv_req_body = chat_upstream_request(_conv_provider, chat_base, model, upstream_messages)
                 response = await client.post(
-                    f"{chat_base}/chat/completions",
+                    request_url,
                     headers=chat_hdrs,
                     json=conv_req_body,
                 )
@@ -17948,7 +18104,7 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
             "created_at": now_ms(),
             "model": model,
-            "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
+            "raw_usage": chat_usage_from_response(raw_data),
         }
 
     conversation["messages"].append(assistant_message)
@@ -18150,35 +18306,51 @@ async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = H
         yield sse_event({"type": "meta", "conversation": conversation})
         try:
             async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                async with client.stream(
-                    "POST",
-                    f"{chat_base}/chat/completions",
-                    headers=chat_hdrs,
-                    json={"model": model, "messages": upstream_messages, "stream": True},
-                ) as response:
+                if effective_protocol(_stream_provider, model) == "gemini":
+                    request_url, request_body = chat_upstream_request(_stream_provider, chat_base, model, upstream_messages)
+                    response = await client.post(request_url, headers=chat_hdrs, json=request_body)
                     if response.status_code >= 400:
-                        detail = await response.aread()
-                        body = detail.decode("utf-8", errors="ignore")
+                        body = response.text or ""
                         friendly = friendly_chat_error_detail(body, model, _stream_provider)
                         yield sse_event({"type": "error", "detail": friendly or f"上游接口错误：{body}"})
                         return
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if line == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(chunk, dict) and chunk.get("usage"):
-                            raw_usage = chunk.get("usage")
-                        delta = text_delta_from_chat_chunk(chunk)
-                        if delta:
-                            content_parts.append(delta)
-                            yield sse_event({"type": "delta", "delta": delta})
+                    raw = response.json()
+                    text = text_from_chat_response(raw)
+                    raw_usage = chat_usage_from_response(raw)
+                    if text:
+                        content_parts.append(text)
+                        yield sse_event({"type": "delta", "delta": text})
+                else:
+                    request_url, request_body = chat_upstream_request(_stream_provider, chat_base, model, upstream_messages, stream=True)
+                    async with client.stream(
+                        "POST",
+                        request_url,
+                        headers=chat_hdrs,
+                        json=request_body,
+                    ) as response:
+                        if response.status_code >= 400:
+                            detail = await response.aread()
+                            body = detail.decode("utf-8", errors="ignore")
+                            friendly = friendly_chat_error_detail(body, model, _stream_provider)
+                            yield sse_event({"type": "error", "detail": friendly or f"上游接口错误：{body}"})
+                            return
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            if line == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(chunk, dict) and chunk.get("usage"):
+                                raw_usage = chunk.get("usage")
+                            delta = text_delta_from_chat_chunk(chunk)
+                            if delta:
+                                content_parts.append(delta)
+                                yield sse_event({"type": "delta", "delta": delta})
         except httpx.HTTPError as exc:
             log_net_error("对话(流式) 网络/TLS错误", exc)
             yield sse_event({"type": "error", "detail": f"请求上游接口失败：{exc}"})
