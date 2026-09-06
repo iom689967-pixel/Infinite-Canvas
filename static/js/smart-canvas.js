@@ -15381,6 +15381,7 @@ function updateComposer(){
     syncCascadeRunButton(node);
     positionComposerForNode(node);
     const ph = Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Math.min(API_COMPOSER_PROMPT_MAX_HEIGHT, Number(settings.promptH) || 260));
+    composer.style.setProperty('--prompt-h', `${ph}px`);
     promptInput.style.setProperty('--prompt-h', `${ph}px`);
     renderInputThumbsRow(node);
     renderInputPromptPreview(node);
@@ -21454,11 +21455,13 @@ window.onmousemove = e => {
         const scale = Math.max(0.05, Number(viewport.scale) || 1);
         const dy = (e.clientY - promptResizeState.startY) / scale;
         settings.promptH = Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Math.min(API_COMPOSER_PROMPT_MAX_HEIGHT, promptResizeState.startH + dy));
+        composer.style.setProperty('--prompt-h', `${settings.promptH}px`);
         promptInput.style.setProperty('--prompt-h', `${settings.promptH}px`);
         const node = activeComposerNode();
         if(node){
             const currentPanel = composerLayoutSize(node);
-            const requiredPanelH = Math.max(API_COMPOSER_MIN_HEIGHT, Math.round(settings.promptH + 220));
+            const promptDelta = settings.promptH - promptResizeState.startH;
+            const requiredPanelH = Math.max(API_COMPOSER_MIN_HEIGHT, Math.round(promptResizeState.startPanelH + promptDelta));
             if(requiredPanelH > currentPanel.height) node.composerHeight = requiredPanelH;
             positionComposerForNode(node);
         }
@@ -22178,9 +22181,11 @@ if(promptResize){
     promptResize.addEventListener('mousedown', e => {
         if(e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
+        const node = activeComposerNode();
         promptResizeState = {
             startY: e.clientY,
-            startH: Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Number(settings.promptH) || promptInput.offsetHeight || 260)
+            startH: Math.max(API_COMPOSER_PROMPT_MIN_HEIGHT, Number(settings.promptH) || promptInput.offsetHeight || 260),
+            startPanelH:composerLayoutSize(node).height
         };
     });
 }
