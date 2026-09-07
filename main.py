@@ -1,3 +1,8 @@
+from instance_paths import (
+    PATHS, PROGRAM_ROOT, INSTANCE_ID, INSTANCE_DATA_ROOT, INSTANCE_HOST, INSTANCE_PORT,
+    InstanceBoundaryError,
+)
+
 import json
 import uuid
 import base64
@@ -210,6 +215,20 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.exception_handler(InstanceBoundaryError)
+async def instance_boundary_error(_request, _exc):
+    logging.warning("Instance boundary rejected %s: %s", _request.url.path, _exc)
+    return JSONResponse(status_code=403, content={"detail": "此操作超出当前实例的数据范围或能力范围"})
+
+@app.middleware("http")
+async def instance_control_boundary(request: Request, call_next):
+    if PATHS.explicit:
+        path = request.url.path
+        if (path.startswith(("/api/update-", "/api/codex", "/api/jimeng", "/api/gemini-cli"))
+                or path == "/api/check-update"):
+            return JSONResponse(status_code=403, content={"detail": "独立实例禁用源码更新、回滚及全局 CLI 登录操作"})
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -234,23 +253,24 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
 # --- 配置区域 ---
 
 CLIENT_ID = str(uuid.uuid4())
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKFLOW_DIR = os.path.join(BASE_DIR, "workflows")
-WORKFLOW_PATH = os.path.join(WORKFLOW_DIR, "Z-Image.json")
+BASE_DIR = PROGRAM_ROOT
+WORKFLOW_DIR = os.path.join(INSTANCE_DATA_ROOT, "workflows")
+BUILTIN_WORKFLOW_DIR = os.path.join(PROGRAM_ROOT, "workflows")
+WORKFLOW_PATH = os.path.join(BUILTIN_WORKFLOW_DIR, "Z-Image.json")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 STATIC_RUNNINGHUB_DIR = os.path.join(STATIC_DIR, "runninghub")
 STATIC_RUNNINGHUB_THUMBNAIL_DIR = os.path.join(STATIC_RUNNINGHUB_DIR, "thumbnails")
 STATIC_RUNNINGHUB_API_PROVIDERS_FILE = os.path.join(STATIC_RUNNINGHUB_DIR, "api_providers.json")
 STATIC_RUNNINGHUB_MODEL_REGISTRY_FILE = os.path.join(STATIC_RUNNINGHUB_DIR, "models_registry.json")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+OUTPUT_DIR = os.path.join(INSTANCE_DATA_ROOT, "output")
+ASSETS_DIR = os.path.join(INSTANCE_DATA_ROOT, "assets")
 OUTPUT_INPUT_DIR = os.path.join(ASSETS_DIR, "input")
 OUTPUT_OUTPUT_DIR = os.path.join(ASSETS_DIR, "output")
 ASSET_LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
 LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-API_ENV_FILE = os.path.join(BASE_DIR, "API", ".env")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+HISTORY_FILE = os.path.join(INSTANCE_DATA_ROOT, "history.json")
+API_ENV_FILE = os.path.join(INSTANCE_DATA_ROOT, "API", ".env")
+DATA_DIR = os.path.join(INSTANCE_DATA_ROOT, "data")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
 MEDIA_PREVIEW_DIR = os.path.join(DATA_DIR, "media_previews")
@@ -259,7 +279,7 @@ PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
-GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
+GLOBAL_CONFIG_FILE = os.path.join(INSTANCE_DATA_ROOT, "global_config.json")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str(50 * 1024 * 1024)))
 LOCAL_IMAGE_IMPORT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -277,8 +297,8 @@ def _storage_abs_path(value, fallback):
         return os.path.abspath(fallback)
     text = os.path.expanduser(os.path.expandvars(text))
     if not os.path.isabs(text):
-        text = os.path.join(BASE_DIR, text)
-    return os.path.abspath(text)
+        text = os.path.join(INSTANCE_DATA_ROOT, text)
+    return PATHS.user_path(os.path.abspath(text))
 
 def load_storage_settings():
     raw = {}
@@ -547,7 +567,11 @@ def load_env_file():
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
+                if not PATHS.allow_env_key(key):
+                    raise InstanceBoundaryError("Instance environment cannot override startup/system configuration")
                 os.environ.setdefault(key, value)
+    except InstanceBoundaryError:
+        raise
     except Exception as e:
         print(f"加载 API/.env 失败: {e}")
 ensure_runtime_config_files()
@@ -1571,6 +1595,8 @@ def env_quote(value):
     return text
 
 def update_env_values(updates):
+    if PATHS.explicit and any(not PATHS.allow_env_key(key) for key in updates):
+        raise InstanceBoundaryError("Cannot change server startup/system configuration through API")
     os.makedirs(os.path.dirname(API_ENV_FILE), exist_ok=True)
     lines = []
     if os.path.exists(API_ENV_FILE):
@@ -1605,7 +1631,8 @@ os.makedirs(OUTPUT_INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_OUTPUT_DIR, exist_ok=True)
 os.makedirs(ASSET_LIBRARY_DIR, exist_ok=True)
 os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
-os.makedirs(STATIC_DIR, exist_ok=True)
+if not PATHS.explicit:
+    os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
@@ -1631,10 +1658,16 @@ class VersionedStaticFiles(StaticFiles):
                 )
         return response
 
+class InstanceStaticFiles(StaticFiles):
+    def lookup_path(self, path):
+        if PATHS.explicit:
+            PATHS.user_path(os.path.join(self.directory, path))
+        return super().lookup_path(path)
+
 
 app.mount("/static", VersionedStaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
-app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+app.mount("/output", InstanceStaticFiles(directory=OUTPUT_DIR), name="output")
+app.mount("/assets", InstanceStaticFiles(directory=ASSETS_DIR), name="assets")
 
 # --- Pydantic 模型 ---
 
@@ -2303,6 +2336,8 @@ def safe_static_dir() -> str:
 
 def schedule_self_restart(delay_seconds: int = 3) -> bool:
     """派生脱离父进程的小脚本，等几秒后启动启动服务脚本，并干掉当前 PID。"""
+    if PATHS.explicit:
+        raise InstanceBoundaryError("Global restart is disabled in explicit instances")
     delay = max(1, int(delay_seconds or 3))
     pid = os.getpid()
     try:
@@ -5140,6 +5175,8 @@ def is_gemini_cli_provider(provider):
     return provider_protocol(provider) == "gemini-cli"
 
 def codex_env_value(key):
+    if PATHS.explicit:
+        raise InstanceBoundaryError("Account CLI providers are not enabled for explicit instances")
     return os.getenv(key, "") or read_api_env_value(key)
 
 def codex_cli_executable():
@@ -7137,7 +7174,7 @@ def output_url_for(filename, category="output"):
 
 def output_path_for(filename, category="output"):
     folder, _ = output_storage(category)
-    return os.path.join(folder, filename)
+    return PATHS.user_path(os.path.join(folder, filename))
 
 def storage_kind_dir(kind):
     kind = str(kind or "").strip().lower()
@@ -7161,6 +7198,7 @@ def storage_file_path(kind, rel):
             raise HTTPException(status_code=400, detail="非法文件路径")
     except ValueError:
         raise HTTPException(status_code=400, detail="非法文件路径")
+    path = PATHS.user_path(path)
     return path if os.path.exists(path) else None
 
 def output_file_from_url(url):
@@ -7188,7 +7226,7 @@ def output_file_from_url(url):
         path = os.path.abspath(os.path.join(root, rel))
         output_root = os.path.abspath(root)
         if os.path.commonpath([output_root, path]) == output_root and os.path.exists(path):
-            return path
+            return PATHS.user_path(path)
     return None
 
 def collect_local_media_urls(value: Any) -> List[str]:
@@ -7228,6 +7266,7 @@ def local_media_path_from_url(url: str) -> Optional[str]:
         return None
     root = os.path.abspath(root)
     path = os.path.abspath(os.path.join(root, rel))
+    path = PATHS.user_path(path)
     try:
         return path if os.path.commonpath([root, path]) == root and os.path.exists(path) else None
     except ValueError:
@@ -7705,7 +7744,7 @@ def local_media_file_by_basename(name: str):
         path = os.path.abspath(os.path.join(root, safe))
         root_abs = os.path.abspath(root)
         if os.path.commonpath([root_abs, path]) == root_abs and os.path.isfile(path):
-            return path
+            return PATHS.user_path(path)
     return None
 
 def filename_from_media_url(url: str, fallback: str = "download.bin") -> str:
@@ -7773,6 +7812,7 @@ def normalize_local_image_path(value):
     raise HTTPException(status_code=400, detail="只支持本机绝对图片路径")
 
 def import_local_image_file(path):
+    path = PATHS.user_path(path)
     ext = os.path.splitext(path)[1].lower()
     if ext not in LOCAL_IMAGE_IMPORT_EXTS:
         raise HTTPException(status_code=400, detail="仅支持 PNG、JPG、JPEG、WEBP、GIF 图片")
@@ -8331,16 +8371,17 @@ def shared_folder_by_id(folder_id):
 
 def shared_folder_abs(entry):
     rel = (entry or {}).get("rel") or ""
-    return os.path.normpath(os.path.join(BASE_DIR, rel))
+    return PATHS.user_path(os.path.normpath(os.path.join(INSTANCE_DATA_ROOT, rel)))
 
 def shared_resolve_register(path):
     """校验 path 必须位于项目目录内、是一个存在的子目录（非项目根）。返回 (abs, rel)。"""
     raw = (path or "").strip().strip('"').strip("'")
     if not raw:
         raise HTTPException(status_code=400, detail="请提供文件夹路径")
-    candidate = raw if os.path.isabs(raw) else os.path.join(BASE_DIR, raw)
+    candidate = raw if os.path.isabs(raw) else os.path.join(INSTANCE_DATA_ROOT, raw)
+    candidate = PATHS.user_path(candidate)
     abs_path = os.path.normpath(os.path.abspath(candidate))
-    base = os.path.normpath(os.path.abspath(BASE_DIR))
+    base = os.path.normpath(os.path.abspath(INSTANCE_DATA_ROOT))
     try:
         common = os.path.commonpath([abs_path, base])
     except ValueError:
@@ -8365,7 +8406,7 @@ def shared_child_abs(folder_abs, rel):
         raise HTTPException(status_code=400, detail="非法路径")
     if common != base:
         raise HTTPException(status_code=400, detail="非法路径")
-    return abs_path
+    return PATHS.user_path(abs_path)
 
 def image_path_to_data_url(path, max_size=1024):
     if max_size:
@@ -17665,6 +17706,7 @@ def smart_group_export_folder(folder: str, group_name: str) -> str:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         safe_group = sanitize_export_filename(group_name or "group", "group")
         path = os.path.abspath(os.path.join(OUTPUT_DIR, "smart-groups", f"{safe_group}-{stamp}"))
+    path = PATHS.user_path(path)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -19476,7 +19518,7 @@ def generate(req: GenerateRequest):
                     except Exception as e:
                         print(f"Sync upload failed: {e}")
 
-        workflow_path = os.path.join(WORKFLOW_DIR, req.workflow_json)
+        workflow_path = workflow_path_from_name(req.workflow_json) if PATHS.explicit else os.path.join(WORKFLOW_DIR, req.workflow_json)
         if not os.path.exists(workflow_path) and req.workflow_json == "Z-Image.json":
             workflow_path = WORKFLOW_PATH
         if not os.path.exists(workflow_path):
@@ -19660,6 +19702,7 @@ def generate(req: GenerateRequest):
 # --- ComfyUI 工作流管理 ---
 
 BUILTIN_WORKFLOWS = {"Z-Image.json", "Z-Image-Enhance.json", "2511.json", "klein-enhance.json", "Flux2-Klein.json", "upscale.json"}
+INSTANCE_BUILTIN_WORKFLOWS = BUILTIN_WORKFLOWS | {"LTXDirectorv2-API.json", "MiniMax_H3.json"}
 CUSTOM_WORKFLOW_FOLDER = "custom"
 LEGACY_CUSTOM_WORKFLOW_FOLDER = "自定义"
 WORKFLOW_NAME_RE = re.compile(rf"^(?:(?:{CUSTOM_WORKFLOW_FOLDER}|{LEGACY_CUSTOM_WORKFLOW_FOLDER})/)?[a-zA-Z0-9_一-龥\.\-]+\.json$")
@@ -19694,16 +19737,24 @@ class WorkflowRunRequest(BaseModel):
 def workflow_path_from_name(name: str) -> str:
     if not WORKFLOW_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="Invalid workflow name")
+    if PATHS.explicit and "/" not in name and name in INSTANCE_BUILTIN_WORKFLOWS:
+        return os.path.join(BUILTIN_WORKFLOW_DIR, name)
     path = os.path.abspath(os.path.join(WORKFLOW_DIR, *name.split("/")))
     workflow_root = os.path.abspath(WORKFLOW_DIR)
     if os.path.commonpath([workflow_root, path]) != workflow_root:
         raise HTTPException(status_code=400, detail="Invalid workflow name")
-    return path
+    return PATHS.user_path(path)
 
 def workflow_config_path(name: str) -> str:
+    if PATHS.explicit:
+        if not WORKFLOW_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid workflow name")
+        return PATHS.user_path(os.path.join(WORKFLOW_DIR, name[:-5] + ".config.json"))
     return workflow_path_from_name(name).replace(".json", ".config.json")
 
 def is_builtin_workflow(name: str) -> bool:
+    if PATHS.explicit:
+        return name in INSTANCE_BUILTIN_WORKFLOWS
     return "/" not in name and os.path.basename(name) in BUILTIN_WORKFLOWS
 
 def runninghub_workflow_store_path() -> str:
@@ -20164,6 +20215,11 @@ def list_workflows():
     if not os.path.isdir(WORKFLOW_DIR):
         return {"workflows": []}
     items = []
+    if PATHS.explicit:
+        # These two built-in generic workflows historically appear in the custom-workflow UI.
+        for name in ("LTXDirectorv2-API.json", "MiniMax_H3.json"):
+            if os.path.isfile(os.path.join(BUILTIN_WORKFLOW_DIR, name)):
+                items.append({"name": name, "title": name[:-5], "builtin": True, "field_count": 0})
     for root, dirs, files in os.walk(WORKFLOW_DIR):
         if os.path.abspath(root) == os.path.abspath(WORKFLOW_DIR):
             dirs[:] = [d for d in dirs if d in {CUSTOM_WORKFLOW_FOLDER, LEGACY_CUSTOM_WORKFLOW_FOLDER}]
@@ -20201,6 +20257,8 @@ def get_workflow(name: str):
         workflow = json.load(f)
     cfg = {"title": name.replace(".json", ""), "fields": []}
     cfg_path = workflow_config_path(name)
+    if PATHS.explicit and not os.path.exists(cfg_path) and is_builtin_workflow(name):
+        cfg_path = os.path.join(BUILTIN_WORKFLOW_DIR, name[:-5] + ".config.json")
     if os.path.exists(cfg_path):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
@@ -20304,5 +20362,5 @@ if __name__ == "__main__":
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
-    uvicorn.run(app, host="0.0.0.0", port=3000,
+    uvicorn.run(app, host=INSTANCE_HOST, port=INSTANCE_PORT,
                 ws_ping_interval=None, ws_ping_timeout=None)

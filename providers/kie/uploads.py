@@ -14,6 +14,7 @@ import urllib.parse
 import weakref
 from io import BytesIO
 from pathlib import Path
+from instance_paths import INSTANCE_DATA_ROOT
 
 import httpx
 from PIL import Image, ImageOps
@@ -24,7 +25,7 @@ KIE_STREAM_UPLOAD_PATH = "/api/file-stream-upload"
 KIE_UPLOAD_PATH = "images/infinite-canvas"
 KIE_REFERENCE_CACHE_TTL_SECONDS = 24 * 60 * 60
 KIE_REFERENCE_ABSOLUTE_TTL_SECONDS = 23 * 60 * 60
-KIE_REFERENCE_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "kie_reference_cache.json"
+KIE_REFERENCE_CACHE_PATH = Path(INSTANCE_DATA_ROOT) / "data" / "kie_reference_cache.json"
 
 
 _CACHE_FILE_LOCK = threading.RLock()
