@@ -28,7 +28,7 @@ import functools
 import html
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 import httpx
 from PIL import Image, ImageOps
 from io import BytesIO
@@ -319,7 +319,7 @@ QUEUE_LOCK = Lock()
 HISTORY_LOCK = Lock()
 GLOBAL_CONFIG_LOCK = Lock()
 CONVERSATION_LOCK = Lock()
-CANVAS_LOCK = Lock()
+CANVAS_LOCK = RLock()
 LOAD_LOCK = Lock()
 RUNNINGHUB_WORKFLOW_LOCK = Lock()
 NEXT_TASK_ID = 1
@@ -3087,6 +3087,12 @@ class CanvasSaveRequest(BaseModel):
     client_id: str = ""
     base_updated_at: int = 0
 
+class DeleteCanvasLogRequest(BaseModel):
+    log_id: str
+    delete_unreferenced_media: bool = False
+    reset_referencing_nodes: bool = False
+    base_updated_at: int = 0
+
 class CanvasAssetCheckRequest(BaseModel):
     urls: List[str] = []
 
@@ -3628,8 +3634,8 @@ def canvas_path(canvas_id):
     return os.path.join(CANVAS_DIR, f"{cleaned}.json")
 
 def save_canvas(canvas):
-    canvas["updated_at"] = now_ms()
     with CANVAS_LOCK:
+        canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
         with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
             json.dump(canvas, f, ensure_ascii=False, indent=2)
 
@@ -7063,6 +7069,278 @@ def output_file_from_url(url):
         if os.path.commonpath([output_root, path]) == output_root and os.path.exists(path):
             return path
     return None
+
+def collect_local_media_urls(value: Any) -> List[str]:
+    """Collect local generated-media URLs from a nested JSON-compatible value."""
+    urls = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("/assets/", "/output/", "/api/storage-files/")):
+            urls.append(text)
+    elif isinstance(value, dict):
+        for item in value.values():
+            urls.extend(collect_local_media_urls(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            urls.extend(collect_local_media_urls(item))
+    return urls
+
+def local_media_path_from_url(url: str) -> Optional[str]:
+    """Resolve a local media URL with the same one-to-one mapping as app mounts."""
+    if not url:
+        return None
+    clean = urllib.parse.unquote(str(url).split("?", 1)[0]).replace("\\", "/")
+    if clean.startswith("/api/storage-files/"):
+        rest = clean[len("/api/storage-files/"):].lstrip("/")
+        kind, _, rel = rest.partition("/")
+        return storage_file_path(kind, rel) if kind and rel else None
+    if clean.startswith("/assets/"):
+        root = ASSETS_DIR
+        rel = clean[len("/assets/"):]
+    elif clean.startswith("/output/"):
+        root = OUTPUT_DIR
+        rel = clean[len("/output/"):]
+    else:
+        return None
+    rel = rel.lstrip("/")
+    if not rel:
+        return None
+    root = os.path.abspath(root)
+    path = os.path.abspath(os.path.join(root, rel))
+    try:
+        return path if os.path.commonpath([root, path]) == root and os.path.exists(path) else None
+    except ValueError:
+        return None
+
+def generated_media_path_from_url(url: str) -> Optional[str]:
+    """Resolve only files contained by a configured generated-output directory."""
+    try:
+        path = local_media_path_from_url(url)
+    except (HTTPException, OSError, ValueError):
+        return None
+    if not path or not os.path.isfile(path):
+        return None
+    path = os.path.realpath(path)
+    for root in (OUTPUT_OUTPUT_DIR, OUTPUT_DIR):
+        root = os.path.realpath(root)
+        try:
+            if os.path.commonpath([root, path]) == root:
+                return path
+        except ValueError:
+            continue
+    return None
+
+def json_references_media_path(value: Any, target_path: str) -> bool:
+    """Return True when a JSON-compatible value references the local media file."""
+    target = os.path.normcase(os.path.realpath(target_path))
+    if isinstance(value, str):
+        try:
+            resolved = local_media_path_from_url(value.strip())
+        except (HTTPException, OSError, ValueError):
+            return False
+        return bool(resolved and os.path.normcase(os.path.realpath(resolved)) == target)
+    if isinstance(value, dict):
+        return any(json_references_media_path(item, target) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(json_references_media_path(item, target) for item in value)
+    return False
+
+def persisted_json_references_media_path(target_path: str) -> bool:
+    """Scan persisted owners and conservatively retain media on unreadable JSON."""
+    # Generation history is an output index rather than an owner. It is pruned
+    # separately immediately before a generated file is deleted.
+    candidates = [ASSET_LIBRARY_PATH]
+    for root in (CANVAS_DIR, CONVERSATION_DIR):
+        if os.path.isdir(root):
+            for current, _, files in os.walk(root):
+                candidates.extend(
+                    os.path.join(current, name)
+                    for name in files
+                    if name.lower().endswith(".json")
+                )
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                value = json.load(handle)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return True
+        if json_references_media_path(value, target_path):
+            return True
+    return False
+
+def prune_generation_history_for_media(paths: List[str]) -> int:
+    """Remove history cards that would otherwise point at deleted media."""
+    if not paths or not os.path.isfile(HISTORY_FILE):
+        return 0
+    try:
+        with HISTORY_LOCK:
+            with open(HISTORY_FILE, "r", encoding="utf-8-sig") as handle:
+                history = json.load(handle)
+            if not isinstance(history, list):
+                return 0
+            kept = [
+                record
+                for record in history
+                if not any(json_references_media_path(record, path) for path in paths)
+            ]
+            removed = len(history) - len(kept)
+            if removed:
+                with open(HISTORY_FILE, "w", encoding="utf-8") as handle:
+                    json.dump(kept, handle, ensure_ascii=False, indent=4)
+            return removed
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+
+def smart_owned_result_items(images: List[Any], paths: List[str]) -> List[Any]:
+    """Return generated Smart Canvas results, including unmarked legacy results."""
+    return [
+        item
+        for item in images
+        if isinstance(item, dict)
+        and item.get("loopInputPreview") is not True
+        and (
+            item.get("generatedResult") is True
+            or any(json_references_media_path(item, path) for path in paths)
+        )
+    ]
+
+def expand_canvas_generated_media_paths(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Include all generated results owned by a result node touched by the log."""
+    expanded = list(paths)
+    for node in list(canvas.get("nodes") or []):
+        node_type = str(node.get("type") or "").strip().lower()
+        images = list(node.get("images") or [])
+        if node_type == "output":
+            owned_items = images
+        elif node_type == "smart-image":
+            owned_items = smart_owned_result_items(images, paths)
+        else:
+            owned_items = []
+        if not any(
+            json_references_media_path(item, path)
+            for item in owned_items
+            for path in paths
+        ):
+            continue
+        for item in owned_items:
+            for url in collect_local_media_urls(item):
+                candidate = generated_media_path_from_url(url)
+                if candidate and candidate not in expanded:
+                    expanded.append(candidate)
+    return expanded
+
+def reset_canvas_result_nodes_for_media(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Clear generated results while retaining prompts, references, settings and links."""
+    reset_ids = []
+    updated_nodes = []
+    for node in list(canvas.get("nodes") or []):
+        node = dict(node)
+        node_type = str(node.get("type") or "").strip().lower()
+        changed = False
+        if isinstance(node.get("generatedOutputs"), list):
+            outputs = list(node.get("generatedOutputs") or [])
+            kept_outputs = [
+                item
+                for item in outputs
+                if not any(json_references_media_path(item, path) for path in paths)
+            ]
+            if len(kept_outputs) != len(outputs):
+                node["generatedOutputs"] = kept_outputs
+                changed = True
+        if node_type in {"smart-image", "output"} and isinstance(node.get("images"), list):
+            images = list(node.get("images") or [])
+            owned_items = smart_owned_result_items(images, paths) if node_type == "smart-image" else images
+            owns_target = any(
+                json_references_media_path(item, path)
+                for item in owned_items
+                for path in paths
+            )
+            kept_images = [
+                item
+                for item in images
+                if not (
+                    owns_target
+                    and item in owned_items
+                    and any(json_references_media_path(item, path) for path in paths)
+                )
+            ]
+            if len(kept_images) != len(images):
+                node["images"] = kept_images
+                changed = True
+                if node_type == "output":
+                    node["_pending"] = []
+                    node["imageComparisons"] = {}
+                if node_type == "smart-image":
+                    node["pending"] = 0
+                    node["running"] = False
+                    node["queued"] = False
+                    for key in (
+                        "jimengPending", "pendingTasks", "runStartedAt", "runFinishedAt",
+                        "runElapsedMs", "runTimerHidden", "outputKind", "w", "h",
+                    ):
+                        node.pop(key, None)
+        elif node_type == "image" and any(
+            json_references_media_path(node.get("url"), path) for path in paths
+        ):
+            node["url"] = ""
+            node["mediaKind"] = "image"
+            node["name"] = "空白图片"
+            changed = True
+        if changed and node.get("id"):
+            reset_ids.append(str(node["id"]))
+        updated_nodes.append(node)
+
+    if reset_ids:
+        canvas["nodes"] = updated_nodes
+    return reset_ids
+
+def delete_media_preview_cache(path: str) -> int:
+    """Delete derived previews for a source file before the source disappears."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return 0
+    real_source = os.path.realpath(path)
+    sources = {os.path.abspath(path), real_source}
+    for configured_root in (OUTPUT_OUTPUT_DIR, OUTPUT_DIR):
+        real_root = os.path.realpath(configured_root)
+        try:
+            if os.path.commonpath([real_root, real_source]) == real_root:
+                rel = os.path.relpath(real_source, real_root)
+                sources.add(os.path.abspath(os.path.join(configured_root, rel)))
+        except ValueError:
+            continue
+    removed = 0
+    checked_names = set()
+    for source in sources:
+        for width in range(0, 4097):
+            keys = [
+                hashlib.sha1(
+                    f"{source}|{stat.st_mtime_ns}|{stat.st_size}|{width}|jpg".encode("utf-8", "ignore")
+                ).hexdigest() + ".jpg"
+            ]
+            if 64 <= width <= 2048:
+                preview_key = hashlib.sha1(
+                    f"{source}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode("utf-8", "ignore")
+                ).hexdigest()
+                keys.extend((preview_key + ".webp", preview_key + ".png"))
+            for name in keys:
+                if name in checked_names:
+                    continue
+                checked_names.add(name)
+                cache_path = os.path.join(MEDIA_PREVIEW_DIR, name)
+                try:
+                    if os.path.isfile(cache_path):
+                        os.remove(cache_path)
+                        removed += 1
+                except OSError:
+                    pass
+    return removed
 
 def image_has_alpha(img: Image.Image) -> bool:
     if img.mode in ("RGBA", "LA"):
@@ -17950,6 +18228,84 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
     save_canvas(canvas)
     await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
     return {"canvas": canvas}
+
+@app.post("/api/canvases/{canvas_id}/logs/delete")
+async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
+    log_id = str(payload.log_id or "").strip()
+    if not log_id:
+        raise HTTPException(status_code=400, detail="缺少日志 ID")
+
+    def remove_log_record():
+        with CANVAS_LOCK:
+            canvas = load_canvas(canvas_id)
+            current_updated_at = int(canvas.get("updated_at") or 0)
+            if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
+                raise HTTPException(status_code=409, detail={
+                    "message": "画布已被其他页面更新，请刷新后重试。",
+                    "canvas": canvas,
+                    "updated_at": current_updated_at,
+                })
+            logs = list(canvas.get("logs") or [])
+            target = next((item for item in logs if str(item.get("id") or "") == log_id), None)
+            if not target:
+                raise HTTPException(status_code=404, detail="生成日志不存在")
+
+            candidate_paths = []
+            if payload.delete_unreferenced_media:
+                for url in collect_local_media_urls(target.get("outputs") or []):
+                    path = generated_media_path_from_url(url)
+                    if path and path not in candidate_paths:
+                        candidate_paths.append(path)
+
+            reset_node_ids = []
+            if payload.reset_referencing_nodes and candidate_paths:
+                candidate_paths = expand_canvas_generated_media_paths(canvas, candidate_paths)
+                reset_node_ids = reset_canvas_result_nodes_for_media(canvas, candidate_paths)
+
+            canvas["logs"] = [item for item in logs if str(item.get("id") or "") != log_id]
+            save_canvas(canvas)
+            return canvas, candidate_paths, reset_node_ids
+
+    canvas, candidate_paths, reset_node_ids = await asyncio.to_thread(remove_log_record)
+
+    def cleanup_unreferenced_media():
+        removed_files = []
+        skipped_referenced = []
+        removed_previews = 0
+        deletable_paths = []
+        for path in candidate_paths:
+            if persisted_json_references_media_path(path):
+                skipped_referenced.append(os.path.basename(path))
+                continue
+            deletable_paths.append(path)
+        prune_generation_history_for_media(deletable_paths)
+        for path in deletable_paths:
+            try:
+                removed_previews += delete_media_preview_cache(path)
+                os.remove(path)
+                removed_files.append(os.path.basename(path))
+            except OSError:
+                skipped_referenced.append(os.path.basename(path))
+        return removed_files, skipped_referenced, removed_previews
+
+    removed_files = []
+    skipped_referenced = []
+    removed_previews = 0
+    if payload.delete_unreferenced_media:
+        def locked_cleanup():
+            with CANVAS_LOCK:
+                return cleanup_unreferenced_media()
+        removed_files, skipped_referenced, removed_previews = await asyncio.to_thread(locked_cleanup)
+
+    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()))
+    return {
+        "ok": True,
+        "canvas": canvas,
+        "removed_files": removed_files,
+        "removed_previews": removed_previews,
+        "reset_node_ids": reset_node_ids,
+        "skipped_referenced": skipped_referenced,
+    }
 
 @app.delete("/api/canvases/{canvas_id}")
 async def delete_canvas(canvas_id: str):
