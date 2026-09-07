@@ -13,6 +13,7 @@
         "common.edit": { zh: "编辑", en: "Edit" },
         "common.run": { zh: "运行", en: "Run" },
         "common.running": { zh: "运行中", en: "Running" },
+        "common.stop": { zh: "停止", en: "Stop" },
         "common.custom": { zh: "自定义", en: "Custom" },
         "common.close": { zh: "关闭", en: "Close" },
         "common.loading": { zh: "加载中...", en: "Loading..." },

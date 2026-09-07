@@ -224,6 +224,7 @@ const activeSmartTaskControllers = new Map();
 const activeSmartTaskCancelRequests = new Map();
 const activeSmartGenerationRuns = new Map();
 const cancellingSmartGenerationIds = new Set();
+const activePromptLLMRuns = new Map();
 const kieCapabilityCache = new Map();
 const kieCapabilityLoading = new Set();
 const smartNodeRunTokens = new Map();
@@ -8367,7 +8368,7 @@ function promptNodeBodyHtml(node){
             </div>
             ${upstreamPromptHtml}
             <div class="prompt-node-llm-actions">
-                <button class="prompt-node-run prompt-node-control" type="button" ${node.running ? 'disabled' : ''}><i data-lucide="${node.running ? 'loader-2' : 'play'}"></i><span>${node.running ? escapeHtml(tr('common.running')) : escapeHtml(tr('common.run'))}</span></button>
+                <button class="prompt-node-run prompt-node-control ${node.running ? 'is-stop' : ''}" type="button"><i data-lucide="${node.running ? 'square' : 'play'}"></i><span>${node.running ? escapeHtml(tr('common.stop')) : escapeHtml(tr('common.run'))}</span></button>
                 <button class="prompt-node-pill prompt-node-control prompt-system-toggle ${node.llmSystemEnabled ? 'active' : ''}" type="button"><i data-lucide="${node.llmSystemEnabled ? 'toggle-right' : 'toggle-left'}"></i><span>${escapeHtml(node.llmSystemEnabled ? tr('smart.promptLlmDisableSystem') : tr('smart.promptLlmEnableSystem'))}</span></button>
             </div>
             ${node.llmSystemEnabled ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="${escapeHtml(tr('smart.promptLlmSystemPlaceholder'))}">${escapeHtml(systemPrompt || 'You are a helpful prompt assistant.')}</textarea>` : ''}
@@ -10729,7 +10730,12 @@ function bindPromptNodeControls(el, node){
         capturePendingUndo();
     });
     const runEl = el.querySelector('.prompt-node-run');
-    if(runEl) runEl.onclick = e => { e.preventDefault(); e.stopPropagation(); runPromptLLMNode(node.id); };
+    if(runEl) runEl.onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if(activePromptLLMRuns.has(node.id) || node.running) cancelPromptLLMNode(node.id);
+        else runPromptLLMNode(node.id);
+    };
 }
 function bindLoopNodeControls(el, node){
     el.querySelectorAll('.loop-smart-control').forEach(control => {
@@ -19699,12 +19705,55 @@ async function runGeneration(options={}){
         if(!terminalSuccessPatched) render();
     }
 }
+function promptLLMRequestId(){
+    if(globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `prompt-llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+function isPromptLLMAbortError(error){
+    return error?.name === 'AbortError' || error?.promptLLMCancelled === true;
+}
+function notifyPromptLLMCancel(requestId, options={}){
+    if(!requestId) return Promise.resolve(null);
+    return fetch('/api/canvas-llm/cancel', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({request_id:requestId}),
+        keepalive:options.keepalive === true
+    }).then(async response => {
+        if(!response.ok) throw new Error(await responseErrorMessage(response, tr('smart.promptLlmFailed')));
+        return response.json();
+    }).catch(() => null);
+}
+function cancelPromptLLMNode(nodeId, options={}){
+    const activeRun = activePromptLLMRuns.get(nodeId);
+    const node = nodes.find(item => item.id === nodeId);
+    if(!activeRun){
+        if(node?.running){
+            node.running = false;
+            render();
+        }
+        return false;
+    }
+    activeRun.cancelled = true;
+    activePromptLLMRuns.delete(nodeId);
+    activeRun.controller.abort();
+    if(node) node.running = false;
+    render();
+    void notifyPromptLLMCancel(activeRun.requestId, {keepalive:options.keepalive === true});
+    if(options.silent !== true) toast(tr('smart.promptLlmStopped'));
+    return true;
+}
 async function runPromptLLMNode(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.type !== 'smart-prompt') return;
+    if(activePromptLLMRuns.has(nodeId)) return;
     const message = promptNodeLLMInputText(node).trim();
     if(!message){ toast(tr('smart.promptLlmNeedText')); return; }
     const systemPrompt = (node.llmSystemPrompt || '').trim();
+    const token = Symbol('prompt-llm-run');
+    const requestId = promptLLMRequestId();
+    const controller = new AbortController();
+    activePromptLLMRuns.set(nodeId, {token, requestId, controller, cancelled:false});
     node.llmEnabled = true;
     node.running = true;
     render();
@@ -19724,21 +19773,40 @@ async function runPromptLLMNode(nodeId){
                 videos,
                 model,
                 provider,
+                request_id:requestId,
                 ms_model: provider === 'modelscope' ? model : '',
                 system_prompt:node.llmSystemEnabled ? (systemPrompt || 'You are a helpful prompt assistant.') : ''
-            })
+            }),
+            signal:controller.signal
         }).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
+            if(!r.ok){
+                const error = new Error(r.status === 504
+                    ? tr('smart.promptLlmTimeout')
+                    : await responseErrorMessage(r, tr('smart.promptLlmFailed')));
+                if(r.status === 499) error.promptLLMCancelled = true;
+                throw error;
+            }
             return r.json();
         });
-        node.text = (result.text || '').trim();
-        node.llmProvider = provider;
-        node.llmModel = model;
+        const activeRun = activePromptLLMRuns.get(nodeId);
+        if(!activeRun || activeRun.token !== token) return;
+        const liveNode = nodes.find(item => item.id === nodeId);
+        if(!liveNode) return;
+        liveNode.text = (result.text || '').trim();
+        liveNode.llmProvider = provider;
+        liveNode.llmModel = model;
         scheduleSave();
     } catch(e) {
+        if(isPromptLLMAbortError(e) || controller.signal.aborted) return;
+        const activeRun = activePromptLLMRuns.get(nodeId);
+        if(!activeRun || activeRun.token !== token) return;
         toast((e.message || tr('smart.promptLlmFailed')).slice(0, 160));
     } finally {
-        node.running = false;
+        const activeRun = activePromptLLMRuns.get(nodeId);
+        if(!activeRun || activeRun.token !== token) return;
+        activePromptLLMRuns.delete(nodeId);
+        const liveNode = nodes.find(item => item.id === nodeId);
+        if(liveNode) liveNode.running = false;
         render();
     }
 }
@@ -20465,6 +20533,9 @@ async function cancelSmartImageGeneration(nodeId){
 }
 window.addEventListener('beforeunload', () => {
     [...activeSmartTaskControllers.keys()].forEach(cancelSmartCanvasTask);
+});
+window.addEventListener('pagehide', () => {
+    [...activePromptLLMRuns.keys()].forEach(nodeId => cancelPromptLLMNode(nodeId, {silent:true, keepalive:true}));
 });
 function smartTaskDelay(ms, signal){
     return new Promise((resolve, reject) => {

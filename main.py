@@ -613,6 +613,7 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
+CANVAS_LLM_TIMEOUT = float(os.getenv("CANVAS_LLM_TIMEOUT", "120"))
 IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
 COMFYUI_HISTORY_TIMEOUT = int(float(os.getenv("COMFYUI_HISTORY_TIMEOUT", "1800")))
@@ -2888,6 +2889,9 @@ CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
 CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
 CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
+CANVAS_LLM_ACTIVE_REQUESTS: Dict[str, asyncio.Task] = {}
+CANVAS_LLM_CANCEL_MARKERS: Dict[str, float] = {}
+CANVAS_LLM_CANCEL_MARKER_TTL = 30.0
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -3042,6 +3046,7 @@ class CanvasLLMRequest(BaseModel):
     messages: List[Dict[str, Any]] = []
     provider: str = "comfly"
     ms_model: str = ""
+    request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
     videos: List[str] = []   # 可以是 /output/*.mp4、/assets/*.mp4 本地路径 或 http(s) URL 或 data URL
 
@@ -3052,6 +3057,9 @@ class CanvasLLMRequest(BaseModel):
             if isinstance(item, dict):
                 validate_llm_message_content(item.get("content"), f"messages[{index}].content")
         return messages
+
+class CanvasLLMCancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
 
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
@@ -4185,6 +4193,12 @@ def chat_upstream_request(provider, chat_base, model, messages, *, stream=False)
     elif is_apimart_provider(provider):
         body["stream"] = False
     return f"{chat_base}/chat/completions", body
+
+def request_url_for_log(url):
+    """Keep only the route needed for diagnostics, never URL credentials/query tokens."""
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 def text_delta_from_chat_chunk(data):
     choices = data.get("choices") or []
@@ -16892,8 +16906,73 @@ async def canvas_video(payload: CanvasVideoRequest):
 
 # --- Canvas LLM ---
 
-@app.post("/api/canvas-llm")
-async def canvas_llm(payload: CanvasLLMRequest):
+def cleanup_canvas_llm_cancel_markers(now=None):
+    current = time.monotonic() if now is None else now
+    expired = [
+        request_id for request_id, marked_at in CANVAS_LLM_CANCEL_MARKERS.items()
+        if current - marked_at >= CANVAS_LLM_CANCEL_MARKER_TTL
+    ]
+    for request_id in expired:
+        CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
+
+def mark_canvas_llm_cancelled(request_id):
+    cleanup_canvas_llm_cancel_markers()
+    marked_at = time.monotonic()
+    CANVAS_LLM_CANCEL_MARKERS[request_id] = marked_at
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(
+            CANVAS_LLM_CANCEL_MARKER_TTL,
+            lambda: CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
+            if CANVAS_LLM_CANCEL_MARKERS.get(request_id) == marked_at else None,
+        )
+    except RuntimeError:
+        pass
+
+def log_canvas_llm_cancelled(request_id, payload, started_at, phase):
+    print(json.dumps({
+        "event": "canvas_llm_cancelled",
+        "request_id": request_id,
+        "status": "cancelled",
+        "phase": phase,
+        "provider": payload.provider,
+        "model": payload.model,
+        "elapsed_seconds": round(time.monotonic() - started_at, 3),
+    }, ensure_ascii=False), flush=True)
+
+@app.post("/api/canvas-llm/cancel")
+async def cancel_canvas_llm(payload: CanvasLLMCancelRequest):
+    request_id = payload.request_id
+    mark_canvas_llm_cancelled(request_id)
+    task = CANVAS_LLM_ACTIVE_REQUESTS.get(request_id)
+    active = bool(task and not task.done())
+    if active:
+        task.cancel()
+    print(json.dumps({
+        "event": "canvas_llm_cancel_requested",
+        "request_id": request_id,
+        "status": "cancelled",
+        "active": active,
+    }, ensure_ascii=False), flush=True)
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "cancelled": True,
+        "active": active,
+        "pending_registration": not active,
+    }
+
+async def _canvas_llm_impl(payload: CanvasLLMRequest, request_id: str, started_at: float):
+    print(json.dumps({
+        "event": "canvas_llm_start",
+        "request_id": request_id,
+        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "provider": payload.provider,
+        "model": payload.model,
+        "text_len": len(payload.message),
+        "images": len(payload.images),
+        "videos": len(payload.videos),
+    }, ensure_ascii=False), flush=True)
     _provider = get_api_provider(payload.provider)
     if is_codex_provider(_provider):
         model = selected_model(payload.model, (_provider.get("chat_models") or CODEX_DEFAULT_CHAT_MODELS)[0])
@@ -16944,28 +17023,83 @@ async def canvas_llm(payload: CanvasLLMRequest):
                     continue
                 content_parts.append({"type": "video_url", "video_url": {"url": ref_url}})
                 ok_videos += 1
-        print(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
+        print(json.dumps({
+            "event": "canvas_llm_media_ready",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "text_len": len(payload.message),
+            "images": {"ready": ok_imgs, "total": len(payload.images)},
+            "videos": {"ready": ok_videos, "total": len(payload.videos)},
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         upstream_messages.append({"role": "user", "content": content_parts})
     else:
         upstream_messages.append({"role": "user", "content": payload.message})
     raw = None
     try:
-        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=CANVAS_LLM_TIMEOUT) as client:
             request_url, req_body = chat_upstream_request(_llm_provider, chat_base, model, upstream_messages)
+            print(json.dumps({
+                "event": "canvas_llm_upstream_request",
+                "request_id": request_id,
+                "provider": payload.provider,
+                "model": model,
+                "request_url": request_url_for_log(request_url),
+                "timeout_seconds": CANVAS_LLM_TIMEOUT,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            }, ensure_ascii=False), flush=True)
             response = await client.post(
                 request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
             response.raise_for_status()
+            print(json.dumps({
+                "event": "canvas_llm_upstream_response",
+                "request_id": request_id,
+                "provider": payload.provider,
+                "model": model,
+                "http_status": response.status_code,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            }, ensure_ascii=False), flush=True)
             if not response.content:
                 raise HTTPException(status_code=502, detail="上游接口返回了空响应")
             raw = response.json()
+    except httpx.TimeoutException as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_timeout",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "timeout_seconds": CANVAS_LLM_TIMEOUT,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
+        raise HTTPException(
+            status_code=504,
+            detail=f"Canvas LLM 请求上游超时（{CANVAS_LLM_TIMEOUT:g} 秒），请稍后重试。",
+        ) from exc
     except httpx.HTTPStatusError as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_http_error",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "http_status": exc.response.status_code,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         body = exc.response.text or ""
         friendly = friendly_chat_error_detail(body, model, _llm_provider)
         raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"上游接口错误：{body}") from exc
     except httpx.HTTPError as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_network_error",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "error_type": type(exc).__name__,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
     except HTTPException:
         raise
@@ -16978,6 +17112,30 @@ async def canvas_llm(payload: CanvasLLMRequest):
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
     return {"text": text, "model": model, "raw_usage": chat_usage_from_response(raw_data)}
+
+@app.post("/api/canvas-llm")
+async def canvas_llm(payload: CanvasLLMRequest):
+    request_id = payload.request_id or uuid.uuid4().hex
+    started_at = time.monotonic()
+    cleanup_canvas_llm_cancel_markers()
+    if CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None) is not None:
+        log_canvas_llm_cancelled(request_id, payload, started_at, "before_start")
+        raise HTTPException(status_code=499, detail="Canvas LLM 请求已由用户取消。")
+    current_task = asyncio.current_task()
+    existing_task = CANVAS_LLM_ACTIVE_REQUESTS.get(request_id)
+    if existing_task and existing_task is not current_task and not existing_task.done():
+        raise HTTPException(status_code=409, detail="Canvas LLM request_id 正在使用中。")
+    if current_task:
+        CANVAS_LLM_ACTIVE_REQUESTS[request_id] = current_task
+    try:
+        return await _canvas_llm_impl(payload, request_id, started_at)
+    except asyncio.CancelledError as exc:
+        log_canvas_llm_cancelled(request_id, payload, started_at, "active_request")
+        raise HTTPException(status_code=499, detail="Canvas LLM 请求已由用户取消。") from exc
+    finally:
+        if CANVAS_LLM_ACTIVE_REQUESTS.get(request_id) is current_task:
+            CANVAS_LLM_ACTIVE_REQUESTS.pop(request_id, None)
+        CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
 
 # --- 对话管理 ---
 

@@ -362,7 +362,7 @@ body.smart-prompt-split-resize .prompt-node-llm select { pointer-events:none !im
 .loop-smart-footer .loop-number-control { width:100%; }
 .loop-smart-footer .loop-number-trigger { width:100%; height:36px; padding:0 7px; }
 .loop-smart-run { width:100%; flex:0 0 40px; height:40px; border-radius:13px; border:1px solid var(--strong); background:var(--strong); color:var(--strong-text); display:flex; align-items:center; justify-content:center; gap:7px; font-size:12px; font-weight:900; box-shadow:0 10px 22px rgba(15,23,42,.16); }
-.loop-smart-run.is-stop,.cascade-run-btn.is-stop { border-color:#ef4444; background:#ef4444; color:#fff; }
+.prompt-node-run.is-stop,.loop-smart-run.is-stop,.cascade-run-btn.is-stop { border-color:#ef4444; background:#ef4444; color:#fff; }
 .loop-number-control { position:relative; flex:0 0 auto; min-width:0; z-index:1; }
 .loop-number-control::before { content:""; position:absolute; left:-6px; right:-6px; bottom:100%; height:10px; pointer-events:auto; }
 .loop-number-control:hover, .loop-number-control:focus-within { z-index:60; }
