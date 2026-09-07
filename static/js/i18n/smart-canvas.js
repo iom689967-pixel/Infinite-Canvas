@@ -174,7 +174,7 @@
         "smart.inputBlocked": { zh: "已屏蔽", en: "Input blocked" },
         "smart.inputClickBlock": { zh: "点击屏蔽输入", en: "Click to block input" },
         "smart.inputClickEnable": { zh: "点击启用输入", en: "Click to enable input" },
-        "smart.inputSelf": { zh: "自身，默认参与编辑", en: "Self, always used for edit" },
+        "smart.inputSelf": { zh: "当前结果 / 继续编辑输入", en: "Current result / continue-edit input" },
         "smart.inputUpstream": { zh: "上游输入", en: "Upstream input" },
         "smart.inputUpstreamWorkflow": { zh: "工作流上游输入", en: "Workflow upstream input" },
         "smart.imageModeTitle": { zh: "图片模式", en: "Image mode" },

@@ -22,7 +22,7 @@
 
     function shouldSkip(target){
         if(!(target instanceof Element)) return true;
-        if(target.closest('input, textarea, select, audio, video, [contenteditable=""], [contenteditable="true"]')) return true;
+        if(target.closest('input, textarea, select, button, audio, video, .nodrag, .nopan, [contenteditable]:not([contenteditable="false"])')) return true;
         let node = target;
         while(node && node !== document.body && node !== document.documentElement){
             const cs = getComputedStyle(node);

@@ -1,0 +1,30 @@
+[
+  {
+    "id": "example",
+    "name": "Example Provider",
+    "base_url": "https://api.example.invalid/v1",
+    "protocol": "openai",
+    "image_request_mode": "openai",
+    "image_generation_endpoint": "",
+    "image_edit_endpoint": "",
+    "enabled": true,
+    "primary": true,
+    "image_models": [
+      "example-image-model"
+    ],
+    "chat_models": [
+      "example-chat-model"
+    ],
+    "video_models": [],
+    "model_names": {
+      "example-image-model": "Example Image Model"
+    },
+    "model_protocols": {},
+    "ms_loras": [],
+    "ms_defaults_version": 0,
+    "rh_apps": [],
+    "rh_workflows": [],
+    "volcengine_project_name": "default",
+    "volcengine_region": "example-region"
+  }
+]

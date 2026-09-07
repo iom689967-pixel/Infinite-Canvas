@@ -1,0 +1,53 @@
+# Credentials
+/API/.env
+/API/openai-gpt-account-auth.json
+
+# Python / local toolchains
+/.venv/
+/.python/
+/.uv-cache/
+/.tools/
+__pycache__/
+*.py[cod]
+
+# Runtime
+/.runtime/
+/.launchd/
+*.pid
+*.log
+/_self_restart.sh
+/_self_restart.bat
+/_self_restart.log
+
+# User assets / outputs
+/assets/
+/output/
+/history.json
+
+# Runtime user data
+/data/api_providers.json
+/data/asset_library.json
+/data/canvases/
+/data/conversations/
+/data/media_previews/
+/data/projects.json
+/data/prompt_libraries.json
+/data/runninghub_workflows.json
+/data/shared_folders.json
+/data/storage_settings.json
+/data/update_backups/
+/data/asset_classification_prompt.txt
+/data/kie_reference_cache.json
+
+# Historical local source backups
+*.broken-before-*
+*.mojibake-backup
+*.stable-before-*
+
+# macOS
+.DS_Store
+
+# Machine-local LaunchAgent controls
+/Infinite-Canvas-启动.command
+/Infinite-Canvas-停止.command
+/Infinite-Canvas-重启.command

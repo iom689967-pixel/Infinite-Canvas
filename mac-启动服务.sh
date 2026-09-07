@@ -18,7 +18,11 @@ echo ""
 # Open browser after 3 seconds
 sleep 3 && open "${APP_URL}" &
 
-python3 main.py
+if [ -x "$PWD/.venv/bin/python" ]; then
+  "$PWD/.venv/bin/python" main.py
+else
+  python3 main.py
+fi
 
 echo ""
 echo "Server stopped."

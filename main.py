@@ -27,8 +27,9 @@ import shlex
 import functools
 import html
 import xml.etree.ElementTree as ET
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional, Tuple
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 import httpx
 from PIL import Image, ImageOps
 from io import BytesIO
@@ -36,8 +37,27 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Uplo
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from providers.kie import (
+    KIE_BASE_URL,
+    KIE_MODEL_NAMES,
+    KIE_UI_MODELS,
+    KieAPIError,
+    KieClient,
+    KieTaskCancelled,
+    KieTaskError,
+    KieValidationError,
+    build_capability_schema as build_kie_capability_schema,
+    build_create_payload as build_kie_create_payload,
+    poll_task as poll_kie_task,
+)
+from providers.kie.tasks import (
+    parse_result_urls as parse_kie_result_urls,
+    task_failure as kie_task_failure,
+    task_status as kie_task_status,
+)
+from providers.kie.uploads import KieReferenceError, prepare_kie_references
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -65,15 +85,6 @@ class QuietAccessLogFilter(logging.Filter):
         return True
 
 logging.getLogger("uvicorn.access").addFilter(QuietAccessLogFilter())
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # --- WebSocket 状态管理器 ---
 class ConnectionManager:
@@ -177,11 +188,9 @@ MODELSCOPE_VERSION_URL = MODELSCOPE_FILE_API_ROOT + "VERSION"
 MODELSCOPE_UPDATE_NOTES_URL = MODELSCOPE_FILE_API_ROOT + "static/update-notes.json"
 MODELSCOPE_TREE_URL = "https://www.modelscope.ai/api/v1/studio/daniel8152/Infinite-Canvas/repo/files?Revision=master&Recursive=true"
 
-@app.on_event("startup")
 async def startup_event():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.get_running_loop()
-    sync_static_html_versions()
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
@@ -197,6 +206,20 @@ async def startup_event():
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await startup_event()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -301,7 +324,7 @@ QUEUE_LOCK = Lock()
 HISTORY_LOCK = Lock()
 GLOBAL_CONFIG_LOCK = Lock()
 CONVERSATION_LOCK = Lock()
-CANVAS_LOCK = Lock()
+CANVAS_LOCK = RLock()
 LOAD_LOCK = Lock()
 RUNNINGHUB_WORKFLOW_LOCK = Lock()
 NEXT_TASK_ID = 1
@@ -314,7 +337,7 @@ JIMENG_LOGIN_SESSION = {
 }
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
-SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
+SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex", "kie"}
 SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses", "tudou-async"}
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.ai"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.ai/openapi/v2"
@@ -605,7 +628,8 @@ TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIA
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
-LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
+MAX_LLM_TEXT_CHARS = int(os.getenv("MAX_LLM_TEXT_CHARS", "100000"))
+LLM_MESSAGE_MAX_LENGTH = MAX_LLM_TEXT_CHARS
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 
@@ -632,6 +656,28 @@ def friendly_validation_error(errors):
         else:
             parts.append(f"{label}格式不正确：{msg}")
     return "\n".join(parts) or "请求参数不正确。"
+
+def validate_llm_text_length(value, field_path):
+    if isinstance(value, str) and len(value) > MAX_LLM_TEXT_CHARS:
+        raise ValueError(f"{field_path} 最多允许 {MAX_LLM_TEXT_CHARS} 个字符")
+
+def validate_llm_message_content(value, field_path):
+    validate_llm_text_length(value, field_path)
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            part_path = f"{field_path}[{index}]"
+            if isinstance(item, dict):
+                if "text" in item:
+                    validate_llm_text_length(item.get("text"), f"{part_path}.text")
+                if "content" in item:
+                    validate_llm_message_content(item.get("content"), f"{part_path}.content")
+            else:
+                validate_llm_text_length(item, part_path)
+    elif isinstance(value, dict):
+        if "text" in value:
+            validate_llm_text_length(value.get("text"), f"{field_path}.text")
+        if "content" in value:
+            validate_llm_message_content(value.get("content"), f"{field_path}.content")
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -709,6 +755,8 @@ def provider_key_env(provider_id):
         return "RUNNINGHUB_API_KEY"
     if provider_id == "volcengine":
         return "ARK_API_KEY"
+    if provider_id == "kie":
+        return "KIE_API_KEY"
     return f"API_PROVIDER_{re.sub(r'[^A-Za-z0-9]', '_', provider_id).upper()}_KEY"
 
 def runninghub_wallet_key_env():
@@ -837,6 +885,21 @@ def default_api_providers():
             "volcengine_project_name": VOLCENGINE_DEFAULT_PROJECT_NAME,
             "volcengine_region": VOLCENGINE_DEFAULT_REGION,
         },
+        {
+            "id": "kie",
+            "name": "Kie",
+            "base_url": KIE_BASE_URL,
+            "protocol": "kie",
+            "image_request_mode": "openai",
+            "image_generation_endpoint": "",
+            "image_edit_endpoint": "",
+            "enabled": True,
+            "primary": False,
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "model_names": dict(KIE_MODEL_NAMES),
+        },
     ]
 
 def merge_default_api_providers(providers, inject_missing=True):
@@ -900,6 +963,28 @@ def merge_default_api_providers(providers, inject_missing=True):
             current["protocol"] = "volcengine"
             current["volcengine_project_name"] = str(current.get("volcengine_project_name") or VOLCENGINE_DEFAULT_PROJECT_NAME).strip() or VOLCENGINE_DEFAULT_PROJECT_NAME
             current["volcengine_region"] = str(current.get("volcengine_region") or VOLCENGINE_DEFAULT_REGION).strip() or VOLCENGINE_DEFAULT_REGION
+    # Kie 是受控内置平台：始终恢复官方 Base URL、协议和两模型白名单，
+    # 不允许运行时配置或浏览器保存动作扩展模型集合。
+    kie_default = next((d for d in default_api_providers() if d["id"] == "kie"), None)
+    if kie_default:
+        current = next((item for item in merged if item.get("id") == "kie"), None)
+        if not current:
+            merged.append(dict(kie_default))
+        else:
+            current.update({
+                "name": kie_default["name"],
+                "base_url": kie_default["base_url"],
+                "protocol": kie_default["protocol"],
+                "image_request_mode": kie_default["image_request_mode"],
+                "image_generation_endpoint": "",
+                "image_edit_endpoint": "",
+                "enabled": True,
+                "image_models": list(KIE_UI_MODELS),
+                "chat_models": [],
+                "video_models": [],
+                "model_names": dict(KIE_MODEL_NAMES),
+                "model_protocols": {},
+            })
     # 即梦 CLI 不再是强制保留的默认平台：仅在用户已添加了即梦协议的平台时，规范化其默认模型/地址。
     for current in merged:
         if not is_jimeng_provider(current):
@@ -1242,6 +1327,35 @@ def provider_endpoint_url(provider, key, default_path):
             return f"{base_url}{default_path[len(prefix):]}"
     return f"{base_url}{default_path}"
 
+def gemini_api_root_url(base_url):
+    """Return the provider root before Gemini's /v1beta path.
+
+    Accept both a clean provider root and older saved values that already end in
+    /v1 or /v1beta, including accidentally duplicated version suffixes.
+    """
+    root = str(base_url or "").strip().rstrip("/")
+    suffixes = ("/v1beta/models", "/v1/models", "/v1beta", "/v1")
+    while root:
+        lowered = root.lower()
+        matched = next((suffix for suffix in suffixes if lowered.endswith(suffix)), "")
+        if not matched:
+            break
+        root = root[:-len(matched)].rstrip("/")
+    return root
+
+def gemini_gateway_models_url(base_url):
+    """Return a gateway's root OpenAI-compatible model catalog, when present.
+
+    Native Google Gemini URLs have no path before /v1beta and therefore keep
+    using only /v1beta/models. A gateway mounted below a path (for example
+    /antigravity) may expose its complete catalog at the host-level /v1/models.
+    """
+    root = gemini_api_root_url(base_url)
+    parsed = urllib.parse.urlsplit(root)
+    if not parsed.scheme or not parsed.netloc or not parsed.path.strip("/"):
+        return ""
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/v1/models", "", ""))
+
 def runninghub_endpoint_url(provider, path):
     base_url = str((provider or {}).get("base_url") or RUNNINGHUB_DEFAULT_BASE_URL).strip().rstrip("/")
     return f"{base_url}{path}"
@@ -1291,6 +1405,13 @@ def normalize_provider(item):
     if provider_id == "runninghub":
         protocol = "runninghub"
         base_url = base_url or RUNNINGHUB_DEFAULT_BASE_URL
+    if provider_id == "kie":
+        name = "Kie"
+        protocol = "kie"
+        base_url = KIE_BASE_URL
+        image_request_mode = "openai"
+        image_generation_endpoint = ""
+        image_edit_endpoint = ""
     locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
     if locked_rule:
         protocol = locked_rule["protocol"]
@@ -1298,7 +1419,7 @@ def normalize_provider(item):
     video_models = model_list_from_values(item.get("video_models") or [])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
-    return {
+    normalized = {
         "id": provider_id,
         "name": name,
         "base_url": base_url,
@@ -1320,6 +1441,16 @@ def normalize_provider(item):
         "volcengine_project_name": volc_project,
         "volcengine_region": volc_region,
     }
+    if provider_id == "kie":
+        normalized.update({
+            "enabled": True,
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "model_names": dict(KIE_MODEL_NAMES),
+            "model_protocols": {},
+        })
+    return normalized
 
 def load_api_providers():
     defaults = default_api_providers()
@@ -1340,86 +1471,6 @@ def save_api_providers(providers):
         with open(API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
             json.dump(providers, f, ensure_ascii=False, indent=2)
 
-def default_runninghub_static_provider():
-    return {
-        "id": "runninghub",
-        "name": "RunningHub",
-        "base_url": RUNNINGHUB_DEFAULT_BASE_URL,
-        "protocol": "runninghub",
-        "image_generation_endpoint": "",
-        "image_edit_endpoint": "",
-        "enabled": True,
-        "primary": False,
-        "image_models": [],
-        "chat_models": [],
-        "video_models": [],
-        "model_protocols": {},
-        "ms_loras": [],
-        "ms_defaults_version": 0,
-        "rh_apps": [],
-        "rh_workflows": [],
-    }
-
-def mutate_static_runninghub_provider(mutator):
-    os.makedirs(STATIC_RUNNINGHUB_DIR, exist_ok=True)
-    raw = []
-    if os.path.exists(STATIC_RUNNINGHUB_API_PROVIDERS_FILE):
-        try:
-            with open(STATIC_RUNNINGHUB_API_PROVIDERS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as exc:
-            print(f"读取 static RunningHub 模板失败，将重建基础模板: {exc}")
-            raw = []
-    if isinstance(raw, dict) and str(raw.get("id") or "").strip().lower() == "runninghub":
-        provider = raw
-    else:
-        if isinstance(raw, list):
-            providers = raw
-        elif isinstance(raw, dict):
-            providers = raw.setdefault("providers", [])
-            if not isinstance(providers, list):
-                providers = []
-                raw["providers"] = providers
-        else:
-            raw = []
-            providers = raw
-        provider = next((
-            item for item in providers
-            if isinstance(item, dict) and str(item.get("id") or "").strip().lower() == "runninghub"
-        ), None)
-        if provider is None:
-            provider = default_runninghub_static_provider()
-            providers.append(provider)
-    changed = mutator(provider)
-    if changed is False:
-        return False
-    with open(STATIC_RUNNINGHUB_API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(raw, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    return True
-
-def sync_runninghub_provider_workflows_to_static_template(provider):
-    if not isinstance(provider, dict) or str(provider.get("id") or "").strip().lower() != "runninghub":
-        return False
-    workflows = []
-    seen = set()
-    for entry in normalize_runninghub_entries(provider.get("rh_workflows") or [], "workflow"):
-        key = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
-        if not key or entry.get("hidden") is True or key in seen:
-            continue
-        seen.add(key)
-        workflows.append(entry)
-    def apply_workflows(static_provider):
-        static_provider["id"] = "runninghub"
-        static_provider["name"] = static_provider.get("name") or "RunningHub"
-        static_provider["base_url"] = static_provider.get("base_url") or RUNNINGHUB_DEFAULT_BASE_URL
-        static_provider["protocol"] = "runninghub"
-        static_provider["rh_workflows"] = workflows
-        if "rh_apps" not in static_provider or not isinstance(static_provider.get("rh_apps"), list):
-            static_provider["rh_apps"] = []
-        return True
-    return mutate_static_runninghub_provider(apply_workflows)
-
 def public_provider(provider):
     if provider.get("id") == "runninghub":
         try:
@@ -1433,6 +1484,10 @@ def public_provider(provider):
         "key_preview": mask_secret(key),
         "key_env": provider_key_env(provider["id"]),
     }
+    if provider.get("id") == "kie":
+        # Kie Key 只允许从 API/.env 读取；浏览器只知道是否已配置，
+        # 不返回完整值或尾号预览。
+        item["key_preview"] = ""
     if provider.get("id") == "runninghub":
         wallet_key = runninghub_wallet_key_value()
         item.update({
@@ -1558,7 +1613,29 @@ os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class VersionedStaticFiles(StaticFiles):
+    """Serve HTML with cache tokens rewritten in memory, never on disk."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if (
+            scope.get("method") == "GET"
+            and response.status_code == 200
+            and str(path).lower().endswith(".html")
+        ):
+            file_path = getattr(response, "path", "")
+            if file_path and os.path.isfile(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    html = f.read()
+                return Response(
+                    versioned_static_html(html),
+                    media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-cache"},
+                )
+        return response
+
+
+app.mount("/static", VersionedStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
@@ -1698,35 +1775,6 @@ def versioned_static_html(html: str) -> str:
             pass
         return f"{match.group('prefix')}{url}?v={cache_version}"
     return pattern.sub(replace, html)
-
-def sync_static_html_versions():
-    version = current_app_version()
-    if not version:
-        return
-    safe_version = urllib.parse.quote(version, safe="._-")
-    try:
-        for name in os.listdir(STATIC_DIR):
-            # 跳过 macOS 在外置硬盘(ExFAT/NTFS)生成的 ._* Apple Double 元数据文件，
-            # 这些是二进制文件，按 UTF-8 读取会抛 UnicodeDecodeError。
-            if name.startswith("._"):
-                continue
-            if not name.lower().endswith(".html"):
-                continue
-            path = os.path.join(STATIC_DIR, name)
-            if not os.path.isfile(path):
-                continue
-            # 单文件容错：某个文件读写失败不应中断整批同步。
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    old = f.read()
-                new = versioned_static_html(re.sub(r'([?&]v=)[^"\'`\s<>)]*', rf'\g<1>{safe_version}', old))
-                if new != old:
-                    with open(path, "w", encoding="utf-8", newline="") as f:
-                        f.write(new)
-            except Exception as e:
-                print(f"同步静态页面版本号失败({name}): {e}")
-    except Exception as e:
-        print(f"同步静态页面版本号失败: {e}")
 
 def static_html_response(filename: str):
     path = os.path.join(STATIC_DIR, filename)
@@ -2801,6 +2849,7 @@ class OnlineImageRequest(BaseModel):
     quality: str = "auto"
     n: int = 1
     reference_images: List[AIReference] = []
+    output_format: str = ""
     operation: str = ""
     resolution_type: str = ""
 
@@ -2837,6 +2886,8 @@ class ImageTaskQueryRequest(BaseModel):
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
+CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -2956,7 +3007,7 @@ class ApiProviderPayload(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str = ""
     message: str = Field(min_length=1, max_length=LLM_MESSAGE_MAX_LENGTH)
-    system_prompt: str = ""
+    system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     image_model: str = ""
     image_provider: str = ""
@@ -2986,13 +3037,21 @@ class MsGenerateRequest(BaseModel):
 
 class CanvasLLMRequest(BaseModel):
     message: str = Field(min_length=1, max_length=LLM_MESSAGE_MAX_LENGTH)
-    system_prompt: str = ""
+    system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     messages: List[Dict[str, Any]] = []
     provider: str = "comfly"
     ms_model: str = ""
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
     videos: List[str] = []   # 可以是 /output/*.mp4、/assets/*.mp4 本地路径 或 http(s) URL 或 data URL
+
+    @field_validator("messages")
+    @classmethod
+    def validate_messages_text_length(cls, messages):
+        for index, item in enumerate(messages or []):
+            if isinstance(item, dict):
+                validate_llm_message_content(item.get("content"), f"messages[{index}].content")
+        return messages
 
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
@@ -3031,6 +3090,12 @@ class CanvasSaveRequest(BaseModel):
     logs: List[Dict[str, Any]] = []
     settings: Dict[str, Any] = {}
     client_id: str = ""
+    base_updated_at: int = 0
+
+class DeleteCanvasLogRequest(BaseModel):
+    log_id: str
+    delete_unreferenced_media: bool = False
+    reset_referencing_nodes: bool = False
     base_updated_at: int = 0
 
 class CanvasAssetCheckRequest(BaseModel):
@@ -3574,8 +3639,8 @@ def canvas_path(canvas_id):
     return os.path.join(CANVAS_DIR, f"{cleaned}.json")
 
 def save_canvas(canvas):
-    canvas["updated_at"] = now_ms()
     with CANVAS_LOCK:
+        canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
         with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
             json.dump(canvas, f, ensure_ascii=False, indent=2)
 
@@ -3927,7 +3992,7 @@ def resolve_chat_provider(provider: str, model: str, ms_model: str):
         # Keep the configured base URL for its OpenAI-compatible models only.
         if is_apimart_provider(api_provider):
             base_root = "https://api.apimart.ai"
-        base = base_root if base_root.endswith("/v1beta") else base_root + "/v1beta"
+        base = gemini_api_root_url(base_root) + "/v1beta"
     elif protocol == "volcengine":
         base = base_root if base_root.endswith("/api/v3") else base_root + "/api/v3"
     elif protocol == "runninghub":
@@ -4036,6 +4101,15 @@ def unwrap_apimart_response(raw):
 
 def text_from_chat_response(data):
     data = unwrap_apimart_response(data)
+    candidates = data.get("candidates") or []
+    if candidates:
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or []
+        return "\n".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and part.get("text")
+        )
     choices = data.get("choices") or []
     if not choices:
         return ""
@@ -4050,6 +4124,67 @@ def text_from_chat_response(data):
                 parts.append(item.get("text") or item.get("content") or "")
         return "\n".join(part for part in parts if part)
     return str(content)
+
+def chat_usage_from_response(data):
+    data = unwrap_apimart_response(data) if isinstance(data, dict) else {}
+    return data.get("usage") or data.get("usageMetadata")
+
+def gemini_part_from_openai_content(part):
+    if not isinstance(part, dict):
+        return None
+    part_type = str(part.get("type") or "").strip().lower()
+    if part_type == "text" or (not part_type and part.get("text") is not None):
+        text = str(part.get("text") or part.get("content") or "")
+        return {"text": text} if text else None
+    media = part.get("image_url") if part_type == "image_url" else part.get("video_url") if part_type == "video_url" else None
+    if isinstance(media, dict):
+        media = media.get("url")
+    media = str(media or "").strip()
+    if not media:
+        return None
+    if media.startswith("data:") and ";base64," in media:
+        header, encoded = media.split(";base64,", 1)
+        mime_type = header[5:] or ("video/mp4" if part_type == "video_url" else "image/png")
+        return {"inlineData": {"mimeType": mime_type, "data": encoded}}
+    if media.startswith(("http://", "https://")):
+        mime_type = mimetypes.guess_type(urllib.parse.urlsplit(media).path)[0]
+        mime_type = mime_type or ("video/mp4" if part_type == "video_url" else "image/png")
+        return {"fileData": {"mimeType": mime_type, "fileUri": media}}
+    return None
+
+def gemini_contents_from_openai_messages(messages):
+    system_parts = []
+    contents = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower()
+        content = message.get("content")
+        raw_parts = content if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
+        parts = [part for part in (gemini_part_from_openai_content(item) for item in raw_parts) if part]
+        if not parts:
+            continue
+        if role == "system":
+            system_parts.extend(parts)
+            continue
+        contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
+    body = {"contents": contents}
+    if system_parts:
+        body["systemInstruction"] = {"parts": system_parts}
+    return body
+
+def chat_upstream_request(provider, chat_base, model, messages, *, stream=False):
+    """Build one request for the provider's already-selected chat protocol."""
+    if effective_protocol(provider, model) == "gemini":
+        root = gemini_api_root_url(chat_base)
+        model_name = urllib.parse.quote(gemini_model_name(model), safe="")
+        return f"{root}/v1beta/models/{model_name}:generateContent", gemini_contents_from_openai_messages(messages)
+    body = {"model": model, "messages": messages}
+    if stream:
+        body["stream"] = True
+    elif is_apimart_provider(provider):
+        body["stream"] = False
+    return f"{chat_base}/chat/completions", body
 
 def text_delta_from_chat_chunk(data):
     choices = data.get("choices") or []
@@ -6939,6 +7074,278 @@ def output_file_from_url(url):
         if os.path.commonpath([output_root, path]) == output_root and os.path.exists(path):
             return path
     return None
+
+def collect_local_media_urls(value: Any) -> List[str]:
+    """Collect local generated-media URLs from a nested JSON-compatible value."""
+    urls = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("/assets/", "/output/", "/api/storage-files/")):
+            urls.append(text)
+    elif isinstance(value, dict):
+        for item in value.values():
+            urls.extend(collect_local_media_urls(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            urls.extend(collect_local_media_urls(item))
+    return urls
+
+def local_media_path_from_url(url: str) -> Optional[str]:
+    """Resolve a local media URL with the same one-to-one mapping as app mounts."""
+    if not url:
+        return None
+    clean = urllib.parse.unquote(str(url).split("?", 1)[0]).replace("\\", "/")
+    if clean.startswith("/api/storage-files/"):
+        rest = clean[len("/api/storage-files/"):].lstrip("/")
+        kind, _, rel = rest.partition("/")
+        return storage_file_path(kind, rel) if kind and rel else None
+    if clean.startswith("/assets/"):
+        root = ASSETS_DIR
+        rel = clean[len("/assets/"):]
+    elif clean.startswith("/output/"):
+        root = OUTPUT_DIR
+        rel = clean[len("/output/"):]
+    else:
+        return None
+    rel = rel.lstrip("/")
+    if not rel:
+        return None
+    root = os.path.abspath(root)
+    path = os.path.abspath(os.path.join(root, rel))
+    try:
+        return path if os.path.commonpath([root, path]) == root and os.path.exists(path) else None
+    except ValueError:
+        return None
+
+def generated_media_path_from_url(url: str) -> Optional[str]:
+    """Resolve only files contained by a configured generated-output directory."""
+    try:
+        path = local_media_path_from_url(url)
+    except (HTTPException, OSError, ValueError):
+        return None
+    if not path or not os.path.isfile(path):
+        return None
+    path = os.path.realpath(path)
+    for root in (OUTPUT_OUTPUT_DIR, OUTPUT_DIR):
+        root = os.path.realpath(root)
+        try:
+            if os.path.commonpath([root, path]) == root:
+                return path
+        except ValueError:
+            continue
+    return None
+
+def json_references_media_path(value: Any, target_path: str) -> bool:
+    """Return True when a JSON-compatible value references the local media file."""
+    target = os.path.normcase(os.path.realpath(target_path))
+    if isinstance(value, str):
+        try:
+            resolved = local_media_path_from_url(value.strip())
+        except (HTTPException, OSError, ValueError):
+            return False
+        return bool(resolved and os.path.normcase(os.path.realpath(resolved)) == target)
+    if isinstance(value, dict):
+        return any(json_references_media_path(item, target) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(json_references_media_path(item, target) for item in value)
+    return False
+
+def persisted_json_references_media_path(target_path: str) -> bool:
+    """Scan persisted owners and conservatively retain media on unreadable JSON."""
+    # Generation history is an output index rather than an owner. It is pruned
+    # separately immediately before a generated file is deleted.
+    candidates = [ASSET_LIBRARY_PATH]
+    for root in (CANVAS_DIR, CONVERSATION_DIR):
+        if os.path.isdir(root):
+            for current, _, files in os.walk(root):
+                candidates.extend(
+                    os.path.join(current, name)
+                    for name in files
+                    if name.lower().endswith(".json")
+                )
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                value = json.load(handle)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return True
+        if json_references_media_path(value, target_path):
+            return True
+    return False
+
+def prune_generation_history_for_media(paths: List[str]) -> int:
+    """Remove history cards that would otherwise point at deleted media."""
+    if not paths or not os.path.isfile(HISTORY_FILE):
+        return 0
+    try:
+        with HISTORY_LOCK:
+            with open(HISTORY_FILE, "r", encoding="utf-8-sig") as handle:
+                history = json.load(handle)
+            if not isinstance(history, list):
+                return 0
+            kept = [
+                record
+                for record in history
+                if not any(json_references_media_path(record, path) for path in paths)
+            ]
+            removed = len(history) - len(kept)
+            if removed:
+                with open(HISTORY_FILE, "w", encoding="utf-8") as handle:
+                    json.dump(kept, handle, ensure_ascii=False, indent=4)
+            return removed
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+
+def smart_owned_result_items(images: List[Any], paths: List[str]) -> List[Any]:
+    """Return generated Smart Canvas results, including unmarked legacy results."""
+    return [
+        item
+        for item in images
+        if isinstance(item, dict)
+        and item.get("loopInputPreview") is not True
+        and (
+            item.get("generatedResult") is True
+            or any(json_references_media_path(item, path) for path in paths)
+        )
+    ]
+
+def expand_canvas_generated_media_paths(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Include all generated results owned by a result node touched by the log."""
+    expanded = list(paths)
+    for node in list(canvas.get("nodes") or []):
+        node_type = str(node.get("type") or "").strip().lower()
+        images = list(node.get("images") or [])
+        if node_type == "output":
+            owned_items = images
+        elif node_type == "smart-image":
+            owned_items = smart_owned_result_items(images, paths)
+        else:
+            owned_items = []
+        if not any(
+            json_references_media_path(item, path)
+            for item in owned_items
+            for path in paths
+        ):
+            continue
+        for item in owned_items:
+            for url in collect_local_media_urls(item):
+                candidate = generated_media_path_from_url(url)
+                if candidate and candidate not in expanded:
+                    expanded.append(candidate)
+    return expanded
+
+def reset_canvas_result_nodes_for_media(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Clear generated results while retaining prompts, references, settings and links."""
+    reset_ids = []
+    updated_nodes = []
+    for node in list(canvas.get("nodes") or []):
+        node = dict(node)
+        node_type = str(node.get("type") or "").strip().lower()
+        changed = False
+        if isinstance(node.get("generatedOutputs"), list):
+            outputs = list(node.get("generatedOutputs") or [])
+            kept_outputs = [
+                item
+                for item in outputs
+                if not any(json_references_media_path(item, path) for path in paths)
+            ]
+            if len(kept_outputs) != len(outputs):
+                node["generatedOutputs"] = kept_outputs
+                changed = True
+        if node_type in {"smart-image", "output"} and isinstance(node.get("images"), list):
+            images = list(node.get("images") or [])
+            owned_items = smart_owned_result_items(images, paths) if node_type == "smart-image" else images
+            owns_target = any(
+                json_references_media_path(item, path)
+                for item in owned_items
+                for path in paths
+            )
+            kept_images = [
+                item
+                for item in images
+                if not (
+                    owns_target
+                    and item in owned_items
+                    and any(json_references_media_path(item, path) for path in paths)
+                )
+            ]
+            if len(kept_images) != len(images):
+                node["images"] = kept_images
+                changed = True
+                if node_type == "output":
+                    node["_pending"] = []
+                    node["imageComparisons"] = {}
+                if node_type == "smart-image":
+                    node["pending"] = 0
+                    node["running"] = False
+                    node["queued"] = False
+                    for key in (
+                        "jimengPending", "pendingTasks", "runStartedAt", "runFinishedAt",
+                        "runElapsedMs", "runTimerHidden", "outputKind", "w", "h",
+                    ):
+                        node.pop(key, None)
+        elif node_type == "image" and any(
+            json_references_media_path(node.get("url"), path) for path in paths
+        ):
+            node["url"] = ""
+            node["mediaKind"] = "image"
+            node["name"] = "空白图片"
+            changed = True
+        if changed and node.get("id"):
+            reset_ids.append(str(node["id"]))
+        updated_nodes.append(node)
+
+    if reset_ids:
+        canvas["nodes"] = updated_nodes
+    return reset_ids
+
+def delete_media_preview_cache(path: str) -> int:
+    """Delete derived previews for a source file before the source disappears."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return 0
+    real_source = os.path.realpath(path)
+    sources = {os.path.abspath(path), real_source}
+    for configured_root in (OUTPUT_OUTPUT_DIR, OUTPUT_DIR):
+        real_root = os.path.realpath(configured_root)
+        try:
+            if os.path.commonpath([real_root, real_source]) == real_root:
+                rel = os.path.relpath(real_source, real_root)
+                sources.add(os.path.abspath(os.path.join(configured_root, rel)))
+        except ValueError:
+            continue
+    removed = 0
+    checked_names = set()
+    for source in sources:
+        for width in range(0, 4097):
+            keys = [
+                hashlib.sha1(
+                    f"{source}|{stat.st_mtime_ns}|{stat.st_size}|{width}|jpg".encode("utf-8", "ignore")
+                ).hexdigest() + ".jpg"
+            ]
+            if 64 <= width <= 2048:
+                preview_key = hashlib.sha1(
+                    f"{source}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode("utf-8", "ignore")
+                ).hexdigest()
+                keys.extend((preview_key + ".webp", preview_key + ".png"))
+            for name in keys:
+                if name in checked_names:
+                    continue
+                checked_names.add(name)
+                cache_path = os.path.join(MEDIA_PREVIEW_DIR, name)
+                try:
+                    if os.path.isfile(cache_path):
+                        os.remove(cache_path)
+                        removed += 1
+                except OSError:
+                    pass
+    return removed
 
 def image_has_alpha(img: Image.Image) -> bool:
     if img.mode in ("RGBA", "LA"):
@@ -11169,8 +11576,175 @@ async def generate_runninghub_video(payload, provider):
         local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
         return {"videos": local_urls, "task_id": task_id, "raw": result}
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution=""):
+def is_kie_provider(provider):
+    return str((provider or {}).get("id") or "").strip().lower() == "kie" or provider_protocol(provider) == "kie"
+
+
+def kie_reference_rules(model):
+    schema = build_kie_capability_schema(model)
+    refs = next((field for field in schema.get("fields", []) if field.get("key") == "reference_images"), {})
+    return {
+        "max": int(refs.get("max") or 0),
+        "max_file_bytes": int(refs.get("max_file_bytes") or 0),
+        "formats": {str(value or "").upper() for value in (refs.get("formats") or [])},
+    }
+
+
+async def kie_public_reference_urls(model, reference_images):
+    rules = kie_reference_rules(model)
+    references = [ref for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")]
+    if len(references) > rules["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{KIE_MODEL_NAMES.get(model, model)} 最多支持 {rules['max']} 张参考图，当前收到 {len(references)} 张",
+        )
+    def resolve_local_path(value):
+        text = str(value or "").strip()
+        parsed = urllib.parse.urlsplit(text)
+        if parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}:
+            text = urllib.parse.unquote(parsed.path or "")
+        elif parsed.scheme == "file":
+            text = urllib.parse.unquote(parsed.path or "")
+        path = output_file_from_url(text)
+        if path:
+            return path
+        return text if os.path.isabs(text) and os.path.isfile(text) else ""
+
+    try:
+        return await prepare_kie_references(
+            provider_env_key_value("kie"),
+            references,
+            resolve_local_path=resolve_local_path,
+            max_bytes=rules["max_file_bytes"] or 30 * 1024 * 1024,
+        )
+    except KieReferenceError as exc:
+        raise HTTPException(status_code=400 if exc.stage != "kie-read" else 502, detail=str(exc)) from exc
+
+
+async def generate_kie_provider_image(
+    prompt,
+    model,
+    reference_images,
+    provider,
+    *,
+    aspect_ratio="",
+    resolution="",
+    output_format="",
+    cancel_event=None,
+    status_callback=None,
+):
+    reference_audits = []
+    async def report_status(status, raw=None):
+        if status_callback is None:
+            return
+        value = status_callback(status, raw or {})
+        if hasattr(value, "__await__"):
+            await value
+
+    def ensure_not_cancelled(upstream_task_id=""):
+        if cancel_event is not None and cancel_event.is_set():
+            raise KieTaskCancelled(
+                "Kie 任务已停止本地提交或等待",
+                task_id=upstream_task_id,
+            )
+
+    try:
+        await report_status("preparing")
+        ensure_not_cancelled()
+        reference_urls, reference_audits = await kie_public_reference_urls(model, reference_images)
+        ensure_not_cancelled()
+        create_payload, request_meta = build_kie_create_payload(
+            model,
+            prompt,
+            reference_urls,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            output_format=output_format,
+        )
+        ensure_not_cancelled()
+        print(json.dumps({
+            "event": "kie_create_request",
+            "payload": create_payload,
+            "referenceAudits": reference_audits,
+        }, ensure_ascii=False), flush=True)
+        client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
+        # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
+        await report_status("submitting")
+        ensure_not_cancelled()
+        task_id, _create_raw = await client.create_task(create_payload)
+        await report_status("submitted", {"taskId": task_id})
+        ensure_not_cancelled(task_id)
+        result = await poll_kie_task(
+            client,
+            task_id,
+            timeout_seconds=float(os.getenv("KIE_TASK_TIMEOUT", "900")),
+            initial_interval=float(os.getenv("KIE_POLL_INITIAL_INTERVAL", "2.5")),
+            max_interval=float(os.getenv("KIE_POLL_MAX_INTERVAL", "12")),
+            cancel_event=cancel_event,
+            on_status=status_callback,
+        )
+        ensure_not_cancelled(task_id)
+        urls = result.get("resultUrls") or []
+        raw = {
+            "taskId": task_id,
+            "images": [{"url": url} for url in urls],
+            "kie_request": request_meta,
+            "kie_reference_audits": reference_audits,
+        }
+        return {"type": "url", "value": urls[0]}, raw
+    except KieValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KieTaskCancelled as exc:
+        error = HTTPException(status_code=499, detail=str(exc))
+        setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+    except TimeoutError as exc:
+        error = HTTPException(status_code=504, detail=str(exc))
+        match = re.search(r"taskId=([^\s,]+)", str(exc))
+        if match:
+            setattr(error, "upstream_task_id", match.group(1))
+        raise error from exc
+    except KieTaskError as exc:
+        detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
+        if reference_audits and any(token in str(exc).lower() for token in ("image info", "invalid image", "image format", "read image")):
+            refs = "；".join(
+                f"第{item['index']}张参考图「{item['filename']}」Kie读取失败，"
+                f"预检 HTTP {item['verify_http_status']}，Content-Type {item['verify_content_type']}"
+                for item in reference_audits
+            )
+            detail = f"{detail}；{refs}"
+        error = HTTPException(status_code=502, detail=detail)
+        setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+    except KieAPIError as exc:
+        error_parts = [str(exc)]
+        if exc.status_code:
+            error_parts.append(f"HTTP {exc.status_code}")
+        if exc.code not in (None, ""):
+            error_parts.append(f"code={exc.code}")
+        detail = "；".join(error_parts)
+        if exc.status_code == 401:
+            detail = "KIE_API_KEY 无效或已过期；HTTP 401"
+        error = HTTPException(status_code=exc.status_code, detail=detail)
+        if exc.task_id:
+            setattr(error, "upstream_task_id", exc.task_id)
+        raise error from exc
+
+
+async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
     provider = get_api_provider(provider_id)
+    if is_kie_provider(provider):
+        return await generate_kie_provider_image(
+            prompt,
+            model,
+            reference_images,
+            provider,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            output_format=output_format,
+            cancel_event=cancel_event,
+            status_callback=status_callback,
+        )
     if is_tudou_provider(provider):
         model = tudou_image_model_for_request(model)
     if provider["id"] == "modelscope":
@@ -11589,11 +12163,9 @@ async def decide_chat_agent_action(payload, conversation, refs):
     })
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if is_apimart_provider(provider_cfg):
-                req_body["stream"] = False
+            request_url, req_body = chat_upstream_request(provider_cfg, chat_base, model, upstream_messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -11636,7 +12208,6 @@ async def build_chat_text_reply(payload, conversation):
             "raw": raw,
         }
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    is_apimart = is_apimart_provider(provider_cfg)
     upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
     for item in conversation["messages"][-MAX_HISTORY_MESSAGES:]:
         msg = upstream_message_from_record(item)
@@ -11644,10 +12215,8 @@ async def build_chat_text_reply(payload, conversation):
             upstream_messages.append(msg)
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if is_apimart:
-                req_body["stream"] = False
-            response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body)
+            request_url, req_body = chat_upstream_request(provider_cfg, chat_base, model, upstream_messages)
+            response = await client.post(request_url, headers=chat_hdrs, json=req_body)
             response.raise_for_status()
             raw = response.json()
     except httpx.HTTPStatusError as exc:
@@ -11663,7 +12232,7 @@ async def build_chat_text_reply(payload, conversation):
         "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
         "created_at": now_ms(),
         "model": model,
-        "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
+        "raw_usage": chat_usage_from_response(raw_data),
     }
 
 # --- 路由接口 ---
@@ -13232,7 +13801,7 @@ async def save_providers(payload: List[ApiProviderPayload]):
     # 收集每个 item 的 primary 字段
     raw_primary_flags = [bool(getattr(item, "primary", False)) for item in payload]
     for item in payload:
-        provider = normalize_provider(item.dict(exclude={"api_key"}))
+        provider = normalize_provider(item.model_dump(exclude={"api_key"}))
         if provider["id"] == "runninghub":
             provider = preserve_runninghub_hidden_overrides(provider)
             prune_runninghub_workflow_store_for_provider(provider)
@@ -13240,10 +13809,11 @@ async def save_providers(payload: List[ApiProviderPayload]):
             raise HTTPException(status_code=400, detail=f"API 平台 ID 重复：{provider['id']}")
         providers.append(provider)
         key_env = provider_key_env(provider["id"])
-        if item.clear_key:
-            env_updates[key_env] = ""
-        elif item.api_key is not None and item.api_key.strip():
-            env_updates[key_env] = item.api_key.strip()
+        if provider["id"] != "kie":
+            if item.clear_key:
+                env_updates[key_env] = ""
+            elif item.api_key is not None and item.api_key.strip():
+                env_updates[key_env] = item.api_key.strip()
         if provider["id"] == "runninghub":
             wallet_env = runninghub_wallet_key_env()
             if item.clear_wallet_key:
@@ -13280,10 +13850,8 @@ async def save_providers(payload: List[ApiProviderPayload]):
         winner = primary_indices[-1]
         for i, p in enumerate(providers):
             p["primary"] = (i == winner)
+    providers = merge_default_api_providers(providers, inject_missing=False)
     save_api_providers(providers)
-    runninghub_provider = next((item for item in providers if item.get("id") == "runninghub"), None)
-    if runninghub_provider:
-        sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
     if env_updates:
         update_env_values(env_updates)
         reload_env_globals()   # 立即将最新 env 值同步回模块全局变量，无需重启
@@ -13317,6 +13885,8 @@ class TestConnectionPayload(BaseModel):
 
 def protocol_from_payload(payload):
     provider_id = str(getattr(payload, "provider_id", "") or "").strip().lower()
+    if provider_id == "kie":
+        return "kie"
     if provider_id == "volcengine":
         return "volcengine"
     if provider_id == "runninghub":
@@ -13349,7 +13919,7 @@ def api_key_from_payload(payload, protocol: str = ""):
 
 def upstream_models_url(base_url: str, protocol: str):
     if protocol == "gemini":
-        return f"{base_url}/models" if base_url.endswith("/v1beta") else f"{base_url}/v1beta/models"
+        return f"{gemini_api_root_url(base_url)}/v1beta/models"
     if protocol == "volcengine":
         return f"{base_url}/models" if base_url.endswith("/api/v3") else f"{base_url}/api/v3/models"
     if protocol == "runninghub":
@@ -13362,6 +13932,90 @@ def upstream_model_headers(api_key: str, protocol: str):
     if protocol == "runninghub":
         return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
     return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
+
+def kie_settings_model_payload(**extra):
+    payload = {
+        "protocol": "kie",
+        "image_request_mode": "kie",
+        "model_count": len(KIE_UI_MODELS),
+        "total": len(KIE_UI_MODELS),
+        "image_models": list(KIE_UI_MODELS),
+        "chat_models": [],
+        "video_models": [],
+        "all": list(KIE_UI_MODELS),
+        "model_names": dict(KIE_MODEL_NAMES),
+    }
+    payload.update(extra)
+    return payload
+
+async def validate_kie_settings(payload: TestConnectionPayload, *, check_reachability: bool):
+    """Validate the built-in Kie settings without calling an authenticated or paid job endpoint."""
+    requested_base_url = str(payload.base_url or "").strip().rstrip("/")
+    base_url_ok = requested_base_url == KIE_BASE_URL
+    api_key = provider_env_key_value("kie")
+    key_configured = bool(api_key)
+    whitelist_ok = tuple(KIE_UI_MODELS) == ("gpt-image-2", "nano-banana-pro")
+    if whitelist_ok:
+        try:
+            whitelist_ok = all(bool(build_kie_capability_schema(model)) for model in KIE_UI_MODELS)
+        except Exception:
+            whitelist_ok = False
+
+    client_initialized = False
+    if key_configured and base_url_ok:
+        try:
+            KieClient(api_key, base_url=KIE_BASE_URL)
+            client_initialized = True
+        except Exception:
+            client_initialized = False
+
+    checks = {
+        "base_url": base_url_ok,
+        "key_configured": key_configured,
+        "client_initialized": client_initialized,
+        "whitelist": whitelist_ok,
+    }
+
+    if check_reachability:
+        if not base_url_ok:
+            return kie_settings_model_payload(
+                ok=False,
+                status=400,
+                status_code=400,
+                message=f"Kie 请求地址必须为 {KIE_BASE_URL}",
+                checks=checks,
+            )
+        try:
+            # Only contact the public root URL. No key is sent and no task is created.
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(KIE_BASE_URL, headers={"Accept": "text/html,application/json"})
+            reachable = response.status_code < 500
+            checks["reachable"] = reachable
+            return kie_settings_model_payload(
+                ok=reachable,
+                status=response.status_code,
+                status_code=response.status_code,
+                message="Kie 官方地址可访问" if reachable else f"Kie 官方地址返回 HTTP {response.status_code}",
+                checks=checks,
+            )
+        except httpx.HTTPError as exc:
+            checks["reachable"] = False
+            return kie_settings_model_payload(
+                ok=False,
+                status=0,
+                status_code=0,
+                message=f"Kie 官方地址不可访问：{str(exc)[:200]}",
+                checks=checks,
+            )
+
+    ok = base_url_ok and key_configured and client_initialized and whitelist_ok
+    return kie_settings_model_payload(
+        ok=ok,
+        status=200 if ok else 400,
+        status_code=200 if ok else 400,
+        message="Kie 内置协议配置验证通过（未创建生图任务）" if ok else "Kie 内置协议配置不完整（未创建生图任务）",
+        checks=checks,
+    )
 
 def volcengine_default_model_payload(status=200, message="", raw=None):
     return {
@@ -13496,6 +14150,18 @@ def classify_upstream_model(mid):
         return "image"
     return "chat"
 
+def group_gemini_models(model_ids):
+    ids = sorted({
+        str(model_id).strip()
+        for model_id in model_ids or []
+        if str(model_id).strip().lower().startswith("gemini-")
+    })
+    grouped = {"image": [], "chat": [], "video": []}
+    for model_id in ids:
+        target = "image" if "image" in model_id.lower() else "chat"
+        grouped[target].append(model_id)
+    return grouped, ids
+
 def parse_upstream_models(raw, protocol="openai"):
     items = raw.get("data") if isinstance(raw, dict) else None
     if not items and isinstance(raw, dict):
@@ -13512,14 +14178,42 @@ def parse_upstream_models(raw, protocol="openai"):
             mid = ""
         if mid:
             mid = str(mid)
-            if protocol == "gemini" and mid.startswith("models/"):
+            if protocol == "gemini" and mid.lower().startswith("models/"):
                 mid = mid[len("models/"):]
             ids.append(mid)
     ids = sorted(set(ids))
+    if protocol == "gemini":
+        return group_gemini_models(ids)
     grouped = {"image": [], "chat": [], "video": []}
     for mid in ids:
         grouped[classify_upstream_model(mid)].append(mid)
     return grouped, ids
+
+async def supplement_gemini_gateway_models(client, base_url, api_key, grouped, ids):
+    """Merge a path-mounted Gemini gateway's host-level model catalog.
+
+    The native endpoint remains authoritative for Gemini connectivity. If the
+    optional OpenAI-compatible catalog is unavailable, the native result is
+    returned unchanged.
+    """
+    catalog_url = gemini_gateway_models_url(base_url)
+    if not catalog_url:
+        return grouped, ids, None
+    source = {"url": catalog_url, "status": 0, "model_count": 0}
+    try:
+        response = await client.get(catalog_url, headers=upstream_model_headers(api_key, "openai"))
+        source["status"] = response.status_code
+        if response.status_code >= 400 or looks_like_html_response(response.text):
+            return grouped, ids, source
+        # The gateway may return either OpenAI `data[].id` or Gemini
+        # `models[].name`; Gemini parsing accepts both and removes `models/`.
+        _, catalog_ids = parse_upstream_models(response.json(), "gemini")
+        source["model_count"] = len(catalog_ids)
+    except (httpx.HTTPError, ValueError):
+        return grouped, ids, source
+    source["accepted_model_count"] = len(catalog_ids)
+    merged, merged_ids = group_gemini_models([*ids, *catalog_ids])
+    return merged, merged_ids, source
 
 def apply_agnes_model_defaults(base_url, grouped, ids):
     if "apihub.agnes-ai.com" not in str(base_url or "").strip().lower():
@@ -13537,8 +14231,10 @@ def apply_agnes_model_defaults(base_url, grouped, ids):
 
 @app.post("/api/providers/test-connection")
 async def test_provider_connection(payload: TestConnectionPayload):
-    """测试请求地址是否可用：调上游 /v1/models。验证通过时同时把模型清单按类别返回，避免再调一次拉取接口。"""
+    """按所选协议测试模型列表端点；验证通过时同时返回分类模型清单。"""
     protocol = protocol_from_payload(payload)
+    if protocol == "kie":
+        return await validate_kie_settings(payload, check_reachability=True)
     if protocol == "codex":
         status = await codex_status()
         payload_models = codex_models_payload(raw={"status": status})
@@ -13620,6 +14316,13 @@ async def test_provider_connection(payload: TestConnectionPayload):
                 return {"ok": False, "status": resp.status_code, "message": resp.text[:300]}
             data = resp.json() if resp.text else {}
             grouped, ids = parse_upstream_models(data, protocol)
+            model_sources = [{"url": url, "status": resp.status_code, "model_count": len(ids)}]
+            if protocol == "gemini":
+                grouped, ids, catalog_source = await supplement_gemini_gateway_models(
+                    client, base_url, api_key, grouped, ids
+                )
+                if catalog_source:
+                    model_sources.append(catalog_source)
             grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
             grouped = apply_locked_recommended_model_rules(base_url, grouped)
             if protocol == "volcengine" and not ids:
@@ -13629,11 +14332,13 @@ async def test_provider_connection(payload: TestConnectionPayload):
             return {
                 "ok": True,
                 "status": resp.status_code,
+                "protocol": protocol,
                 "model_count": len(ids),
                 "image_models": grouped["image"],
                 "chat_models": grouped["chat"],
                 "video_models": grouped["video"],
                 "all": ids,
+                "model_sources": model_sources,
                 "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(getattr(payload, "image_request_mode", "")),
             }
     except httpx.HTTPError as e:
@@ -13650,10 +14355,11 @@ async def test_provider_connection(payload: TestConnectionPayload):
 
 @app.post("/api/providers/probe-async")
 async def probe_async_endpoint(payload: TestConnectionPayload):
-    """验证异步协议：用假 task_id 请求 GET /v1/tasks/{fake_id}。
-    收到 400 Invalid task ID = 端点存在且 Key 有效；401/403 = Key 无效；404/连接失败 = 不支持异步端点。"""
+    """验证所选协议；Gemini 直接检查 /v1beta/models，其余协议沿用异步端点探测。"""
     base_url = (payload.base_url or "").strip().rstrip("/")
     protocol = protocol_from_payload(payload)
+    if protocol == "kie":
+        return await validate_kie_settings(payload, check_reachability=False)
     if protocol == "codex":
         status = await codex_status()
         return {
@@ -13671,6 +14377,18 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
             "status_code": 200 if status.get("installed") else 0,
             "message": status.get("message") or "Antigravity CLI 本机检测完成",
             "raw": status,
+        }
+    if protocol == "gemini":
+        result = await test_provider_connection(payload)
+        return {
+            **result,
+            "protocol": "gemini",
+            "status_code": result.get("status") or 0,
+            "message": result.get("message") or (
+                f"Gemini 模型目录可用，找到 {result.get('model_count') or 0} 个模型"
+                if result.get("ok") else
+                "Gemini /v1beta/models 验证未通过"
+            ),
         }
     if not base_url:
         raise HTTPException(status_code=400, detail="请先填写请求地址")
@@ -13837,6 +14555,17 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             "video_models": JIMENG_DEFAULT_VIDEO_MODELS,
             "all": [*JIMENG_DEFAULT_IMAGE_MODELS, *JIMENG_DEFAULT_VIDEO_MODELS],
         }
+    if protocol == "kie":
+        return {
+            "total": len(KIE_UI_MODELS),
+            "protocol": "kie",
+            "image_models": list(KIE_UI_MODELS),
+            "chat_models": [],
+            "video_models": [],
+            "all": list(KIE_UI_MODELS),
+            "model_names": dict(KIE_MODEL_NAMES),
+            "message": "Kie 使用服务端静态白名单，未请求上游模型列表。",
+        }
     if protocol == "runninghub":
         provider = {"id": "runninghub", "name": "RunningHub", "base_url": base_url or RUNNINGHUB_DEFAULT_BASE_URL, "protocol": "runninghub", "api_key": api_key}
         return await runninghub_models_payload(provider)
@@ -13850,6 +14579,7 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         key_name = "方舟 API Key" if protocol == "volcengine" else "API Key"
         raise HTTPException(status_code=400, detail=f"请先填写或保存 {key_name}")
     url = upstream_models_url(base_url, protocol)
+    model_sources = []
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
@@ -13899,6 +14629,14 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
                         }
                 raise HTTPException(status_code=resp.status_code, detail=f"上游 {endpoint_label} 失败：{resp.text[:300]}")
             raw = resp.json()
+            grouped, ids = parse_upstream_models(raw, protocol)
+            model_sources.append({"url": url, "status": resp.status_code, "model_count": len(ids)})
+            if protocol == "gemini":
+                grouped, ids, catalog_source = await supplement_gemini_gateway_models(
+                    client, base_url, api_key, grouped, ids
+                )
+                if catalog_source:
+                    model_sources.append(catalog_source)
     except httpx.HTTPError as e:
         if protocol == "volcengine":
             try:
@@ -13923,7 +14661,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             except Exception:
                 pass
         raise HTTPException(status_code=502, detail=f"请求上游模型列表失败：{e}")
-    grouped, ids = parse_upstream_models(raw, protocol)
+    if protocol != "gemini":
+        grouped, ids = parse_upstream_models(raw, protocol)
     grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
     grouped = apply_locked_recommended_model_rules(base_url, grouped)
     if protocol == "volcengine" and not ids:
@@ -13939,16 +14678,20 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         }
     return {
         "total": len(ids),
+        "protocol": protocol,
         "image_models": grouped["image"],
         "chat_models": grouped["chat"],
         "video_models": grouped["video"],
         "all": ids,
+        "model_sources": model_sources,
         "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(image_request_mode),
     }
 
 @app.post("/api/providers/fetch-models")
 async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
     """按页面当前表单值拉取模型，支持新增平台未保存时直接使用临时 Base URL / Key。"""
+    if str(getattr(payload, "provider_id", "") or "").strip().lower() == "kie":
+        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
     protocol = protocol_from_payload(payload)
     api_key = api_key_from_payload(payload, protocol)
     return await fetch_models_from_upstream(payload.base_url, api_key, protocol, payload.image_request_mode)
@@ -13957,6 +14700,8 @@ async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
 async def fetch_upstream_models(provider_id: str):
     """从已保存的上游 OpenAI 兼容接口拉取 /v1/models 列表，按名称智能分类为 image/chat/video。"""
     provider = get_api_provider_exact(provider_id)
+    if provider["id"] == "kie":
+        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
     if is_codex_provider(provider):
         return await fetch_models_from_upstream("", "", "codex", provider.get("image_request_mode") or "openai")
     if is_gemini_cli_provider(provider):
@@ -13968,7 +14713,7 @@ async def fetch_upstream_models(provider_id: str):
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
-async def build_online_image_result(payload: OnlineImageRequest):
+async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event=None, status_callback=None):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
@@ -13989,7 +14734,8 @@ async def build_online_image_result(payload: OnlineImageRequest):
         else:
             image_data, raw_item = await generate_ai_image(
                 payload.prompt, request_size, payload.quality, model, image_refs, provider["id"],
-                payload.aspect_ratio, payload.resolution,
+                payload.aspect_ratio, payload.resolution, payload.output_format,
+                cancel_event, status_callback,
             )
         try:
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
@@ -14002,6 +14748,18 @@ async def build_online_image_result(payload: OnlineImageRequest):
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
+        if provider.get("id") == "kie":
+            request_meta = raw_item.get("kie_request") if isinstance(raw_item, dict) else {}
+            for meta in local_items:
+                print(json.dumps({
+                    "event": "kie_image_dimensions",
+                    "provider": "kie",
+                    "model": request_meta.get("kie_model") or model,
+                    "requestedResolution": request_meta.get("requested_resolution") or str(payload.resolution or "").upper(),
+                    "requestedAspectRatio": request_meta.get("requested_aspect_ratio") or payload.aspect_ratio,
+                    "returnedImageWidth": meta.get("natural_w") or meta.get("width"),
+                    "returnedImageHeight": meta.get("natural_h") or meta.get("height"),
+                }, ensure_ascii=False), flush=True)
         return local_urls, local_items, raw_item
     try:
         generated = await asyncio.gather(*(generate_one() for _ in range(count)))
@@ -14033,7 +14791,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "provider_name": provider.get("name") or provider["id"],
         "task_id": extract_task_id(raw) if isinstance(raw, dict) else None,
         "request_id": raw.get("id") if isinstance(raw, dict) else None,
-        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
+        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "aspect_ratio": payload.aspect_ratio, "resolution": payload.resolution, "output_format": payload.output_format, "quality": payload.quality, "n": count, "reference_images": refs},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
     }
     save_to_history(result)
@@ -14394,6 +15152,71 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             raise HTTPException(status_code=exc.response.status_code, detail=f"查询 RunningHub 任务失败：{text[:300]}") from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
+    if is_kie_provider(provider):
+        try:
+            kie_client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
+            raw = await kie_client.query_task(task_id)
+            status = kie_task_status(raw)
+            if status == "success":
+                remote_urls = parse_kie_result_urls(raw, task_id)
+                local_urls = []
+                local_items = []
+                for remote_url in remote_urls:
+                    source_item = {"type": "url", "value": remote_url}
+                    local_url = await save_ai_image_to_output(source_item, prefix="online_")
+                    if local_url:
+                        local_urls.append(local_url)
+                        local_items.append(image_output_meta(local_url, source_item))
+                result = {
+                    "status": "succeeded",
+                    "prompt": "",
+                    "images": local_urls,
+                    "image_items": local_items,
+                    "timestamp": time.time(),
+                    "type": "online",
+                    "model": "",
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "task_id": task_id,
+                    "request_id": "",
+                    "params": {"provider_id": provider["id"]},
+                    "raw": raw,
+                }
+                save_to_history(result)
+                if GLOBAL_LOOP:
+                    asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
+                return result
+            if status == "fail":
+                failure = kie_task_failure(raw, task_id)
+                return {
+                    "status": "failed",
+                    "task_id": task_id,
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "error": str(failure),
+                    "fail_code": failure.fail_code,
+                    "raw": raw,
+                }
+            if status in {"waiting", "queuing", "generating"}:
+                return {
+                    "status": "running",
+                    "upstream_status": status,
+                    "task_id": task_id,
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "message": f"Kie 任务状态：{status}",
+                    "raw": raw,
+                }
+            raise HTTPException(status_code=502, detail=f"Kie 返回未知任务状态：{status or '(empty)'}")
+        except KieAPIError as exc:
+            detail_parts = [str(exc)]
+            if exc.status_code:
+                detail_parts.append(f"HTTP {exc.status_code}")
+            if exc.code not in (None, ""):
+                detail_parts.append(f"code={exc.code}")
+            raise HTTPException(status_code=exc.status_code, detail="；".join(detail_parts)) from exc
+        except KieTaskError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -14460,11 +15283,34 @@ async def query_image_task(payload: ImageTaskQueryRequest):
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
+            CANVAS_TASKS[task_id]["status"] = "preparing" if payload.provider_id == "kie" else "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
-        result = await build_online_image_result(payload)
+        cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
+
+        def update_upstream_status(status, _raw):
+            raw = _raw if isinstance(_raw, dict) else {}
+            upstream_task_id = str(raw.get("taskId") or raw.get("task_id") or "").strip()
+            normalized = "queued" if status in {"waiting", "queuing", "submitted"} else "generating" if status == "generating" else status
+            with CANVAS_TASK_LOCK:
+                task = CANVAS_TASKS.get(task_id)
+                if not task:
+                    return
+                if upstream_task_id:
+                    task["upstream_task_id"] = upstream_task_id
+                if task.get("status") != "canceled":
+                    task["status"] = normalized or "running"
+                    task["upstream_status"] = status
+                task["updated_at"] = time.time()
+
+        result = await build_online_image_result(
+            payload,
+            cancel_event=cancel_event,
+            status_callback=update_upstream_status if payload.provider_id == "kie" else None,
+        )
         with CANVAS_TASK_LOCK:
+            if CANVAS_TASKS[task_id].get("status") == "canceled":
+                return
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
                 "result": result,
@@ -14485,22 +15331,49 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+    except asyncio.CancelledError:
+        with CANVAS_TASK_LOCK:
+            if task_id in CANVAS_TASKS:
+                CANVAS_TASKS[task_id].update({
+                    "status": "canceled",
+                    "error": "任务已取消",
+                    "updated_at": time.time(),
+                })
+        raise
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
-                "status": "failed",
+                "status": "canceled" if status_code == 499 else "failed",
                 "error": str(detail),
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
             })
+    finally:
+        CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
+        CANVAS_TASK_RUNNERS.pop(task_id, None)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    if payload.provider_id == "kie":
+        try:
+            # 在创建本地后台任务之前完成模型、比例、分辨率、格式和数量校验，
+            # 非法请求不会接触 Kie，也不会产生上游任务或费用。
+            build_kie_create_payload(
+                payload.model,
+                payload.prompt,
+                [ref.url for ref in payload.reference_images if ref.url],
+                aspect_ratio=payload.aspect_ratio,
+                resolution=payload.resolution,
+                output_format=payload.output_format,
+            )
+        except KieValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     task_id = f"canvas_img_{uuid.uuid4().hex}"
+    cancel_event = asyncio.Event()
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
             "id": task_id,
@@ -14513,7 +15386,9 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "provider_id": payload.provider_id,
             "model": payload.model,
         }
-    asyncio.create_task(run_canvas_image_task(task_id, payload))
+    CANVAS_TASK_CANCEL_EVENTS[task_id] = cancel_event
+    runner = asyncio.create_task(run_canvas_image_task(task_id, payload))
+    CANVAS_TASK_RUNNERS[task_id] = runner
     return {"task_id": task_id, "status": "queued"}
 
 @app.get("/api/canvas-image-tasks/{task_id}")
@@ -14523,6 +15398,52 @@ async def get_canvas_image_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="画布任务不存在，可能服务已重启或任务已过期")
     return task
+
+
+@app.delete("/api/canvas-image-tasks/{task_id}")
+async def cancel_canvas_image_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="画布任务不存在")
+        if task.get("status") in {"succeeded", "failed", "canceled"}:
+            return {
+                "task_id": task_id,
+                "status": task.get("status"),
+                "upstream_task_id": task.get("upstream_task_id") or "",
+                "upstream_cancel_supported": False,
+            }
+        previous_status = str(task.get("status") or "")
+        task["status"] = "canceled"
+        task["error"] = "任务已取消"
+        task["canceled_at"] = time.time()
+        task["updated_at"] = time.time()
+        upstream_task_id = task.get("upstream_task_id") or ""
+    cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
+    if cancel_event:
+        cancel_event.set()
+    # 参考准备阶段还没有向 Kie 提交，可以直接终止后台协程；进入 submitting
+    # 后则让 createTask 响应返回，以便记录 upstream taskId，再由 cancel_event 停止轮询。
+    hard_cancel = previous_status in {"queued", "preparing"} and not upstream_task_id
+    runner = CANVAS_TASK_RUNNERS.get(task_id)
+    if hard_cancel and runner and not runner.done():
+        runner.cancel()
+        def cleanup_canceled_runner(_done):
+            CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
+            CANVAS_TASK_RUNNERS.pop(task_id, None)
+        runner.add_done_callback(cleanup_canceled_runner)
+    return {
+        "task_id": task_id,
+        "status": "canceled",
+        "cancel_scope": "pre-submit" if hard_cancel else "local-only",
+        "upstream_task_id": upstream_task_id,
+        "upstream_cancel_supported": False,
+        "message": (
+            "生成已在提交前取消，未创建 Kie 任务"
+            if hard_cancel else
+            "已停止本地等待；任务可能已提交服务商并继续执行"
+        ),
+    }
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
@@ -14633,6 +15554,17 @@ def build_image_param_fields(engine: str, provider: dict, model: str):
 async def image_params(provider_id: str = "", model: str = ""):
     providers = load_api_providers()
     provider = next((p for p in providers if p.get("id") == (provider_id or "").strip().lower()), None) or {}
+    if is_kie_provider(provider):
+        try:
+            schema = build_kie_capability_schema(model)
+        except KieValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "engine": "api",
+            "provider_id": "kie",
+            "submit": "/api/canvas-image-tasks",
+            **schema,
+        }
     if is_runninghub_provider(provider):
         engine = "runninghub"
     elif (provider_id or "").strip().lower() == "modelscope":
@@ -15974,9 +16906,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
         text, raw = await gemini_cli_chat_text(payload, payload.messages)
         return {"text": text, "model": model, "raw_usage": None, "raw": raw}
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    # 判断协议：APIMart 异步 vs 标准 OpenAI
     _llm_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-    _is_apimart = is_apimart_provider(_llm_provider)
     system_prompt = (payload.system_prompt or "").strip()
     upstream_messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
     for item in payload.messages[-MAX_HISTORY_MESSAGES:]:
@@ -16021,11 +16951,9 @@ async def canvas_llm(payload: CanvasLLMRequest):
     raw = None
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if _is_apimart:
-                req_body["stream"] = False   # APIMart 默认流式，强制关闭
+            request_url, req_body = chat_upstream_request(_llm_provider, chat_base, model, upstream_messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -16049,7 +16977,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
-    return {"text": text, "model": model, "raw_usage": raw_data.get("usage")}
+    return {"text": text, "model": model, "raw_usage": chat_usage_from_response(raw_data)}
 
 # --- 对话管理 ---
 
@@ -16974,7 +17902,6 @@ async def caption_image_with_provider(abs_path, prompt, provider_id, model, ms_m
         text, _raw = await gemini_cli_chat_text(payload, [])
         return text, resolved_model
     chat_base, chat_hdrs, resolved_model = resolve_chat_provider(provider_id, model, ms_model)
-    is_apimart = is_apimart_provider(llm_provider)
     prompt_text = (prompt or "描述图片").strip() or "描述图片"
     data_url = image_path_to_data_url(abs_path, max_size=1024)
     messages = [{
@@ -16987,11 +17914,9 @@ async def caption_image_with_provider(abs_path, prompt, provider_id, model, ms_m
     raw = None
     try:
         async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": resolved_model, "messages": messages}
-            if is_apimart:
-                req_body["stream"] = False
+            request_url, req_body = chat_upstream_request(llm_provider, chat_base, resolved_model, messages)
             response = await client.post(
-                f"{chat_base}/chat/completions",
+                request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
@@ -17309,6 +18234,84 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
     await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
     return {"canvas": canvas}
 
+@app.post("/api/canvases/{canvas_id}/logs/delete")
+async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
+    log_id = str(payload.log_id or "").strip()
+    if not log_id:
+        raise HTTPException(status_code=400, detail="缺少日志 ID")
+
+    def remove_log_record():
+        with CANVAS_LOCK:
+            canvas = load_canvas(canvas_id)
+            current_updated_at = int(canvas.get("updated_at") or 0)
+            if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
+                raise HTTPException(status_code=409, detail={
+                    "message": "画布已被其他页面更新，请刷新后重试。",
+                    "canvas": canvas,
+                    "updated_at": current_updated_at,
+                })
+            logs = list(canvas.get("logs") or [])
+            target = next((item for item in logs if str(item.get("id") or "") == log_id), None)
+            if not target:
+                raise HTTPException(status_code=404, detail="生成日志不存在")
+
+            candidate_paths = []
+            if payload.delete_unreferenced_media:
+                for url in collect_local_media_urls(target.get("outputs") or []):
+                    path = generated_media_path_from_url(url)
+                    if path and path not in candidate_paths:
+                        candidate_paths.append(path)
+
+            reset_node_ids = []
+            if payload.reset_referencing_nodes and candidate_paths:
+                candidate_paths = expand_canvas_generated_media_paths(canvas, candidate_paths)
+                reset_node_ids = reset_canvas_result_nodes_for_media(canvas, candidate_paths)
+
+            canvas["logs"] = [item for item in logs if str(item.get("id") or "") != log_id]
+            save_canvas(canvas)
+            return canvas, candidate_paths, reset_node_ids
+
+    canvas, candidate_paths, reset_node_ids = await asyncio.to_thread(remove_log_record)
+
+    def cleanup_unreferenced_media():
+        removed_files = []
+        skipped_referenced = []
+        removed_previews = 0
+        deletable_paths = []
+        for path in candidate_paths:
+            if persisted_json_references_media_path(path):
+                skipped_referenced.append(os.path.basename(path))
+                continue
+            deletable_paths.append(path)
+        prune_generation_history_for_media(deletable_paths)
+        for path in deletable_paths:
+            try:
+                removed_previews += delete_media_preview_cache(path)
+                os.remove(path)
+                removed_files.append(os.path.basename(path))
+            except OSError:
+                skipped_referenced.append(os.path.basename(path))
+        return removed_files, skipped_referenced, removed_previews
+
+    removed_files = []
+    skipped_referenced = []
+    removed_previews = 0
+    if payload.delete_unreferenced_media:
+        def locked_cleanup():
+            with CANVAS_LOCK:
+                return cleanup_unreferenced_media()
+        removed_files, skipped_referenced, removed_previews = await asyncio.to_thread(locked_cleanup)
+
+    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()))
+    return {
+        "ok": True,
+        "canvas": canvas,
+        "removed_files": removed_files,
+        "removed_previews": removed_previews,
+        "reset_node_ids": reset_node_ids,
+        "skipped_referenced": skipped_referenced,
+    }
+
 @app.delete("/api/canvases/{canvas_id}")
 async def delete_canvas(canvas_id: str):
     canvas = load_canvas_any(canvas_id)
@@ -17433,7 +18436,6 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             return {"conversation": conversation, "message": assistant_message}
         chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
         _conv_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-        _conv_is_apimart = is_apimart_provider(_conv_provider)
         history = conversation["messages"][-MAX_HISTORY_MESSAGES:]
         upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
         for item in history:
@@ -17442,11 +18444,9 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
                 upstream_messages.append(msg)
         try:
             async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                conv_req_body = {"model": model, "messages": upstream_messages}
-                if _conv_is_apimart:
-                    conv_req_body["stream"] = False
+                request_url, conv_req_body = chat_upstream_request(_conv_provider, chat_base, model, upstream_messages)
                 response = await client.post(
-                    f"{chat_base}/chat/completions",
+                    request_url,
                     headers=chat_hdrs,
                     json=conv_req_body,
                 )
@@ -17465,7 +18465,7 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
             "created_at": now_ms(),
             "model": model,
-            "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
+            "raw_usage": chat_usage_from_response(raw_data),
         }
 
     conversation["messages"].append(assistant_message)
@@ -17667,35 +18667,51 @@ async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = H
         yield sse_event({"type": "meta", "conversation": conversation})
         try:
             async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                async with client.stream(
-                    "POST",
-                    f"{chat_base}/chat/completions",
-                    headers=chat_hdrs,
-                    json={"model": model, "messages": upstream_messages, "stream": True},
-                ) as response:
+                if effective_protocol(_stream_provider, model) == "gemini":
+                    request_url, request_body = chat_upstream_request(_stream_provider, chat_base, model, upstream_messages)
+                    response = await client.post(request_url, headers=chat_hdrs, json=request_body)
                     if response.status_code >= 400:
-                        detail = await response.aread()
-                        body = detail.decode("utf-8", errors="ignore")
+                        body = response.text or ""
                         friendly = friendly_chat_error_detail(body, model, _stream_provider)
                         yield sse_event({"type": "error", "detail": friendly or f"上游接口错误：{body}"})
                         return
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if line == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(chunk, dict) and chunk.get("usage"):
-                            raw_usage = chunk.get("usage")
-                        delta = text_delta_from_chat_chunk(chunk)
-                        if delta:
-                            content_parts.append(delta)
-                            yield sse_event({"type": "delta", "delta": delta})
+                    raw = response.json()
+                    text = text_from_chat_response(raw)
+                    raw_usage = chat_usage_from_response(raw)
+                    if text:
+                        content_parts.append(text)
+                        yield sse_event({"type": "delta", "delta": text})
+                else:
+                    request_url, request_body = chat_upstream_request(_stream_provider, chat_base, model, upstream_messages, stream=True)
+                    async with client.stream(
+                        "POST",
+                        request_url,
+                        headers=chat_hdrs,
+                        json=request_body,
+                    ) as response:
+                        if response.status_code >= 400:
+                            detail = await response.aread()
+                            body = detail.decode("utf-8", errors="ignore")
+                            friendly = friendly_chat_error_detail(body, model, _stream_provider)
+                            yield sse_event({"type": "error", "detail": friendly or f"上游接口错误：{body}"})
+                            return
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            if line == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(chunk, dict) and chunk.get("usage"):
+                                raw_usage = chunk.get("usage")
+                            delta = text_delta_from_chat_chunk(chunk)
+                            if delta:
+                                content_parts.append(delta)
+                                yield sse_event({"type": "delta", "delta": delta})
         except httpx.HTTPError as exc:
             log_net_error("对话(流式) 网络/TLS错误", exc)
             yield sse_event({"type": "error", "detail": f"请求上游接口失败：{exc}"})
@@ -18696,9 +19712,6 @@ def sync_runninghub_workflow_to_provider(cfg):
         entry["thumbnail"] = ""
     normalized_providers = [normalize_provider(item) for item in providers]
     save_api_providers(normalized_providers)
-    runninghub_provider = next((item for item in normalized_providers if item.get("id") == "runninghub"), None)
-    if runninghub_provider:
-        sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
 
 def remove_runninghub_workflow_from_provider(workflow_id: str):
     key = runninghub_workflow_store_key(workflow_id)
@@ -18733,9 +19746,6 @@ def remove_runninghub_workflow_from_provider(workflow_id: str):
     if changed:
         normalized_providers = [normalize_provider(item) for item in providers]
         save_api_providers(normalized_providers)
-        runninghub_provider = next((item for item in normalized_providers if item.get("id") == "runninghub"), None)
-        if runninghub_provider:
-            sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
 
 def runninghub_workflow_store_key(workflow_id: str) -> str:
     return str(workflow_id or "").strip()

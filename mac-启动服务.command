@@ -16,7 +16,6 @@ xattr -r -d com.apple.quarantine main.py 2>/dev/null
 
 # 设置执行权限（修正：原脚本引用了不存在的 启动服务.command/启动服务.py）
 chmod +x *.command 2>/dev/null
-chmod +x main.py 2>/dev/null
 
 echo "权限已修复！"
 echo ""
@@ -40,8 +39,10 @@ echo "本机访问： http://127.0.0.1:3000/"
 echo "============================================"
 echo ""
 
-# 优先使用 Homebrew Python，避免部分工具管理的 Python 签名问题
-if [ -x /opt/homebrew/bin/python3 ]; then
+# 优先使用项目专用虚拟环境，避免污染系统 Python，也确保双击启动时依赖可用
+if [ -x "$PWD/.venv/bin/python" ]; then
+    "$PWD/.venv/bin/python" main.py
+elif [ -x /opt/homebrew/bin/python3 ]; then
     /opt/homebrew/bin/python3 main.py
 elif [ -x /usr/local/bin/python3 ]; then
     /usr/local/bin/python3 main.py

@@ -1649,3 +1649,294 @@ body.studio-theme-dark .shell .comfy-random-btn.active svg {
     fill: none !important;
     stroke: #0f172a !important;
 }
+
+/* Infinite Canvas Neutral Dark palette.
+   Keep this final, dark-only layer as the shared source of truth for the classic
+   canvas. Smart Canvas mirrors the same tokens in smart-canvas.css because that
+   standalone page intentionally does not load theme.css. */
+html.studio-theme-dark,
+html.studio-theme-dark body,
+body.studio-theme-dark,
+html.studio-theme-dark body .shell.theme-dark,
+body.studio-theme-dark .shell.theme-dark {
+    --ic-canvas: #0b0b0c;
+    --ic-grid: rgba(41, 41, 45, .78);
+    --ic-node: #151517;
+    --ic-node-secondary: #19191c;
+    --ic-node-hover: #1d1d20;
+    --ic-border: #343438;
+    --ic-border-hover: #48484d;
+    --ic-border-selected: #66666c;
+    --ic-group: rgba(20, 20, 22, .72);
+    --ic-text: #f1f1f2;
+    --ic-text-body: #d6d6d9;
+    --ic-text-muted: #a0a0a6;
+    --ic-text-placeholder: #73737a;
+    --ic-text-faint: #606066;
+    --ic-edge: #46464c;
+    --ic-edge-low: #39393e;
+    --ic-edge-hover: #6a6a70;
+    --ic-edge-selected: #aaaaaf;
+    --ic-handle: #626268;
+    --ic-input: #111113;
+    --ic-input-border: #323236;
+    --ic-input-focus: #57575d;
+    --ic-menu: #18181b;
+    --ic-menu-hover: #242428;
+    --ic-button: #232326;
+    --ic-button-hover: #2c2c30;
+    --ic-primary: #e6e6e8;
+    --ic-primary-text: #111113;
+
+    --accent: var(--ic-primary);
+    --bg: var(--ic-canvas);
+    --bg-base: var(--ic-canvas);
+    --page: var(--ic-canvas);
+    --grid: var(--ic-grid);
+    --panel: rgba(24, 24, 27, .94);
+    --card: var(--ic-node);
+    --card-solid: var(--ic-node);
+    --soft: var(--ic-input);
+    --soft-2: var(--ic-node-hover);
+    --line: var(--ic-border);
+    --line-2: var(--ic-border-hover);
+    --text: var(--ic-text);
+    --text-main: var(--ic-text);
+    --muted: var(--ic-text-muted);
+    --faint: var(--ic-text-faint);
+    --shadow: rgba(0, 0, 0, .34);
+    --strong: var(--ic-primary);
+    --strong-text: var(--ic-primary-text);
+}
+
+html.studio-theme-dark,
+html.studio-theme-dark body,
+body.studio-theme-dark,
+html.studio-theme-dark body .shell,
+html.studio-theme-dark body .shell .board,
+body.studio-theme-dark .shell,
+body.studio-theme-dark .shell .board {
+    background-color: var(--ic-canvas) !important;
+    color: var(--ic-text-body) !important;
+}
+
+html.studio-theme-dark body .shell,
+html.studio-theme-dark body .shell .board,
+body.studio-theme-dark .shell,
+body.studio-theme-dark .shell .board {
+    background-image: radial-gradient(var(--ic-grid) 1px, transparent 1px) !important;
+}
+
+html.studio-theme-dark body *,
+body.studio-theme-dark * {
+    scrollbar-color: rgba(115, 115, 122, .58) transparent !important;
+}
+
+html.studio-theme-dark body *::-webkit-scrollbar-thumb,
+body.studio-theme-dark *::-webkit-scrollbar-thumb {
+    background-color: rgba(115, 115, 122, .58) !important;
+}
+
+html.studio-theme-dark body *::-webkit-scrollbar-thumb:hover,
+body.studio-theme-dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(160, 160, 166, .72) !important;
+}
+
+html.studio-theme-dark body .shell .panel,
+html.studio-theme-dark body .shell .toolbar,
+html.studio-theme-dark body .shell .create-menu,
+html.studio-theme-dark body .shell .quick-connect-menu,
+html.studio-theme-dark body .shell .context-menu,
+html.studio-theme-dark body .shell .selection-hub,
+html.studio-theme-dark body .shell .canvas-meta-pop,
+html.studio-theme-dark body .shell .workflow-transfer-panel,
+body.studio-theme-dark .shell .panel,
+body.studio-theme-dark .shell .toolbar,
+body.studio-theme-dark .shell .create-menu,
+body.studio-theme-dark .shell .quick-connect-menu,
+body.studio-theme-dark .shell .context-menu,
+body.studio-theme-dark .shell .selection-hub,
+body.studio-theme-dark .shell .canvas-meta-pop,
+body.studio-theme-dark .shell .workflow-transfer-panel {
+    background: var(--ic-menu) !important;
+    border-color: var(--ic-border) !important;
+    color: var(--ic-text-body) !important;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .34) !important;
+}
+
+html.studio-theme-dark body .shell .node,
+body.studio-theme-dark .shell .node {
+    background: var(--ic-node) !important;
+    border-color: var(--ic-border) !important;
+    color: var(--ic-text-body) !important;
+    box-shadow: 0 16px 42px rgba(0, 0, 0, .26) !important;
+}
+
+html.studio-theme-dark body .shell .node-head,
+body.studio-theme-dark .shell .node-head {
+    background: var(--ic-node) !important;
+    border-bottom-color: var(--ic-border) !important;
+}
+
+html.studio-theme-dark body .shell .node:hover,
+body.studio-theme-dark .shell .node:hover {
+    border-color: var(--ic-border-hover) !important;
+}
+
+html.studio-theme-dark body .shell .node.selected,
+body.studio-theme-dark .shell .node.selected {
+    outline-color: var(--ic-border-selected) !important;
+}
+
+html.studio-theme-dark body .shell .group-node,
+html.studio-theme-dark body .shell .promptGroup-node,
+body.studio-theme-dark .shell .group-node,
+body.studio-theme-dark .shell .promptGroup-node {
+    background: var(--ic-group) !important;
+    border-color: var(--ic-border) !important;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .18) !important;
+}
+
+html.studio-theme-dark body .shell .group-node .node-head,
+html.studio-theme-dark body .shell .promptGroup-node .node-head,
+body.studio-theme-dark .shell .group-node .node-head,
+body.studio-theme-dark .shell .promptGroup-node .node-head {
+    background: rgba(20, 20, 22, .86) !important;
+}
+
+html.studio-theme-dark body .shell .node-title,
+html.studio-theme-dark body .shell .setting-title,
+html.studio-theme-dark body .shell .image-caption,
+html.studio-theme-dark body .shell .quick-connect-title,
+body.studio-theme-dark .shell .node-title,
+body.studio-theme-dark .shell .setting-title,
+body.studio-theme-dark .shell .image-caption,
+body.studio-theme-dark .shell .quick-connect-title {
+    color: var(--ic-text-muted) !important;
+}
+
+html.studio-theme-dark body .shell .muted,
+html.studio-theme-dark body .shell .node-hint,
+html.studio-theme-dark body .shell .quick-connect-copy small,
+body.studio-theme-dark .shell .muted,
+body.studio-theme-dark .shell .node-hint,
+body.studio-theme-dark .shell .quick-connect-copy small {
+    color: var(--ic-text-faint) !important;
+}
+
+html.studio-theme-dark body .shell input,
+html.studio-theme-dark body .shell textarea,
+html.studio-theme-dark body .shell select,
+html.studio-theme-dark body .shell .llm-system,
+html.studio-theme-dark body .shell .llm-chat-input,
+html.studio-theme-dark body .shell .llm-chat-log,
+html.studio-theme-dark body .shell .llm-output,
+html.studio-theme-dark body .shell .llm-chat-pane,
+body.studio-theme-dark .shell input,
+body.studio-theme-dark .shell textarea,
+body.studio-theme-dark .shell select,
+body.studio-theme-dark .shell .llm-system,
+body.studio-theme-dark .shell .llm-chat-input,
+body.studio-theme-dark .shell .llm-chat-log,
+body.studio-theme-dark .shell .llm-output,
+body.studio-theme-dark .shell .llm-chat-pane {
+    background-color: var(--ic-input) !important;
+    border-color: var(--ic-input-border) !important;
+    color: #e8e8ea !important;
+}
+
+html.studio-theme-dark body .shell input:focus,
+html.studio-theme-dark body .shell textarea:focus,
+html.studio-theme-dark body .shell select:focus,
+body.studio-theme-dark .shell input:focus,
+body.studio-theme-dark .shell textarea:focus,
+body.studio-theme-dark .shell select:focus {
+    border-color: var(--ic-input-focus) !important;
+    outline-color: var(--ic-input-focus) !important;
+}
+
+html.studio-theme-dark body .shell ::placeholder,
+body.studio-theme-dark .shell ::placeholder {
+    color: var(--ic-text-placeholder) !important;
+}
+
+html.studio-theme-dark body .shell .tool-btn,
+html.studio-theme-dark body .shell .select-lite,
+html.studio-theme-dark body .shell .secondary-btn,
+html.studio-theme-dark body .shell .quick-connect-list button,
+body.studio-theme-dark .shell .tool-btn,
+body.studio-theme-dark .shell .select-lite,
+body.studio-theme-dark .shell .secondary-btn,
+body.studio-theme-dark .shell .quick-connect-list button {
+    background: var(--ic-button) !important;
+    border-color: var(--ic-border) !important;
+    color: var(--ic-text-body) !important;
+}
+
+html.studio-theme-dark body .shell .tool-btn:hover,
+html.studio-theme-dark body .shell .select-lite:hover,
+html.studio-theme-dark body .shell .secondary-btn:hover,
+html.studio-theme-dark body .shell .quick-connect-list button:hover,
+body.studio-theme-dark .shell .tool-btn:hover,
+body.studio-theme-dark .shell .select-lite:hover,
+body.studio-theme-dark .shell .secondary-btn:hover,
+body.studio-theme-dark .shell .quick-connect-list button:hover {
+    background: var(--ic-button-hover) !important;
+    border-color: var(--ic-border-hover) !important;
+    color: var(--ic-text) !important;
+}
+
+html.studio-theme-dark body .shell .link:not(.knife-trail),
+body.studio-theme-dark .shell .link:not(.knife-trail) {
+    stroke: var(--ic-edge) !important;
+    opacity: .78 !important;
+}
+
+html.studio-theme-dark body .shell .link.link-active,
+body.studio-theme-dark .shell .link.link-active {
+    stroke: var(--ic-edge-selected) !important;
+    opacity: 1 !important;
+}
+
+html.studio-theme-dark body .shell .port::after,
+body.studio-theme-dark .shell .port::after {
+    background: var(--ic-handle) !important;
+    border-color: var(--ic-node) !important;
+    box-shadow: 0 0 0 1px var(--ic-border-hover) !important;
+}
+
+html.studio-theme-dark body .shell .image-node img,
+html.studio-theme-dark body .shell .output-grid img,
+html.studio-theme-dark body .shell .output-preview img,
+body.studio-theme-dark .shell .image-node img,
+body.studio-theme-dark .shell .output-grid img,
+body.studio-theme-dark .shell .output-preview img {
+    background: transparent !important;
+    border-color: var(--ic-border) !important;
+}
+
+html.studio-theme-dark body .prompt-editor-modal,
+body.studio-theme-dark .prompt-editor-modal {
+    background: rgba(0, 0, 0, .72) !important;
+}
+
+html.studio-theme-dark body .prompt-editor-dialog,
+body.studio-theme-dark .prompt-editor-dialog {
+    background: var(--ic-menu) !important;
+    border-color: var(--ic-border) !important;
+    color: var(--ic-text) !important;
+    box-shadow: 0 34px 100px rgba(0, 0, 0, .56) !important;
+}
+
+html.studio-theme-dark body .prompt-editor-textarea,
+body.studio-theme-dark .prompt-editor-textarea {
+    background: var(--ic-input) !important;
+    border-color: var(--ic-input-border) !important;
+    color: #e8e8ea !important;
+    box-shadow: none !important;
+}
+
+html.studio-theme-dark body .prompt-editor-textarea:focus,
+body.studio-theme-dark .prompt-editor-textarea:focus {
+    border-color: var(--ic-input-focus) !important;
+}

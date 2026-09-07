@@ -28,7 +28,6 @@ chmod +x mac-启动服务.command 2>/dev/null
 chmod +x mac-修复权限.command 2>/dev/null
 chmod +x 安装即梦CLI.command 2>/dev/null
 chmod +x 登录即梦CLI.command 2>/dev/null
-chmod +x main.py 2>/dev/null
 
 echo "✓ 已设置执行权限"
 echo ""
