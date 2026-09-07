@@ -8011,6 +8011,89 @@ function openSmartLogLightbox(url, kind='image'){
 function smartLogPreviewNode(url, kind='image'){
     openSmartLogLightbox(url, kind);
 }
+const smartCanvasLogDeleteBusy = new Set();
+async function flushSmartCanvasBeforeLogDelete(){
+    if(saveTimer){
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        await saveCanvas();
+    }
+    if(canvasSyncInFlight || saveTimer){
+        throw new Error(tr('canvas.logSaveInProgress'));
+    }
+}
+function applySmartCanvasLogServerCanvas(serverCanvas){
+    if(!serverCanvas || !canvas || String(serverCanvas.id || '') !== String(canvasId || '')) return false;
+    const localViewport = {...viewport};
+    canvas = {...canvas, ...serverCanvas, viewport:localViewport};
+    canvas.logs = Array.isArray(serverCanvas.logs) ? serverCanvas.logs : [];
+    nodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
+    canvas.nodes = nodes;
+    canvas.connections = Array.isArray(serverCanvas.connections) ? serverCanvas.connections : [];
+    canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
+    render();
+    if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
+    if(nodeGenerationHistoryPanelNodeId) renderNodeGenerationHistoryPanel();
+    resumeSmartPendingTasks();
+    resumeJimengPendingNodes();
+    return true;
+}
+async function reloadSmartCanvasAfterLogConflict(data={}){
+    const included = window.CanvasLogCleanup?.serverCanvas(data);
+    if(included && applySmartCanvasLogServerCanvas(included)) return true;
+    try {
+        const response = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {cache:'no-store'});
+        if(!response.ok) return false;
+        const latest = await response.json();
+        return applySmartCanvasLogServerCanvas(latest.canvas);
+    } catch(error) {
+        return false;
+    }
+}
+function smartCanvasLogDeleteSummary(data={}){
+    const notes = [tr('canvas.logDeleted')];
+    if(data.removed_files?.length) notes.push(tr('canvas.logMediaRemoved').replace('{n}', data.removed_files.length));
+    if(data.reset_node_ids?.length) notes.push(tr('canvas.logNodesReset').replace('{n}', data.reset_node_ids.length));
+    if(data.skipped_referenced?.length) notes.push(tr('canvas.logMediaReferenced').replace('{n}', data.skipped_referenced.length));
+    return notes.join(' · ');
+}
+async function deleteSmartCanvasLogEntry(logId, deleteMedia=false){
+    if(!canvas || !canvasId || !logId || smartCanvasLogDeleteBusy.has(logId)) return;
+    const confirmText = deleteMedia ? tr('canvas.deleteLogMediaConfirm') : tr('canvas.deleteLogConfirm');
+    if(!confirm(confirmText)) return;
+    smartCanvasLogDeleteBusy.add(logId);
+    renderSmartCanvasLog();
+    toast(tr('canvas.logDeleting'));
+    try {
+        await flushSmartCanvasBeforeLogDelete();
+        if(!window.CanvasLogCleanup) throw new Error(tr('canvas.logDeleteFailed'));
+        const {response, data} = await CanvasLogCleanup.request({
+            canvasId,
+            logId,
+            deleteMedia,
+            baseUpdatedAt:Number(canvas.updated_at || 0),
+        });
+        if(response.status === 409){
+            await reloadSmartCanvasAfterLogConflict(data);
+            renderSmartCanvasLog();
+            toast(tr('canvas.logStale'));
+            return;
+        }
+        if(!response.ok){
+            throw new Error(CanvasLogCleanup.errorMessage(data, tr('canvas.logDeleteFailed')));
+        }
+        if(!data.canvas || !applySmartCanvasLogServerCanvas(data.canvas)){
+            throw new Error(tr('canvas.logDeleteFailed'));
+        }
+        renderSmartCanvasLog();
+        toast(smartCanvasLogDeleteSummary(data));
+    } catch(err) {
+        toast(err?.message || tr('canvas.logDeleteFailed'));
+    } finally {
+        smartCanvasLogDeleteBusy.delete(logId);
+        renderSmartCanvasLog();
+    }
+}
 function renderSmartCanvasLog(){
     const logs = canvas?.logs || [];
     smartLogList.innerHTML = logs.length ? logs.map(log => {
@@ -8034,7 +8117,8 @@ function renderSmartCanvasLog(){
             taskId ? `ID ${taskId}` : '',
             backend
         ].filter(Boolean);
-        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}">
+        const deleting = smartCanvasLogDeleteBusy.has(log.id);
+        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''} ${deleting ? 'is-deleting' : ''}" data-canvas-log-id="${escapeAttr(log.id || '')}">
             <div class="log-main">
                 <div class="log-meta">
                     <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
@@ -8045,6 +8129,10 @@ function renderSmartCanvasLog(){
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
+                <div class="log-actions">
+                    <button type="button" data-log-delete="record" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="list-x"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogRecordOnly'))}</span></button>
+                    <button type="button" class="danger" data-log-delete="media" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="trash-2"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogAndMedia'))}</span></button>
+                </div>
             </div>
             <div class="log-thumbs">${thumbs}</div>
         </div>`;
@@ -8074,6 +8162,13 @@ function renderSmartCanvasLog(){
     };
     bindLogCopy('[data-prompt]', 'prompt');
     bindLogCopy('[data-error]', 'error');
+    smartLogList.querySelectorAll('[data-log-delete]').forEach(button => {
+        button.onclick = event => {
+            event.stopPropagation();
+            const logId = button.closest('[data-canvas-log-id]')?.dataset.canvasLogId || '';
+            deleteSmartCanvasLogEntry(logId, button.dataset.logDelete === 'media');
+        };
+    });
     refreshIcons();
 }
 function openSmartCanvasLog(){
