@@ -46,3 +46,8 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Machine-local LaunchAgent controls
+/Infinite-Canvas-启动.command
+/Infinite-Canvas-停止.command
+/Infinite-Canvas-重启.command
