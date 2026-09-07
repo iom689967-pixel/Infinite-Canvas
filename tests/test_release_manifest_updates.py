@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,6 +168,16 @@ class ReleaseManifestUpdateTests(unittest.TestCase):
         source = inspect.getsource(main.update_from_github)
         self.assertIn("for rel in files", source)
         self.assertNotIn("rmtree(static_dir", source)
+
+    def test_23_transient_raw_download_is_retried_once(self):
+        with tempfile.TemporaryDirectory() as staging, patch.object(
+            main,
+            "github_bytes",
+            side_effect=[urllib.error.URLError("temporary TLS failure"), b"ok"],
+        ) as get_bytes:
+            main.download_github_update_files(["main.py"], staging)
+            self.assertEqual(Path(staging, "main.py").read_bytes(), b"ok")
+        self.assertEqual(get_bytes.call_count, 2)
 
 
 if __name__ == "__main__":

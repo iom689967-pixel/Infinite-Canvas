@@ -2184,9 +2184,14 @@ def fetch_release_manifest() -> Tuple[Dict[str, Any], bytes]:
 # 缓存 GitHub Tree API 响应（含 ETag），减少 60 次/h 限流压力
 GITHUB_TREE_CACHE: Dict[str, Any] = {"etag": "", "data": None, "expires_at": 0.0}
 
-def github_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> requests.Response:
+def github_get(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 30,
+    session: Optional[requests.Session] = None,
+) -> requests.Response:
     try:
-        response = requests.get(
+        response = (session or requests).get(
             url,
             headers=headers or {},
             timeout=timeout,
@@ -2227,8 +2232,13 @@ def github_json(url: str, use_etag_cache: bool = False):
             return GITHUB_TREE_CACHE["data"]
         raise
 
-def github_bytes(url: str) -> bytes:
-    resp = github_get(url, headers={"User-Agent": "Infinite-Canvas-Updater"}, timeout=60)
+def github_bytes(url: str, session: Optional[requests.Session] = None) -> bytes:
+    resp = github_get(
+        url,
+        headers={"User-Agent": "Infinite-Canvas-Updater"},
+        timeout=60,
+        session=session,
+    )
     return resp.content
 
 def ensure_no_symlink_components(base_dir: str, relative_path: str) -> None:
@@ -2253,11 +2263,20 @@ def write_staged_update_file(staging_root: str, rel: str, data: bytes, mode: str
     os.chmod(stage_path, 0o755 if mode == "100755" else 0o644)
 
 def download_github_update_files(files: List[str], staging_root: str, file_modes: Optional[Dict[str, str]] = None) -> None:
-    for rel in files:
-        safe_update_target(rel)
-        raw_url = f"{GITHUB_RAW_ROOT}/{urllib.parse.quote(rel, safe='/')}"
-        data = github_bytes(raw_url)
-        write_staged_update_file(staging_root, rel, data, (file_modes or {}).get(rel, "100644"))
+    with requests.Session() as session:
+        for rel in files:
+            safe_update_target(rel)
+            raw_url = f"{GITHUB_RAW_ROOT}/{urllib.parse.quote(rel, safe='/')}"
+            for attempt in range(2):
+                try:
+                    data = github_bytes(raw_url, session=session)
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except urllib.error.URLError:
+                    if attempt:
+                        raise
+            write_staged_update_file(staging_root, rel, data, (file_modes or {}).get(rel, "100644"))
 
 def safe_update_target(path: str) -> str:
     try:
