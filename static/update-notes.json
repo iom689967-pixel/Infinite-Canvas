@@ -1,18 +1,22 @@
 {
-  "version": "2026.08.28",
-  "updated_at": "2026-08-28T09:27:36+08:00",
+  "version": "2026.09.07",
+  "updated_at": "2026-09-07T23:30:00+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "
-此项目已停更，全新版本请前往：DX-OS.com下载。
-功能特性：
-1. 画布功能全新升级，支持Agent/一键分层/多人协同/共享画布/免费公网图床
-2. 软件内即可启动ComfyUI/映射工作流等
-3. 海量免费APP可下载
-4. 全新的账号管理/APP权限系统
-5. 提供开发者模式，可以开发自己公司的业务软件离线运行
-"
+      "text": "建立 Mio 自维护 Infinite-Canvas 更新通道"
+    },
+    {
+      "type": "feature",
+      "text": "Smart Canvas 支持 Prompt LLM 停止运行、真正取消上游请求，并防止旧结果回写"
+    },
+    {
+      "type": "improvement",
+      "text": "完善 Canvas 引用选择、连接交互和生成状态清理"
+    },
+    {
+      "type": "security",
+      "text": "强化运行数据与源码边界，更新仅替换 main.py、VERSION 和 static 正式资源"
     }
   ]
 }
