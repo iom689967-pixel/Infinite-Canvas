@@ -1564,8 +1564,9 @@ function smartConnectionSelectionKey(connection){
     ]);
 }
 function isEditableTarget(target){
-    const el = target || document.activeElement;
-    return !!el?.closest?.('input, textarea, select, option, button, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .prompt-node-control, .prompt-input');
+    const selector = 'input, textarea, select, option, button, [contenteditable]:not([contenteditable="false"]), .nodrag, .nopan, .prompt-node-control, .prompt-input';
+    const matches = el => !!el?.closest?.(selector);
+    return matches(target) || matches(document.activeElement);
 }
 function safeScale(value){
     const n = Number(value);
@@ -10470,6 +10471,10 @@ function bindConnectionEvents(){
     cacheConnectionDomElements(elements);
     elements.forEach(el => {
         if(el.classList.contains('conn-hit')){
+            el.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                selectConnectionsFromSpec(el.dataset.connIndex, {append:Boolean(e.shiftKey || e.metaKey || e.ctrlKey)});
+            });
             el.addEventListener('dblclick', e => {
                 e.preventDefault(); e.stopPropagation();
                 disconnectConnections(el.dataset.connIndex);
@@ -12409,6 +12414,53 @@ function deleteNodeFromButton(id){
 }
 function disconnectConnection(index){
     disconnectConnections([index]);
+}
+function connectionSelectionKeysFromSpec(spec){
+    if(!canvas || !Array.isArray(canvas.connections)) return new Set();
+    return new Set(String(spec || '').split(',')
+        .map(value => Number(value))
+        .filter(index => Number.isInteger(index) && index >= 0 && index < canvas.connections.length)
+        .map(index => smartConnectionSelectionKey(canvas.connections[index])));
+}
+function selectConnectionsFromSpec(spec, {append=false}={}){
+    const keys = connectionSelectionKeysFromSpec(spec);
+    if(!keys.size) return false;
+    const previousSelection = smartSelectionUiState();
+    if(append){
+        const nextKeys = new Set(selectedConnectionKeys);
+        const remove = [...keys].every(key => nextKeys.has(key));
+        keys.forEach(key => remove ? nextKeys.delete(key) : nextKeys.add(key));
+        selectedConnectionKeys = nextKeys;
+    } else {
+        selectedConnectionKeys = keys;
+        selectedId = '';
+        selectedIds = [];
+    }
+    selectedImage = {nodeId:'', index:-1};
+    updateSmartSelectionUI(previousSelection);
+    return true;
+}
+function selectedConnectionIndices(){
+    if(!canvas || !Array.isArray(canvas.connections) || !selectedConnectionKeys.size) return [];
+    return canvas.connections.reduce((indices, connection, index) => {
+        if(selectedConnectionKeys.has(smartConnectionSelectionKey(connection))) indices.push(index);
+        return indices;
+    }, []);
+}
+function disconnectSelectedConnections(){
+    const indices = selectedConnectionIndices();
+    if(!indices.length){
+        selectedConnectionKeys.clear();
+        return false;
+    }
+    disconnectConnections(indices);
+    return true;
+}
+function disconnectSelectedConnectionsFromKeyboard(event){
+    if(!event || (event.key !== 'Delete' && event.key !== 'Backspace') || !selectedConnectionKeys.size || isEditableTarget(event.target)) return false;
+    event.preventDefault();
+    disconnectSelectedConnections();
+    return true;
 }
 // 断开一条或多条连线（合并到分组的连线会一次性断开其下所有成员连线）。spec 可为索引数组或逗号分隔字符串。
 function disconnectConnections(spec){
@@ -22095,7 +22147,13 @@ window.addEventListener('keydown', e => {
         performRedo();
         return;
     }
-    if((e.key === 'Delete' || e.key === 'Backspace') && (selectedId || selectedIds.length) && !isEditableTarget(e.target)){
+    const isDeleteShortcut = e.key === 'Delete' || e.key === 'Backspace';
+    if(isDeleteShortcut && e.repeat && !isEditableTarget(e.target)){
+        e.preventDefault();
+        return;
+    }
+    if(disconnectSelectedConnectionsFromKeyboard(e)) return;
+    if(isDeleteShortcut && (selectedId || selectedIds.length) && !isEditableTarget(e.target)){
         e.preventDefault();
         const ids = selectedIds.length ? selectedIds.slice() : [selectedId];
         pushUndo();
