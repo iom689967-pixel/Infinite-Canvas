@@ -2889,6 +2889,9 @@ CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
 CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
 CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
+CANVAS_LLM_ACTIVE_REQUESTS: Dict[str, asyncio.Task] = {}
+CANVAS_LLM_CANCEL_MARKERS: Dict[str, float] = {}
+CANVAS_LLM_CANCEL_MARKER_TTL = 30.0
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -3043,6 +3046,7 @@ class CanvasLLMRequest(BaseModel):
     messages: List[Dict[str, Any]] = []
     provider: str = "comfly"
     ms_model: str = ""
+    request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
     videos: List[str] = []   # 可以是 /output/*.mp4、/assets/*.mp4 本地路径 或 http(s) URL 或 data URL
 
@@ -3053,6 +3057,9 @@ class CanvasLLMRequest(BaseModel):
             if isinstance(item, dict):
                 validate_llm_message_content(item.get("content"), f"messages[{index}].content")
         return messages
+
+class CanvasLLMCancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
 
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
@@ -16899,10 +16906,63 @@ async def canvas_video(payload: CanvasVideoRequest):
 
 # --- Canvas LLM ---
 
-@app.post("/api/canvas-llm")
-async def canvas_llm(payload: CanvasLLMRequest):
-    request_id = uuid.uuid4().hex[:12]
-    started_at = time.monotonic()
+def cleanup_canvas_llm_cancel_markers(now=None):
+    current = time.monotonic() if now is None else now
+    expired = [
+        request_id for request_id, marked_at in CANVAS_LLM_CANCEL_MARKERS.items()
+        if current - marked_at >= CANVAS_LLM_CANCEL_MARKER_TTL
+    ]
+    for request_id in expired:
+        CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
+
+def mark_canvas_llm_cancelled(request_id):
+    cleanup_canvas_llm_cancel_markers()
+    marked_at = time.monotonic()
+    CANVAS_LLM_CANCEL_MARKERS[request_id] = marked_at
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(
+            CANVAS_LLM_CANCEL_MARKER_TTL,
+            lambda: CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
+            if CANVAS_LLM_CANCEL_MARKERS.get(request_id) == marked_at else None,
+        )
+    except RuntimeError:
+        pass
+
+def log_canvas_llm_cancelled(request_id, payload, started_at, phase):
+    print(json.dumps({
+        "event": "canvas_llm_cancelled",
+        "request_id": request_id,
+        "status": "cancelled",
+        "phase": phase,
+        "provider": payload.provider,
+        "model": payload.model,
+        "elapsed_seconds": round(time.monotonic() - started_at, 3),
+    }, ensure_ascii=False), flush=True)
+
+@app.post("/api/canvas-llm/cancel")
+async def cancel_canvas_llm(payload: CanvasLLMCancelRequest):
+    request_id = payload.request_id
+    mark_canvas_llm_cancelled(request_id)
+    task = CANVAS_LLM_ACTIVE_REQUESTS.get(request_id)
+    active = bool(task and not task.done())
+    if active:
+        task.cancel()
+    print(json.dumps({
+        "event": "canvas_llm_cancel_requested",
+        "request_id": request_id,
+        "status": "cancelled",
+        "active": active,
+    }, ensure_ascii=False), flush=True)
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "cancelled": True,
+        "active": active,
+        "pending_registration": not active,
+    }
+
+async def _canvas_llm_impl(payload: CanvasLLMRequest, request_id: str, started_at: float):
     print(json.dumps({
         "event": "canvas_llm_start",
         "request_id": request_id,
@@ -17052,6 +17112,30 @@ async def canvas_llm(payload: CanvasLLMRequest):
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
     return {"text": text, "model": model, "raw_usage": chat_usage_from_response(raw_data)}
+
+@app.post("/api/canvas-llm")
+async def canvas_llm(payload: CanvasLLMRequest):
+    request_id = payload.request_id or uuid.uuid4().hex
+    started_at = time.monotonic()
+    cleanup_canvas_llm_cancel_markers()
+    if CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None) is not None:
+        log_canvas_llm_cancelled(request_id, payload, started_at, "before_start")
+        raise HTTPException(status_code=499, detail="Canvas LLM 请求已由用户取消。")
+    current_task = asyncio.current_task()
+    existing_task = CANVAS_LLM_ACTIVE_REQUESTS.get(request_id)
+    if existing_task and existing_task is not current_task and not existing_task.done():
+        raise HTTPException(status_code=409, detail="Canvas LLM request_id 正在使用中。")
+    if current_task:
+        CANVAS_LLM_ACTIVE_REQUESTS[request_id] = current_task
+    try:
+        return await _canvas_llm_impl(payload, request_id, started_at)
+    except asyncio.CancelledError as exc:
+        log_canvas_llm_cancelled(request_id, payload, started_at, "active_request")
+        raise HTTPException(status_code=499, detail="Canvas LLM 请求已由用户取消。") from exc
+    finally:
+        if CANVAS_LLM_ACTIVE_REQUESTS.get(request_id) is current_task:
+            CANVAS_LLM_ACTIVE_REQUESTS.pop(request_id, None)
+        CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None)
 
 # --- 对话管理 ---
 

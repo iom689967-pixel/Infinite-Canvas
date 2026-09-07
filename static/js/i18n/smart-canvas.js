@@ -203,6 +203,8 @@
         "smart.promptLlmEnableSystem": { zh: "启用系统提示词", en: "Enable system prompt" },
         "smart.promptLlmDisableSystem": { zh: "关闭系统提示词", en: "Disable system prompt" },
         "smart.promptLlmNeedText": { zh: "请先输入给 LLM 的文本", en: "Enter text for the LLM first" },
+        "smart.promptLlmStopped": { zh: "LLM 已停止", en: "LLM stopped" },
+        "smart.promptLlmTimeout": { zh: "LLM 请求已超时", en: "LLM request timed out" },
         "smart.promptLlmFailed": { zh: "LLM 运行失败", en: "LLM run failed" },
         "smart.loopPromptHintFound": { zh: "识别到 {n} 条提示词，按计数轮流输出", en: "Found {n} prompt(s); outputs rotate by count" },
         "smart.loopPromptHintVariable": { zh: "可使用 [计数] 作为变量", en: "Use [Count] as a variable" },
