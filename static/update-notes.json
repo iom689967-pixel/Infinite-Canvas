@@ -1,7 +1,15 @@
 {
-  "version": "2026.09.07",
-  "updated_at": "2026-09-07T23:30:00+08:00",
+  "version": "2026.09.08",
+  "updated_at": "2026-09-08T12:00:00+08:00",
   "items": [
+    {
+      "type": "feature",
+      "text": "正式启用 Release Manifest，由 stable 发行清单统一定义程序更新范围"
+    },
+    {
+      "type": "security",
+      "text": "增加发行清单校验、路径穿越与符号链接防护，并保留本地用户数据硬保护"
+    },
     {
       "type": "feature",
       "text": "建立 Mio 自维护 Infinite-Canvas 更新通道"
@@ -16,7 +24,7 @@
     },
     {
       "type": "security",
-      "text": "强化运行数据与源码边界，更新仅替换 main.py、VERSION 和 static 正式资源"
+      "text": "强化运行数据与源码边界，更新只替换发行清单列出的正式程序资源"
     }
   ]
 }

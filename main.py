@@ -172,13 +172,14 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.09.07"
+APP_VERSION = "2026.09.08"
 GITHUB_RELEASE_REPO = "iom689967-pixel/Infinite-Canvas"
 GITHUB_RELEASE_BRANCH = "stable"
 GITHUB_REPO_URL = f"https://github.com/{GITHUB_RELEASE_REPO}"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_RELEASE_REPO}/{GITHUB_RELEASE_BRANCH}/VERSION"
 GITHUB_TREE_URL = f"https://api.github.com/repos/{GITHUB_RELEASE_REPO}/git/trees/{GITHUB_RELEASE_BRANCH}?recursive=1"
 GITHUB_RAW_ROOT = f"https://raw.githubusercontent.com/{GITHUB_RELEASE_REPO}/{GITHUB_RELEASE_BRANCH}"
+GITHUB_RELEASE_MANIFEST_URL = GITHUB_RAW_ROOT + "/release-manifest.json"
 GITHUB_UPDATE_NOTES_URL = GITHUB_RAW_ROOT + "/static/update-notes.json"
 # 仅供维护者人工审查原项目变化；普通用户的检测、下载和一键更新不会使用此地址。
 UPSTREAM_REPO_URL = "https://github.com/hero8152/Infinite-Canvas"
@@ -1886,6 +1887,7 @@ def app_info():
         "version_url": GITHUB_VERSION_URL,
         "tree_url": GITHUB_TREE_URL,
         "raw_root": GITHUB_RAW_ROOT,
+        "release_manifest_url": GITHUB_RELEASE_MANIFEST_URL,
         "update_notes_url": GITHUB_UPDATE_NOTES_URL,
         "sources": {
             "github": {
@@ -1895,6 +1897,7 @@ def app_info():
                 "version_url": GITHUB_VERSION_URL,
                 "tree_url": GITHUB_TREE_URL,
                 "raw_root": GITHUB_RAW_ROOT,
+                "release_manifest_url": GITHUB_RELEASE_MANIFEST_URL,
                 "update_notes_url": GITHUB_UPDATE_NOTES_URL,
             },
         },
@@ -1936,6 +1939,7 @@ def connectivity_probe(name: str, url: str, timeout: float = 5.0) -> Dict[str, A
 
 def update_connectivity_targets() -> List[Tuple[str, str, str, bool]]:
     return [
+        ("Stable 发行清单", GITHUB_RELEASE_MANIFEST_URL, "github", True),
         ("Stable 更新列表", GITHUB_TREE_URL, "github", True),
         ("Stable 版本文件", GITHUB_VERSION_URL, "github", True),
         ("发行仓库", GITHUB_REPO_URL, "github", False),
@@ -2039,10 +2043,15 @@ def check_update():
         "reachable": bool(github.get("ok")),
     }
 
-UPDATE_FILE_ALLOWLIST = frozenset({"main.py", "VERSION"})
-UPDATE_PREFIX_ALLOWLIST = ("static/",)
-UPDATE_FILE_DENYLIST = frozenset({"history.json"})
-UPDATE_PREFIX_DENYLIST = (
+RELEASE_MANIFEST_SCHEMA_VERSION = 1
+RELEASE_MANIFEST_FILENAME = "release-manifest.json"
+LOCAL_UPDATE_PROTECTED_FILES = frozenset({
+    "history.json",
+    "infinite-canvas-启动.command",
+    "infinite-canvas-停止.command",
+    "infinite-canvas-重启.command",
+})
+LOCAL_UPDATE_PROTECTED_PREFIXES = (
     "api/",
     "data/",
     "assets/",
@@ -2050,16 +2059,127 @@ UPDATE_PREFIX_DENYLIST = (
     ".runtime/",
     ".tools/",
     ".launchd/",
+    ".venv/",
+    ".python/",
+    ".uv-cache/",
+    ".git/",
+    "__pycache__/",
+    "logs/",
+    "workflows/custom/",
+    "workflows/自定义/",
 )
 
+class ReleaseManifestError(RuntimeError):
+    pass
+
+def normalize_release_path(value: Any, *, allow_directory: bool = True) -> str:
+    """Validate a repository-relative POSIX path without silently repairing it."""
+    if not isinstance(value, str):
+        raise ReleaseManifestError("发行清单路径必须是字符串")
+    raw = value
+    if not raw or raw != raw.strip() or "\x00" in raw or "\\" in raw:
+        raise ReleaseManifestError(f"发行清单路径不合法：{raw!r}")
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        raise ReleaseManifestError(f"发行清单禁止绝对路径：{raw}")
+    is_directory = raw.endswith("/")
+    if is_directory and not allow_directory:
+        raise ReleaseManifestError(f"发行清单需要文件路径：{raw}")
+    body = raw[:-1] if is_directory else raw
+    parts = body.split("/")
+    if not body or any(part in {"", ".", ".."} for part in parts):
+        raise ReleaseManifestError(f"发行清单禁止路径穿越：{raw}")
+    return body + ("/" if is_directory else "")
+
+def release_path_matches(path: str, scope: str) -> bool:
+    path_key = path.casefold().rstrip("/")
+    scope_key = scope.casefold().rstrip("/")
+    if scope.endswith("/"):
+        return path_key == scope_key or path_key.startswith(scope_key + "/")
+    return path_key == scope_key
+
+def release_scopes_overlap(left: str, right: str) -> bool:
+    left_key = left.casefold().rstrip("/")
+    right_key = right.casefold().rstrip("/")
+    return (
+        left_key == right_key
+        or (left.endswith("/") and right_key.startswith(left_key + "/"))
+        or (right.endswith("/") and left_key.startswith(right_key + "/"))
+    )
+
+def locally_protected_update_path(path: str) -> bool:
+    try:
+        rel = normalize_release_path(path, allow_directory=True)
+    except ReleaseManifestError:
+        return True
+    lowered = rel.casefold().rstrip("/")
+    if lowered in LOCAL_UPDATE_PROTECTED_FILES:
+        return True
+    return any(release_path_matches(rel, prefix) for prefix in LOCAL_UPDATE_PROTECTED_PREFIXES)
+
 def update_allowed_file(path: str) -> bool:
-    path = str(path or "").replace("\\", "/").lstrip("/")
-    if not path or any(part in {"", ".", ".."} for part in path.split("/")):
+    """Local immutable safety guard; the remote manifest supplies the release scope."""
+    try:
+        rel = normalize_release_path(path, allow_directory=False)
+    except ReleaseManifestError:
         return False
-    lowered = path.casefold()
-    if lowered in UPDATE_FILE_DENYLIST or lowered.startswith(UPDATE_PREFIX_DENYLIST):
-        return False
-    return path in UPDATE_FILE_ALLOWLIST or path.startswith(UPDATE_PREFIX_ALLOWLIST)
+    return not locally_protected_update_path(rel)
+
+def validate_release_version(value: Any) -> str:
+    version = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", version):
+        raise ReleaseManifestError("发行清单 version 格式不合法")
+    try:
+        datetime.datetime.strptime(version, "%Y.%m.%d")
+    except ValueError as exc:
+        raise ReleaseManifestError("发行清单 version 不是有效日期") from exc
+    return version
+
+def validate_release_manifest(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ReleaseManifestError("发行清单不可用：根节点必须是 JSON 对象")
+    schema = payload.get("schema_version")
+    if type(schema) is not int or schema != RELEASE_MANIFEST_SCHEMA_VERSION:
+        raise ReleaseManifestError(f"发行清单不可用：不支持 schema_version {schema!r}")
+    version = validate_release_version(payload.get("version"))
+    raw_include = payload.get("include")
+    raw_protected = payload.get("protected")
+    if not isinstance(raw_include, list) or not raw_include:
+        raise ReleaseManifestError("发行清单不可用：include 必须是非空数组")
+    if not isinstance(raw_protected, list) or not raw_protected:
+        raise ReleaseManifestError("发行清单不可用：protected 必须是非空数组")
+    include = [normalize_release_path(item) for item in raw_include]
+    protected = [normalize_release_path(item) for item in raw_protected]
+    if len({item.casefold() for item in include}) != len(include):
+        raise ReleaseManifestError("发行清单不可用：include 存在重复路径")
+    if len({item.casefold() for item in protected}) != len(protected):
+        raise ReleaseManifestError("发行清单不可用：protected 存在重复路径")
+    effective_protected = list(protected) + list(LOCAL_UPDATE_PROTECTED_FILES) + list(LOCAL_UPDATE_PROTECTED_PREFIXES)
+    for included in include:
+        conflict = next((item for item in effective_protected if release_scopes_overlap(included, item)), "")
+        if conflict:
+            raise ReleaseManifestError(f"发行清单不可用：include 与 protected 冲突：{included} / {conflict}")
+    if "VERSION" not in include:
+        raise ReleaseManifestError("发行清单不可用：include 必须包含 VERSION")
+    return {
+        "schema_version": schema,
+        "version": version,
+        "include": include,
+        "protected": protected,
+    }
+
+def parse_release_manifest_bytes(data: bytes) -> Dict[str, Any]:
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseManifestError("发行清单不可用：JSON 损坏") from exc
+    return validate_release_manifest(payload)
+
+def fetch_release_manifest() -> Tuple[Dict[str, Any], bytes]:
+    try:
+        raw = github_bytes(GITHUB_RELEASE_MANIFEST_URL)
+    except Exception as exc:
+        raise ReleaseManifestError(f"发行清单不可用：无法下载 ({exc})") from exc
+    return parse_release_manifest_bytes(raw), raw
 
 # 缓存 GitHub Tree API 响应（含 ETag），减少 60 次/h 限流压力
 GITHUB_TREE_CACHE: Dict[str, Any] = {"etag": "", "data": None, "expires_at": 0.0}
@@ -2111,27 +2231,46 @@ def github_bytes(url: str) -> bytes:
     resp = github_get(url, headers={"User-Agent": "Infinite-Canvas-Updater"}, timeout=60)
     return resp.content
 
-def download_github_update_files(files: List[str], staging_root: str) -> None:
+def ensure_no_symlink_components(base_dir: str, relative_path: str) -> None:
+    current = os.path.abspath(base_dir)
+    if os.path.islink(current):
+        raise ValueError(f"更新根目录不能是符号链接：{current}")
+    for part in relative_path.split("/"):
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and os.path.islink(current):
+            raise ValueError(f"更新路径禁止经过符号链接：{relative_path}")
+
+def write_staged_update_file(staging_root: str, rel: str, data: bytes, mode: str = "100644") -> None:
     staging_root_abs = os.path.abspath(staging_root)
+    safe_update_target(rel)
+    stage_path = os.path.abspath(os.path.join(staging_root_abs, *rel.split("/")))
+    if os.path.commonpath([staging_root_abs, stage_path]) != staging_root_abs:
+        raise ValueError(f"更新暂存路径不安全：{rel}")
+    ensure_no_symlink_components(staging_root_abs, rel)
+    os.makedirs(os.path.dirname(stage_path), exist_ok=True)
+    with open(stage_path, "wb") as f:
+        f.write(data)
+    os.chmod(stage_path, 0o755 if mode == "100755" else 0o644)
+
+def download_github_update_files(files: List[str], staging_root: str, file_modes: Optional[Dict[str, str]] = None) -> None:
     for rel in files:
         safe_update_target(rel)
         raw_url = f"{GITHUB_RAW_ROOT}/{urllib.parse.quote(rel, safe='/')}"
         data = github_bytes(raw_url)
-        stage_path = os.path.abspath(os.path.join(staging_root_abs, *rel.split("/")))
-        if os.path.commonpath([staging_root_abs, stage_path]) != staging_root_abs:
-            raise ValueError(f"更新暂存路径不安全：{rel}")
-        os.makedirs(os.path.dirname(stage_path), exist_ok=True)
-        with open(stage_path, "wb") as f:
-            f.write(data)
+        write_staged_update_file(staging_root, rel, data, (file_modes or {}).get(rel, "100644"))
 
 def safe_update_target(path: str) -> str:
-    rel = str(path or "").replace("\\", "/").lstrip("/")
+    try:
+        rel = normalize_release_path(path, allow_directory=False)
+    except ReleaseManifestError as exc:
+        raise ValueError(str(exc)) from exc
     if not update_allowed_file(rel):
-        raise ValueError(f"更新文件不在允许范围：{rel}")
+        raise ValueError(f"更新文件命中本地保护范围：{rel}")
     target = os.path.abspath(os.path.join(BASE_DIR, *rel.split("/")))
     base = os.path.abspath(BASE_DIR)
     if os.path.commonpath([base, target]) != base:
         raise ValueError(f"更新路径不安全：{rel}")
+    ensure_no_symlink_components(base, rel)
     return target
 
 def safe_static_dir() -> str:
@@ -2140,6 +2279,7 @@ def safe_static_dir() -> str:
     base = os.path.abspath(BASE_DIR)
     if target != expected or os.path.commonpath([base, target]) != base:
         raise RuntimeError(f"static 路径不安全：{target}")
+    ensure_no_symlink_components(base, "static")
     return target
 
 def schedule_self_restart(delay_seconds: int = 3) -> bool:
@@ -2220,78 +2360,139 @@ class UpdateRequest(BaseModel):
     auto_restart: bool = False
     restart_delay: int = 3
 
-def github_update_file_list() -> Tuple[List[str], List[str], List[str]]:
-    tree_data = github_json(GITHUB_TREE_URL, use_etag_cache=True)
+def release_update_file_list(
+    manifest: Dict[str, Any], tree_data: Dict[str, Any]
+) -> Tuple[List[str], List[str], List[str], Dict[str, str]]:
+    manifest = validate_release_manifest(manifest)
     entries = tree_data.get("tree") or []
     static_files = []
     root_files = []
+    file_modes: Dict[str, str] = {}
+    matched_scopes = set()
     for entry in entries:
-        path = str(entry.get("path") or "").replace("\\", "/")
-        if entry.get("type") == "blob" and update_allowed_file(path):
-            if path.startswith("static/"):
-                static_files.append(path)
-            else:
-                root_files.append(path)
-    if "main.py" not in root_files:
-        root_files.append("main.py")
-    if "VERSION" not in root_files:
-        root_files.append("VERSION")
+        try:
+            path = normalize_release_path(entry.get("path"), allow_directory=False)
+        except ReleaseManifestError:
+            continue
+        matching = [scope for scope in manifest["include"] if release_path_matches(path, scope)]
+        if not matching:
+            continue
+        if entry.get("type") == "tree":
+            continue
+        matched_scopes.update(matching)
+        if any(release_path_matches(path, item) for item in manifest["protected"]):
+            raise ReleaseManifestError(f"发行清单包含 protected 文件：{path}")
+        if locally_protected_update_path(path):
+            raise ReleaseManifestError(f"发行清单触碰本地硬保护路径：{path}")
+        if entry.get("type") != "blob" or entry.get("mode") == "120000":
+            raise ReleaseManifestError(f"发行清单禁止符号链接或非普通文件：{path}")
+        mode = str(entry.get("mode") or "100644")
+        if mode not in {"100644", "100755"}:
+            raise ReleaseManifestError(f"发行清单文件模式不受支持：{path} ({mode})")
+        file_modes[path] = mode
+        if path.startswith("static/"):
+            static_files.append(path)
+        else:
+            root_files.append(path)
+    missing_scopes = [scope for scope in manifest["include"] if scope not in matched_scopes]
+    if missing_scopes:
+        raise ReleaseManifestError(f"发行清单路径在 stable 中不存在：{', '.join(missing_scopes)}")
     static_files = sorted(set(static_files))
     root_files = sorted(set(root_files))
     files = root_files + static_files
-    if not static_files:
-        raise RuntimeError("GitHub 未返回 static 文件，已取消更新")
+    if not files:
+        raise ReleaseManifestError("发行清单没有展开出任何文件")
+    return root_files, static_files, files, file_modes
+
+def github_update_file_list(manifest: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
+    tree_data = github_json(GITHUB_TREE_URL, use_etag_cache=True)
+    root_files, static_files, files, _ = release_update_file_list(manifest, tree_data)
     return root_files, static_files, files
 
-def staged_update_file_list(staging_root: str) -> Tuple[List[str], List[str], List[str]]:
+def staged_update_file_list(staging_root: str, expected_files: List[str]) -> Tuple[List[str], List[str], List[str]]:
     root_files = []
     static_files = []
     for root_dir, _, names in os.walk(staging_root):
         for name in names:
             path = os.path.abspath(os.path.join(root_dir, name))
             rel = os.path.relpath(path, staging_root).replace("\\", "/")
-            if not update_allowed_file(rel):
-                continue
+            if rel not in expected_files:
+                raise RuntimeError(f"更新暂存出现清单外文件：{rel}")
             if rel.startswith("static/"):
                 static_files.append(rel)
             else:
                 root_files.append(rel)
-    if "main.py" not in root_files or "VERSION" not in root_files:
-        raise RuntimeError("更新源缺少 main.py 或 VERSION")
-    if not static_files:
-        raise RuntimeError("更新源未返回 static 文件，已取消更新")
     root_files = sorted(set(root_files))
     static_files = sorted(set(static_files))
-    return root_files, static_files, root_files + static_files
+    actual = sorted(root_files + static_files)
+    if actual != sorted(expected_files):
+        missing = sorted(set(expected_files) - set(actual))
+        raise RuntimeError(f"更新暂存缺少清单文件：{', '.join(missing)}")
+    return root_files, static_files, actual
 
 UPDATE_SOURCE_LABELS = {"github": "GitHub stable"}
 
-def stage_release_update(staging_root: str) -> Tuple[List[str], List[str], List[str]]:
+def stage_release_update(staging_root: str) -> Tuple[List[str], List[str], List[str], Dict[str, Any]]:
     """Download the single official stable release source into staging."""
-    root_files, static_files, files = github_update_file_list()
-    download_github_update_files(files, staging_root)
-    return root_files, static_files, files
+    manifest, manifest_bytes = fetch_release_manifest()
+    tree_data = github_json(GITHUB_TREE_URL, use_etag_cache=True)
+    root_files, static_files, files, file_modes = release_update_file_list(manifest, tree_data)
+    remaining = [item for item in files if item != RELEASE_MANIFEST_FILENAME]
+    if RELEASE_MANIFEST_FILENAME in files:
+        write_staged_update_file(
+            staging_root,
+            RELEASE_MANIFEST_FILENAME,
+            manifest_bytes,
+            file_modes.get(RELEASE_MANIFEST_FILENAME, "100644"),
+        )
+    download_github_update_files(remaining, staging_root, file_modes)
+    staged_update_file_list(staging_root, files)
+    return root_files, static_files, files, manifest
 
-def validate_staged_update(staging_root: str, root_files: List[str], static_files: List[str]) -> None:
+def validate_staged_update(
+    staging_root: str,
+    root_files: List[str],
+    static_files: List[str],
+    release_manifest: Dict[str, Any],
+) -> None:
     """Reject incomplete or syntactically invalid downloads before touching live code."""
     main_path = os.path.join(staging_root, "main.py")
     version_path = os.path.join(staging_root, "VERSION")
-    if not os.path.isfile(main_path) or not os.path.isfile(version_path):
-        raise RuntimeError("更新暂存缺少 main.py 或 VERSION")
-    with open(main_path, "rb") as f:
-        compile(f.read(), main_path, "exec")
+    if not os.path.isfile(version_path):
+        raise RuntimeError("更新暂存缺少 VERSION")
+    if "main.py" in root_files:
+        if not os.path.isfile(main_path):
+            raise RuntimeError("更新暂存缺少 main.py")
+        with open(main_path, "rb") as f:
+            compile(f.read(), main_path, "exec")
     with open(version_path, "r", encoding="utf-8") as f:
         version = (f.read().strip().splitlines() or [""])[0].strip()
     if not version or len(version) > 80 or any(ch in version for ch in "<>\\r\\n"):
         raise RuntimeError("更新暂存的 VERSION 格式异常")
+    if version != str(release_manifest.get("version") or ""):
+        raise ReleaseManifestError(
+            f"发行清单与 VERSION 不一致：manifest={release_manifest.get('version')} VERSION={version}"
+        )
     for rel in list(root_files or []) + list(static_files or []):
         safe_update_target(rel)
         staged_path = os.path.join(staging_root, *str(rel).replace("\\", "/").split("/"))
         if not os.path.isfile(staged_path):
             raise RuntimeError(f"更新暂存缺少文件：{rel}")
 
+def requirements_changed_in_staging(staging_root: str, files: List[str]) -> bool:
+    if "requirements.txt" not in files:
+        return False
+    staged = os.path.join(staging_root, "requirements.txt")
+    current = os.path.join(BASE_DIR, "requirements.txt")
+    if not os.path.isfile(staged):
+        return False
+    if not os.path.isfile(current):
+        return True
+    with open(staged, "rb") as staged_file, open(current, "rb") as current_file:
+        return staged_file.read() != current_file.read()
+
 UPDATE_BACKUP_MANIFEST = "manifest.json"
-UPDATE_BACKUP_FORMAT = 2
+UPDATE_BACKUP_FORMAT = 3
 UPDATE_BACKUP_RETENTION = 10
 
 def update_backup_root() -> str:
@@ -2389,6 +2590,7 @@ def create_update_backup(
         "parent_backup": str(parent_backup or "").strip(),
         "update_notes": safe_update_notes(update_notes or {}, str(target_version or "").strip()),
         "root_files": {},
+        "static_files": {},
         "static_snapshot": {"exists": False, "file_count": 0},
         "affected_files": clean_root_files + clean_static_files,
     }
@@ -2403,14 +2605,18 @@ def create_update_backup(
                 backup_path = os.path.join(backup_dir, *rel.split("/"))
                 os.makedirs(os.path.dirname(backup_path), exist_ok=True)
                 shutil.copy2(target, backup_path)
-        static_dir = safe_static_dir()
-        if os.path.isdir(static_dir):
-            backup_static_dir = os.path.join(backup_dir, "static")
-            shutil.copytree(static_dir, backup_static_dir)
-            manifest["static_snapshot"] = {
-                "exists": True,
-                "file_count": count_regular_files(backup_static_dir),
-            }
+        for rel in clean_static_files:
+            target = safe_update_target(rel)
+            existed = os.path.isfile(target)
+            manifest["static_files"][rel] = {"existed": existed}
+            if existed:
+                backup_path = os.path.join(backup_dir, *rel.split("/"))
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copy2(target, backup_path)
+        manifest["static_snapshot"] = {
+            "exists": os.path.isdir(safe_static_dir()),
+            "file_count": sum(1 for item in manifest["static_files"].values() if item.get("existed")),
+        }
         manifest["state"] = "ready"
         write_update_backup_manifest(backup_dir, manifest)
         return manifest
@@ -2437,7 +2643,7 @@ def update_from_github(req: UpdateRequest = UpdateRequest()):
             shutil.rmtree(staging_root, ignore_errors=True)
         print(f"[update] 从 GitHub stable 下载更新 → {staging_root}")
         try:
-            root_files, static_files, files = stage_release_update(staging_root)
+            root_files, static_files, files, release_manifest = stage_release_update(staging_root)
         except Exception as exc:
             if os.path.isdir(staging_root):
                 shutil.rmtree(staging_root, ignore_errors=True)
@@ -2446,7 +2652,8 @@ def update_from_github(req: UpdateRequest = UpdateRequest()):
             raise HTTPException(status_code=502, detail=f"GitHub stable 下载失败：{exc}") from exc
         print(f"[update] GitHub stable 下载成功，共 {len(files)} 个文件")
 
-        validate_staged_update(staging_root, root_files, static_files)
+        validate_staged_update(staging_root, root_files, static_files, release_manifest)
+        requirements_changed = requirements_changed_in_staging(staging_root, files)
 
         new_version = ""
         try:
@@ -2474,48 +2681,32 @@ def update_from_github(req: UpdateRequest = UpdateRequest()):
             update_notes=update_notes,
         )
         updated = []
-
-        staged_static_dir = os.path.join(staging_root, "static")
-        if not os.path.isdir(staged_static_dir):
-            raise RuntimeError("GitHub static 暂存目录不存在，已取消更新")
-        static_dir = safe_static_dir()
-        backup_static_dir = os.path.join(backup_root, "static")
-        if os.path.isdir(static_dir):
-            shutil.rmtree(static_dir)
+        replaced_files = []
         try:
-            shutil.copytree(staged_static_dir, static_dir)
-        except Exception:
-            if os.path.isdir(static_dir):
-                shutil.rmtree(static_dir, ignore_errors=True)
-            if os.path.isdir(backup_static_dir):
-                shutil.copytree(backup_static_dir, static_dir)
-            raise
-        updated.extend(static_files)
-
-        replaced_root_files = []
-        try:
-            for rel in root_files:
+            for rel in files:
                 target = safe_update_target(rel)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 temp_path = f"{target}.update_tmp"
                 shutil.copy2(os.path.join(staging_root, *rel.split("/")), temp_path)
                 os.replace(temp_path, target)
-                replaced_root_files.append(rel)
+                replaced_files.append(rel)
                 updated.append(rel)
         except Exception:
-            for rel in reversed(replaced_root_files):
+            for rel in reversed(replaced_files):
                 backup_path = os.path.join(backup_root, *rel.split("/"))
                 target = safe_update_target(rel)
                 if os.path.exists(backup_path):
                     temp_path = f"{target}.rollback_tmp"
                     shutil.copy2(backup_path, temp_path)
                     os.replace(temp_path, target)
-                elif not bool((backup_manifest.get("root_files") or {}).get(rel, {}).get("existed")) and os.path.exists(target):
-                    os.remove(target)
-            if os.path.isdir(static_dir):
-                shutil.rmtree(static_dir, ignore_errors=True)
-            if os.path.isdir(backup_static_dir):
-                shutil.copytree(backup_static_dir, static_dir)
+                else:
+                    file_manifest = (
+                        (backup_manifest.get("static_files") or {}).get(rel, {})
+                        if rel.startswith("static/")
+                        else (backup_manifest.get("root_files") or {}).get(rel, {})
+                    )
+                    if not bool(file_manifest.get("existed")) and os.path.exists(target):
+                        os.remove(target)
             raise
 
         restart_scheduled = False
@@ -2530,7 +2721,12 @@ def update_from_github(req: UpdateRequest = UpdateRequest()):
             "updated": updated,
             "count": len(updated),
             "version": new_version,
+            "release_manifest": release_manifest,
             "update_notes": update_notes,
+            "requirements_changed": requirements_changed,
+            "dependency_notice": (
+                "本版本包含依赖变化，需要运行依赖安装/修复。" if requirements_changed else ""
+            ),
             "backup_dir": backup_root,
             "backup": backup_manifest,
             "pruned_backups": pruned_backups,
@@ -2605,13 +2801,24 @@ def rollback_update(req: RollbackRequest):
             raise HTTPException(status_code=409, detail="备份尚未完整创建，不能还原")
         manifest_roots = manifest.get("root_files") if isinstance(manifest.get("root_files"), dict) else {}
         root_files = sorted(manifest_roots.keys()) if manifest_roots else ["main.py", "VERSION"]
+        manifest_static = manifest.get("static_files") if isinstance(manifest.get("static_files"), dict) else {}
+        if manifest_static:
+            static_files = sorted(manifest_static.keys())
+        else:
+            static_files = []
+            legacy_static_dir = os.path.join(backup_dir, "static")
+            if os.path.isdir(legacy_static_dir):
+                for dirpath, _, filenames in os.walk(legacy_static_dir):
+                    for filename in filenames:
+                        path = os.path.join(dirpath, filename)
+                        static_files.append(os.path.relpath(path, backup_dir).replace("\\", "/"))
         # Restoring is itself a risky operation. Preserve the live version first so
         # the user can roll forward again if the selected historical build is worse.
         rollback_backup_dir = next_update_backup_dir("rollback-")
         rollback_backup = create_update_backup(
             rollback_backup_dir,
             root_files,
-            [],
+            static_files,
             kind="rollback_safety",
             source="local-rollback",
             target_version=str(manifest.get("from_version") or "").strip(),
@@ -2624,55 +2831,34 @@ def rollback_update(req: RollbackRequest):
         restored = []
         skipped = []
         removed = []
-        backup_static_dir = os.path.join(backup_dir, "static")
-        if os.path.isdir(backup_static_dir):
-            static_dir = safe_static_dir()
-            if os.path.isdir(static_dir):
-                shutil.rmtree(static_dir)
+        for rel in root_files + static_files:
+            if not update_allowed_file(rel):
+                skipped.append(rel)
+                continue
             try:
-                shutil.copytree(backup_static_dir, static_dir)
-            except Exception:
-                if os.path.isdir(static_dir):
-                    shutil.rmtree(static_dir, ignore_errors=True)
-                raise
-            for dirpath, _, filenames in os.walk(backup_static_dir):
-                for fn in filenames:
-                    src = os.path.join(dirpath, fn)
-                    restored.append(os.path.relpath(src, backup_dir).replace("\\", "/"))
-        elif manifest and isinstance(manifest.get("static_snapshot"), dict) and not manifest["static_snapshot"].get("exists"):
-            static_dir = safe_static_dir()
-            if os.path.isdir(static_dir):
-                shutil.rmtree(static_dir)
-                removed.append("static/")
-        for dirpath, _, filenames in os.walk(backup_dir):
-            for fn in filenames:
-                src = os.path.join(dirpath, fn)
-                rel = os.path.relpath(src, backup_dir).replace("\\", "/")
-                if rel.startswith("static/"):
-                    continue
-                if not update_allowed_file(rel):
-                    skipped.append(rel)
-                    continue
-                try:
-                    target = safe_update_target(rel)
-                except ValueError:
-                    skipped.append(rel)
-                    continue
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                temp_path = f"{target}.rollback_tmp"
-                with open(src, "rb") as fin, open(temp_path, "wb") as fout:
-                    shutil.copyfileobj(fin, fout)
-                os.replace(temp_path, target)
-                restored.append(rel)
-        for rel, info in manifest_roots.items():
-            if not update_allowed_file(rel) or str(rel).startswith("static/"):
+                target = safe_update_target(rel)
+            except ValueError:
+                skipped.append(rel)
                 continue
-            if bool((info or {}).get("existed")):
+            src = os.path.abspath(os.path.join(backup_dir, *rel.split("/")))
+            if os.path.commonpath([backup_dir, src]) != backup_dir:
+                skipped.append(rel)
                 continue
-            target = safe_update_target(rel)
-            if os.path.isfile(target):
-                os.remove(target)
-                removed.append(rel)
+            file_manifest = manifest_static.get(rel, {}) if rel.startswith("static/") else manifest_roots.get(rel, {})
+            if not os.path.isfile(src):
+                if file_manifest and not bool(file_manifest.get("existed")) and os.path.isfile(target):
+                    os.remove(target)
+                    removed.append(rel)
+                else:
+                    skipped.append(rel)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            temp_path = f"{target}.rollback_tmp"
+            with open(src, "rb") as fin, open(temp_path, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            shutil.copystat(src, temp_path)
+            os.replace(temp_path, target)
+            restored.append(rel)
         restart_scheduled = False
         if req.auto_restart and restored:
             restart_scheduled = schedule_self_restart(req.restart_delay)

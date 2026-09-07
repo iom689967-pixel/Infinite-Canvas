@@ -32,6 +32,10 @@ class StableUpdateChannelTests(unittest.TestCase):
             main.GITHUB_UPDATE_NOTES_URL,
             "https://raw.githubusercontent.com/iom689967-pixel/Infinite-Canvas/stable/static/update-notes.json",
         )
+        self.assertEqual(
+            main.GITHUB_RELEASE_MANIFEST_URL,
+            "https://raw.githubusercontent.com/iom689967-pixel/Infinite-Canvas/stable/release-manifest.json",
+        )
         self.assertEqual(main.app_info()["update_notes_url"], main.GITHUB_UPDATE_NOTES_URL)
 
     def test_05_tree_and_raw_downloads_use_stable(self):
@@ -55,6 +59,7 @@ class StableUpdateChannelTests(unittest.TestCase):
             main.GITHUB_VERSION_URL,
             main.GITHUB_TREE_URL,
             main.GITHUB_RAW_ROOT,
+            main.GITHUB_RELEASE_MANIFEST_URL,
             main.GITHUB_UPDATE_NOTES_URL,
             info["sources"]["github"]["version_url"],
         ]
@@ -83,8 +88,14 @@ class StableUpdateChannelTests(unittest.TestCase):
                 *({"type": "blob", "path": path} for path in protected),
             ]
         }
+        manifest = main.validate_release_manifest({
+            "schema_version": 1,
+            "version": "2026.09.08",
+            "include": ["main.py", "VERSION", "static/"],
+            "protected": ["data/"],
+        })
         with patch.object(main, "github_json", return_value=tree):
-            _, _, replacement_set = main.github_update_file_list()
+            _, _, replacement_set = main.github_update_file_list(manifest)
         self.assertEqual(replacement_set, ["VERSION", "main.py", "static/index.html"])
 
     def test_08_api_env_is_never_replaceable(self):

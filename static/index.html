@@ -1589,6 +1589,7 @@
         const PROJECT_URL = 'https://github.com/iom689967-pixel/Infinite-Canvas';
         const STABLE_VERSION_URL = 'https://raw.githubusercontent.com/iom689967-pixel/Infinite-Canvas/stable/VERSION';
         const STABLE_TREE_URL = 'https://api.github.com/repos/iom689967-pixel/Infinite-Canvas/git/trees/stable?recursive=1';
+        const STABLE_MANIFEST_URL = 'https://raw.githubusercontent.com/iom689967-pixel/Infinite-Canvas/stable/release-manifest.json';
         let appInfo = { version:'', release_branch:'stable', repo_url:PROJECT_URL, version_url:STABLE_VERSION_URL };
         let updateConnectivityResult = null;
         let projectUpdateRunning = false;
@@ -2017,7 +2018,7 @@
             const updateBtn = document.getElementById('update-now-btn');
             if(updateBtn) updateBtn.title = remoteVersion
                 ? (isEn ? `Update to ${versionLabel(remoteVersion)}` : `更新到 ${versionLabel(remoteVersion)}`)
-                : (isEn ? 'Update main.py and static files from GitHub' : '从 GitHub 更新 main.py 和 static 文件');
+                : (isEn ? 'Update files declared by the stable release manifest' : '按 stable 发行清单更新正式程序文件');
             refreshUpdateButtonText();
         }
 
@@ -2123,6 +2124,7 @@
 
         function updateConnectivityTargets() {
             return [
+                { name:'Stable 发行清单', url:STABLE_MANIFEST_URL, source:'github', required:true },
                 { name:'Stable 更新列表', url:STABLE_TREE_URL, source:'github', required:true },
                 { name:'Stable 版本文件', url:STABLE_VERSION_URL, source:'github', required:true },
                 { name:'发行仓库', url:PROJECT_URL, source:'github' },
@@ -2196,8 +2198,8 @@
                 }
             });
             if(copyEl) copyEl.textContent = updateUiText(
-                `将从 ${sourceName} 更新 main.py、VERSION 和 static 文件。更新前会自动备份，更新完成后后端会自动重启。当前 ${versionLabel(localVersion)}，最新 ${versionLabel(remoteVersion || localVersion)}。`,
-                `This updates main.py, VERSION, and static files from ${sourceName}. A backup is created first, then the backend restarts automatically. Current ${versionLabel(localVersion)}, latest ${versionLabel(remoteVersion || localVersion)}.`
+                `将从 ${sourceName} 读取 stable 发行清单并更新其中列出的正式程序文件。更新前会自动备份，更新完成后后端会自动重启。当前 ${versionLabel(localVersion)}，最新 ${versionLabel(remoteVersion || localVersion)}。`,
+                `This reads the stable release manifest from ${sourceName} and updates only the declared program files. A backup is created first, then the backend restarts automatically. Current ${versionLabel(localVersion)}, latest ${versionLabel(remoteVersion || localVersion)}.`
             );
             if(testText) testText.textContent = updateConnectivityResult ? updateUiText('重新测试', 'Retest') : updateUiText('测试连通性', 'Test connectivity');
             if(cancelText) cancelText.textContent = updateUiText('取消', 'Cancel');
@@ -2430,16 +2432,19 @@
                 if(!res.ok) throw new Error(data.detail || (isEn ? 'Update failed' : '更新失败'));
                 if(data.update_notes) setProjectUpdateNotes(data.update_notes);
                 const restarting = data.restart_scheduled;
+                const dependencyNotice = data.requirements_changed
+                    ? (isEn ? ' This release changes dependencies; run dependency install/repair.' : ' 本版本包含依赖变化，需要运行依赖安装/修复。')
+                    : '';
                 setUpdateSummary(
                     'ok',
                     isEn ? 'Update complete' : '更新完成',
                     (restarting
                         ? (isEn
-                            ? `Updated ${data.count || 0} files. The backend will restart in about 3 seconds; this page will reload when it returns.`
-                            : `已更新 ${data.count || 0} 个文件。后端将在约 3 秒后自动重启，本页面会在恢复后自动刷新。`)
+                            ? `Updated ${data.count || 0} files. The backend will restart in about 3 seconds; this page will reload when it returns.${dependencyNotice}`
+                            : `已更新 ${data.count || 0} 个文件。后端将在约 3 秒后自动重启，本页面会在恢复后自动刷新。${dependencyNotice}`)
                         : (isEn
-                            ? `Updated ${data.count || 0} files. Please restart the backend, then refresh this page.`
-                            : `已更新 ${data.count || 0} 个文件。请重启后端，然后刷新页面。`))
+                            ? `Updated ${data.count || 0} files. Please restart the backend, then refresh this page.${dependencyNotice}`
+                            : `已更新 ${data.count || 0} 个文件。请重启后端，然后刷新页面。${dependencyNotice}`))
                 );
                 setUpdateEntryState('latest', data.version || appInfo.version, data.version || appInfo.version);
                 if(restarting) waitForBackendAndReload();
