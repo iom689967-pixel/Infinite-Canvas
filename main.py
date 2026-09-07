@@ -613,6 +613,7 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
+CANVAS_LLM_TIMEOUT = float(os.getenv("CANVAS_LLM_TIMEOUT", "120"))
 IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
 COMFYUI_HISTORY_TIMEOUT = int(float(os.getenv("COMFYUI_HISTORY_TIMEOUT", "1800")))
@@ -4185,6 +4186,12 @@ def chat_upstream_request(provider, chat_base, model, messages, *, stream=False)
     elif is_apimart_provider(provider):
         body["stream"] = False
     return f"{chat_base}/chat/completions", body
+
+def request_url_for_log(url):
+    """Keep only the route needed for diagnostics, never URL credentials/query tokens."""
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 def text_delta_from_chat_chunk(data):
     choices = data.get("choices") or []
@@ -16894,6 +16901,18 @@ async def canvas_video(payload: CanvasVideoRequest):
 
 @app.post("/api/canvas-llm")
 async def canvas_llm(payload: CanvasLLMRequest):
+    request_id = uuid.uuid4().hex[:12]
+    started_at = time.monotonic()
+    print(json.dumps({
+        "event": "canvas_llm_start",
+        "request_id": request_id,
+        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "provider": payload.provider,
+        "model": payload.model,
+        "text_len": len(payload.message),
+        "images": len(payload.images),
+        "videos": len(payload.videos),
+    }, ensure_ascii=False), flush=True)
     _provider = get_api_provider(payload.provider)
     if is_codex_provider(_provider):
         model = selected_model(payload.model, (_provider.get("chat_models") or CODEX_DEFAULT_CHAT_MODELS)[0])
@@ -16944,28 +16963,83 @@ async def canvas_llm(payload: CanvasLLMRequest):
                     continue
                 content_parts.append({"type": "video_url", "video_url": {"url": ref_url}})
                 ok_videos += 1
-        print(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
+        print(json.dumps({
+            "event": "canvas_llm_media_ready",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "text_len": len(payload.message),
+            "images": {"ready": ok_imgs, "total": len(payload.images)},
+            "videos": {"ready": ok_videos, "total": len(payload.videos)},
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         upstream_messages.append({"role": "user", "content": content_parts})
     else:
         upstream_messages.append({"role": "user", "content": payload.message})
     raw = None
     try:
-        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=CANVAS_LLM_TIMEOUT) as client:
             request_url, req_body = chat_upstream_request(_llm_provider, chat_base, model, upstream_messages)
+            print(json.dumps({
+                "event": "canvas_llm_upstream_request",
+                "request_id": request_id,
+                "provider": payload.provider,
+                "model": model,
+                "request_url": request_url_for_log(request_url),
+                "timeout_seconds": CANVAS_LLM_TIMEOUT,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            }, ensure_ascii=False), flush=True)
             response = await client.post(
                 request_url,
                 headers=chat_hdrs,
                 json=req_body,
             )
             response.raise_for_status()
+            print(json.dumps({
+                "event": "canvas_llm_upstream_response",
+                "request_id": request_id,
+                "provider": payload.provider,
+                "model": model,
+                "http_status": response.status_code,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            }, ensure_ascii=False), flush=True)
             if not response.content:
                 raise HTTPException(status_code=502, detail="上游接口返回了空响应")
             raw = response.json()
+    except httpx.TimeoutException as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_timeout",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "timeout_seconds": CANVAS_LLM_TIMEOUT,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
+        raise HTTPException(
+            status_code=504,
+            detail=f"Canvas LLM 请求上游超时（{CANVAS_LLM_TIMEOUT:g} 秒），请稍后重试。",
+        ) from exc
     except httpx.HTTPStatusError as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_http_error",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "http_status": exc.response.status_code,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         body = exc.response.text or ""
         friendly = friendly_chat_error_detail(body, model, _llm_provider)
         raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"上游接口错误：{body}") from exc
     except httpx.HTTPError as exc:
+        print(json.dumps({
+            "event": "canvas_llm_upstream_network_error",
+            "request_id": request_id,
+            "provider": payload.provider,
+            "model": model,
+            "error_type": type(exc).__name__,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        }, ensure_ascii=False), flush=True)
         raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
     except HTTPException:
         raise

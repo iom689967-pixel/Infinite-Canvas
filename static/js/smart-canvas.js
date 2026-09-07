@@ -19728,7 +19728,7 @@ async function runPromptLLMNode(nodeId){
                 system_prompt:node.llmSystemEnabled ? (systemPrompt || 'You are a helpful prompt assistant.') : ''
             })
         }).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
+            if(!r.ok) throw new Error(await responseErrorMessage(r, tr('smart.promptLlmFailed')));
             return r.json();
         });
         node.text = (result.text || '').trim();
