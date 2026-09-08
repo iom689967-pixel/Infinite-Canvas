@@ -104,6 +104,7 @@ class AuthStore:
             db.close()
 
     def start_server(self):
+        self.ensure_permissions()
         with self.connect() as db:
             rows = db.execute("SELECT * FROM accounts").fetchall()
             if len(rows) != 1 or rows[0]["instance_id"] != self.instance_id or rows[0]["role"] != "assistant":
@@ -111,6 +112,21 @@ class AuthStore:
             # Restart deliberately logs everyone out. No portable/replayable disk sessions.
             db.execute("DELETE FROM sessions")
         self.dummy_hash = password_hash(secrets.token_urlsafe(32))
+
+    def ensure_permissions(self):
+        with self.connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS permissions (username TEXT, permission TEXT, PRIMARY KEY(username, permission))')
+
+    def set_provider_permission(self, username, enabled):
+        """Local administration only; never accepts a browser-supplied principal."""
+        self.ensure_permissions()
+        with self.connect() as db:
+            if not db.execute('SELECT 1 FROM accounts WHERE username=? AND instance_id=?', (username, self.instance_id)).fetchone():
+                raise ValueError('本实例没有此账号')
+            db.execute('DELETE FROM permissions WHERE username=? AND permission=?', (username, 'manage_own_providers'))
+            if enabled:
+                db.execute('INSERT INTO permissions VALUES (?,?)', (username, 'manage_own_providers'))
+            db.execute('DELETE FROM sessions WHERE username=?', (username,))
 
     def create_account(self, username, password):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", username):
@@ -175,7 +191,11 @@ class AuthStore:
                              (self.digest(token), self.instance_id, self.instance_id)).fetchone()
         if not row or not row["enabled"] or row["role"] != "assistant" or row["revision"] != row["account_revision"] or row["expires"] <= time.time() or row["boot"] != self.boot:
             return None
+        with self.connect() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='permissions'").fetchone()
+            permissions = [p[0] for p in db.execute('SELECT permission FROM permissions WHERE username=?', (row['username'],))] if exists else []
         return {"username": row["username"], "role": "assistant", "instance_id": self.instance_id,
+                "permissions": permissions,
                 "csrf": row["csrf"], "expires": row["expires"],
                 "subject": hashlib.sha256((self.instance_id+":"+row["username"]).encode()).hexdigest()}
 

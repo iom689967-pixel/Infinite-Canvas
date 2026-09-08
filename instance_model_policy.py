@@ -47,18 +47,36 @@ class ModelPolicy:
         self.paths = paths
         self.file = paths.data_root / '.auth/model-access.json'
         self.providers = {}
+        self.mode = 'live'
+        self.private_targets = {}
         self.max_concurrent = 1
         if not self.file.exists():
             return
         self.private_file(self.file)
         config = json.loads(self.file.read_text())
-        if set(config) != {'schema_version', 'mode', 'max_concurrent', 'providers'} or config['schema_version'] != 1:
+        if set(config) - {'schema_version', 'mode', 'max_concurrent', 'providers', 'personal_providers', 'private_targets'} or config['schema_version'] != 1:
             raise RuntimeError('Invalid model access configuration')
         self.mode = config['mode']
         if self.mode not in {'mock', 'live'}:
             raise RuntimeError('Model mode must be explicitly mock or live')
         self.max_concurrent = self.integer(config['max_concurrent'], 1, 8)
-        if not isinstance(config['providers'], list) or not config['providers']:
+        # Server-admin-only exact HTTPS LAN destinations. Never permit loopback,
+        # link-local metadata, CIDRs, or a browser-controlled credential target list.
+        for target in config.get('private_targets', []):
+            if set(target) != {'origin', 'ips'}:
+                raise RuntimeError('Invalid private target')
+            endpoint = origin(target['origin'])
+            if endpoint[0] != 'https' or endpoint[2] in {3000, paths.port} or urlsplit(target['origin']).path not in {'', '/'}:
+                raise RuntimeError('Invalid private target origin')
+            ips = frozenset(target['ips'])
+            if not ips:
+                raise RuntimeError('Empty private target addresses')
+            for value in ips:
+                ip = ipaddress.ip_address(value)
+                if not ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+                    raise RuntimeError('Unsafe private target address')
+            self.private_targets[endpoint] = ips
+        if not isinstance(config['providers'], list) or (not config['providers'] and 'personal_providers' not in config):
             raise RuntimeError('Model access requires an explicit nonempty provider allowlist')
         for item in config['providers']:
             required = {'id', 'protocol', 'base_url', 'credential_file', 'models'}
@@ -113,6 +131,12 @@ class ModelPolicy:
             if not item['models']:
                 raise RuntimeError('Empty model allowlist')
             self.providers[provider_id] = item
+        from instance_providers import compile_personal
+        for item in config.get('personal_providers', []):
+            compiled = compile_personal(self, item)
+            if compiled['id'] in self.providers:
+                raise RuntimeError('Duplicate personal provider')
+            self.providers[compiled['id']] = compiled
 
     @staticmethod
     def integer(value, low, high):
@@ -138,7 +162,7 @@ class ModelPolicy:
         if self.mode == 'mock':
             if endpoint[0] != 'http' or endpoint[1:] not in self.paths.upstreams:
                 raise RuntimeError('Mock endpoint must be an approved loopback upstream')
-        elif endpoint[0] != 'https' or endpoint[2] != 443:
+        elif endpoint[0] != 'https' or (endpoint[2] != 443 and endpoint not in self.private_targets):
             raise RuntimeError('Live endpoints require HTTPS on port 443')
 
     def credential(self, provider):
@@ -156,16 +180,18 @@ class ModelPolicy:
         if not self.providers:
             raise failure('not_configured', 503)
         provider = self.providers.get(provider_id)
-        protocol = 'gemini' if kind == 'llm' else 'kie'
-        if not provider or provider['protocol'] != protocol or model not in provider['models']:
+        protocols = {'gemini', 'openai'} if kind == 'llm' else {'kie'}
+        if not provider or not provider.get('enabled', True) or provider['protocol'] not in protocols or model not in provider['models']:
             raise failure('not_allowed')
         return provider, provider['models'][model]
 
     def catalog(self):
         result = []
         for p in self.providers.values():
-            result.append({'id': p['id'], 'name': p['id'], 'protocol': p['protocol'], 'enabled': True,
-                           'chat_models': list(p['models']) if p['protocol'] == 'gemini' else [],
+            if not p.get('enabled', True) or not p['models']:
+                continue
+            result.append({'id': p['id'], 'name': p.get('name', p['id']), 'protocol': p['protocol'], 'enabled': True,
+                           'chat_models': list(p['models']) if p['protocol'] in {'gemini', 'openai'} else [],
                            'image_models': list(p['models']) if p['protocol'] == 'kie' else [], 'video_models': [],
                            'model_limits': p['models']})
         return {'api_providers': result, 'chat_models': [m for p in result for m in p['chat_models']],
@@ -176,7 +202,11 @@ class ModelPolicy:
         if used_credential:
             text = text.replace(used_credential, '[redacted]')
         for p in self.providers.values():
-            for value in (self.credential(p), p['base_url'], p.get('upload_base_url', ''), p['credential_file']):
+            try:
+                key = self.credential(p)
+            except HTTPException:
+                key = ''
+            for value in (key, p['base_url'], p.get('upload_base_url', ''), p['credential_file']):
                 if value:
                     text = text.replace(value, '[redacted]')
         return text
@@ -194,7 +224,10 @@ class GuardedClient:
 
     def validate_media_url(self, url):
         try:
-            if origin(url) not in {origin(v) for v in self.provider.get('media_origins', [])}:
+            endpoint = origin(url)
+            if endpoint[0] not in {'https', 'http'}:
+                raise ValueError()
+            if not self.provider.get('personal') and endpoint not in {origin(v) for v in self.provider.get('media_origins', [])}:
                 raise ValueError()
             if self.policy.credential(self.provider) in url or (self.used_credential and self.used_credential in url):
                 raise ValueError()
@@ -221,11 +254,15 @@ class GuardedClient:
                 raise failure('download', 502)
             addresses = {endpoint[1:]}
         else:
-            if endpoint[0] != 'https' or endpoint[2] != 443:
+            private = getattr(self.policy, 'private_targets', {}).get(endpoint, frozenset())
+            if endpoint[0] != 'https' or (endpoint[2] != 443 and not private):
                 raise failure('download', 502)
             resolved = await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo, endpoint[1], endpoint[2], type=socket.SOCK_STREAM), 10)
             addresses = {(result[4][0], endpoint[2]) for result in resolved}
-            if not addresses or any(not ipaddress.ip_address(ip).is_global for ip, _ in addresses):
+            def approved(value):
+                ip = ipaddress.ip_address(value)
+                return (ip.is_global and not (ip.is_multicast or ip.is_reserved)) or value in private
+            if not addresses or any(not approved(ip) for ip, _ in addresses):
                 raise failure('download', 502)
         context = OUTBOUND_ENDPOINTS.set(frozenset(addresses))
         try:

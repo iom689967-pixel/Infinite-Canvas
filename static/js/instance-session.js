@@ -26,6 +26,8 @@
             await ready;
             const identity = document.getElementById('instance-identity');
             if (identity) identity.textContent = `${session.username} · ${session.instance_id}`;
+            const settings = document.getElementById('instance-api-settings');
+            if (settings) settings.hidden = !session.permissions?.includes('manage_own_providers');
             document.getElementById('instance-logout')?.addEventListener('click', async () => {
                 const response = await window.fetch('/api/auth/logout', {method: 'POST'});
                 if (response.ok || response.status === 401) loginRequired();

@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="本机实例账号管理；不得指向生产数据测试")
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--instance-id", required=True)
-    parser.add_argument("action", choices=("init", "create", "reset-password", "disable", "set-model-credential"))
+    parser.add_argument("action", choices=("init", "create", "reset-password", "disable", "set-model-credential", "grant-own-providers", "revoke-own-providers"))
     parser.add_argument("--username")
     parser.add_argument("--password-stdin", action="store_true", help="自动化使用私有 stdin；不要通过 shell 参数或日志传密码")
     parser.add_argument("--credential-name", help="本实例 credentials 下的文件名，不是密钥值")
@@ -54,7 +54,9 @@ def main():
             if not args.username:
                 raise ValueError("必须提供 --username")
             store = AuthStore(args.data_root, args.instance_id)
-            if args.action == "disable":
+            if args.action in {'grant-own-providers', 'revoke-own-providers'}:
+                store.set_provider_permission(args.username, args.action == 'grant-own-providers')
+            elif args.action == "disable":
                 store.change_account(args.username, disable=True)
             else:
                 if args.password_stdin:

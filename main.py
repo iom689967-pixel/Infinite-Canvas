@@ -20521,8 +20521,9 @@ def assistant_model_catalog():
 
 if PATHS.explicit:
     INSTANCE_MODELS = ControlledModels(PATHS, sys.modules[__name__])
+    from instance_providers import OwnProviders
     app.add_middleware(InstanceAuthMiddleware, routes=app.routes, paths=PATHS,
-                       store=INSTANCE_AUTH, catalog=assistant_model_catalog)
+                       store=INSTANCE_AUTH, catalog=assistant_model_catalog, own_providers=OwnProviders(INSTANCE_MODELS))
 
 if __name__ == "__main__":
     import uvicorn

@@ -8,6 +8,7 @@ import urllib.parse
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Match
+from fastapi import HTTPException
 
 from instance_access import PUBLIC_STATIC, ROUTE_ACCESS, WORKBENCH_STATIC
 from instance_auth import PRINCIPAL
@@ -15,8 +16,9 @@ from instance_model_policy import failure as model_access_failure
 
 
 class InstanceAuthMiddleware:
-    def __init__(self, app, *, routes, paths, store, catalog):
+    def __init__(self, app, *, routes, paths, store, catalog, own_providers=None):
         self.app, self.routes, self.paths, self.store, self.catalog = app, routes, paths, store, catalog
+        self.own_providers = own_providers
         self.secure = not paths.auth_http_loopback
         scheme = "https" if self.secure else "http"
         self.origin = f"{scheme}://{paths.host}:{paths.port}"
@@ -116,13 +118,53 @@ class InstanceAuthMiddleware:
             if headers.get("origin") != self.origin or not hmac.compare_digest(headers.get("x-csrf-token", ""), principal["csrf"]):
                 return await self.reply(scope, receive, send, JSONResponse({"detail": "CSRF 或请求来源校验失败"}, 403))
         if path == "/api/auth/me" and method == "GET":
-            return await self.reply(scope, receive, send, JSONResponse({k: principal[k] for k in ("username", "role", "instance_id", "csrf", "expires")}))
+            return await self.reply(scope, receive, send, JSONResponse({k: principal[k] for k in ("username", "role", "instance_id", "csrf", "expires", "permissions")}))
         if path == "/api/auth/logout" and method == "POST":
             self.store.revoke(token)
             response = JSONResponse({"ok": True})
             response.delete_cookie(self.cookie_name, path="/", secure=self.secure, httponly=True, samesite="strict")
             return await self.reply(scope, receive, send, response)
-        if self.classify(scope) != "workbench":
+        own_api = path in {'/api/instance/providers', '/api/instance/providers/discover'}
+        own_page = path in {'/static/api-settings.html', '/static/js/instance-api-settings.js',
+                            '/static/js/i18n/api-settings.js'}
+        if own_api or own_page:
+            if not self.own_providers or 'manage_own_providers' not in principal.get('permissions', []):
+                return await self.reply(scope, receive, send, JSONResponse({'detail': '未获本实例 API 管理权限'}, 403))
+            if own_api:
+                try:
+                    if path == '/api/instance/providers' and method == 'GET':
+                        result = self.own_providers.public()
+                    elif method in {'PUT', 'DELETE', 'POST'}:
+                        chunks = bytearray()
+                        async for chunk in Request(scope, receive).stream():
+                            chunks.extend(chunk)
+                            if len(chunks) > 65536:
+                                raise ValueError()
+                        body = json.loads(chunks)
+                        if path.endswith('/discover') and method == 'POST':
+                            result = await self.own_providers.discover(body)
+                        elif path == '/api/instance/providers' and method in {'PUT', 'DELETE'}:
+                            result = self.own_providers.save(body, delete=method == 'DELETE')
+                        else:
+                            raise HTTPException(405, '不支持此方法')
+                    else:
+                        raise HTTPException(405, '不支持此方法')
+                    response = JSONResponse(result)
+                except HTTPException as exc:
+                    response = JSONResponse({'detail': exc.detail}, exc.status_code)
+                except Exception:
+                    # Do not expose payloads, credential paths, DNS or upstream errors.
+                    response = JSONResponse({'detail': '配置无效或存储不可用；请检查字段和安全地址规则'}, 400)
+                return await self.reply(scope, receive, send, response)
+            if method not in {'GET', 'HEAD'}:
+                return await self.reply(scope, receive, send, JSONResponse({'detail': '不支持此方法'}, 405))
+            if path.endswith('.html'):
+                body = (self.paths.program_root / 'static/api-settings.html').read_text()
+                import re
+                body = re.sub(r'<script src="/static/js/api-settings.js[^\"]*"></script>',
+                              '<script src="/static/js/instance-session.js"></script><script src="/static/js/instance-api-settings.js"></script>', body)
+                return await self.reply(scope, receive, send, Response(body, media_type='text/html'))
+        if not own_page and self.classify(scope) != "workbench":
             return await self.reply(scope, receive, send, JSONResponse({"detail": "此功能尚未开放或需要本机管理员操作"}, 403))
         scope.setdefault("state", {})["principal"] = principal
         # The server, not browser UUIDs, owns task/WebSocket/conversation identity.

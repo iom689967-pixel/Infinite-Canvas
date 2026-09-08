@@ -18,6 +18,7 @@ from PIL import Image
 
 from instance_auth import PRINCIPAL
 from instance_model_policy import GuardedClient, ModelPolicy, failure
+from instance_providers import task_provider_revision
 from providers.kie.client import KieClient, KieAPIError
 from providers.kie.models import build_create_payload, KieValidationError
 from providers.kie.tasks import poll_task, KieTaskCancelled, KieTaskError, task_status
@@ -123,12 +124,16 @@ class ControlledModels:
                 content.append({'type': 'image_url', 'image_url': {'url': self.app.reference_to_data_url({'url':url}, max_size=1536)}})
             messages.append({'role': 'user', 'content': content})
             url, body = self.app.chat_upstream_request(provider, provider['base_url'], payload.model, messages)
-            body['generationConfig'] = {'maxOutputTokens': limits['max_output_tokens'], 'candidateCount': 1}
+            if provider['protocol'] == 'gemini':
+                body['generationConfig'] = {'maxOutputTokens': limits['max_output_tokens'], 'candidateCount': 1}
+            else:
+                body['max_tokens'] = limits['max_output_tokens']
             credential = self.policy.credential(provider)
             client.used_credential = credential
             # httpx read timeouts alone reset for each chunk; also bound total waiting time.
             async with asyncio.timeout(min(self.app.CANVAS_LLM_TIMEOUT, limits['timeout_seconds'])):
-                response = await client.post(url, headers={'x-goog-api-key': credential, 'Content-Type':'application/json'}, json=body)
+                auth = {'x-goog-api-key': credential} if provider['protocol'] == 'gemini' else {'Authorization': 'Bearer '+credential}
+                response = await client.post(url, headers=auth | {'Content-Type':'application/json'}, json=body)
             response.raise_for_status()
             text = self.app.text_from_chat_response(response.json())
             return {'text': self.policy.redact(text, used_credential=credential), 'model':payload.model, 'raw_usage':None}
@@ -161,7 +166,7 @@ class ControlledModels:
         return provider, limits
 
     def create(self, payload):
-        self.validate_image(payload)
+        provider, _ = self.validate_image(payload)
         owner = PRINCIPAL.get()['subject']
         params = payload.model_dump()
         nonce = params.pop('request_id', '')
@@ -177,6 +182,7 @@ class ControlledModels:
                     return {'task_id':job['id'], 'status':job['status'], 'reused':True}
         self.check_capacity()
         job = {'id':'canvas_img_'+uuid.uuid4().hex, 'owner':owner, 'status':'queued', 'params':params,
+               'provider_revision':task_provider_revision(self.policy, provider),
                'provider_id':payload.provider_id, 'model':payload.model, 'upstream':[], 'result':None,
                'error':'', 'outstanding':True, 'recovery':'', 'submission_uncertain':False, 'created_at':time.time()}
         with self.db() as db:
@@ -206,7 +212,9 @@ class ControlledModels:
 
     def refresh(self, task_id):
         job = self.owned(task_id)
-        self.policy.allowed(job['provider_id'], job['model'], 'image')
+        provider, _ = self.policy.allowed(job['provider_id'], job['model'], 'image')
+        if job.get('provider_revision') != task_provider_revision(self.policy, provider):
+            raise HTTPException(409, '原任务配置已变化或为旧版本任务；禁止使用新凭证查询，也不会重新提交')
         if task_id not in self.runners and job['upstream'] and job['status'] != 'succeeded':
             if not job['outstanding']:
                 self.check_capacity()
@@ -239,6 +247,8 @@ class ControlledModels:
         submitted = False
         try:
             provider, limits = self.policy.allowed(job['provider_id'], job['model'], 'image')
+            if job.get('provider_revision') != task_provider_revision(self.policy, provider):
+                raise failure('conflict', 409)
             client = GuardedClient(self.policy, provider, timeout=120)
             credential = self.policy.credential(provider)
             client.used_credential = credential
