@@ -1,0 +1,3 @@
+-r requirements.txt
+# Real WebSocket handshake/revocation tests and uvicorn's test WebSocket backend.
+websockets==17.0.1

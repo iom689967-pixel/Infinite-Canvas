@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ import unittest
 
 import httpx
 from PIL import Image
+from instance_auth import AuthStore
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,6 +36,7 @@ def clean_env():
 def instance_env(root, name, port):
     return {**clean_env(), "INSTANCE_ID": name, "INSTANCE_DATA_ROOT": str(root),
             "INSTANCE_HOST": "127.0.0.1", "INSTANCE_PORT": str(port),
+            "INSTANCE_AUTH_ALLOW_HTTP_LOOPBACK": "1",
             # Deliberately contaminate the parent with fake credentials/paths.
             "COMFLY_API_KEY": "inherited-fake-must-disappear",
             "MODELSCOPE_API_KEY": "inherited-fake-must-disappear",
@@ -48,12 +51,17 @@ class MockUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).calls.append((self.path, payload, self.headers.get("Authorization")))
+        if "WAIT_CANCEL" in json.dumps(payload):
+            time.sleep(8)
         body = json.dumps({"choices": [{"message": {"content": "MOCK OK"}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, *_args):
         pass
@@ -71,6 +79,10 @@ assert not main.AI_API_KEY and not main.MODELSCOPE_API_KEY
 assert not os.getenv("API_PROVIDER_GEMINI_KEY") and not os.getenv("CODEX_AUTH_FILE")
 root = Path(main.INSTANCE_DATA_ROOT)
 name = main.INSTANCE_ID
+mock_origin = next(iter(main.PATHS.upstreams))
+main.save_api_providers([{"id":"mock", "name":"Mock", "enabled":True, "protocol":"openai",
+    "base_url":"http://%s:%s/v1" % mock_origin, "chat_models":["mock-chat"], "image_models":[]}])
+main.update_env_values({"API_PROVIDER_MOCK_KEY":"fake-"+name})
 generated = root / "assets/output/same-name.png"
 seeded = root / ".runtime/test-seeded"
 if not seeded.exists():
@@ -87,7 +99,7 @@ snapshot = {key: getattr(main,key) for key in ("PROGRAM_ROOT", "INSTANCE_ID", "I
 snapshot.update(pid=os.getpid(), cache=str(cache.path), temp=f.name, home=os.environ["HOME"])
 (root / ".runtime/test-paths.json").write_text(json.dumps(snapshot))
 import uvicorn
-uvicorn.run(main.app, host=main.INSTANCE_HOST, port=main.INSTANCE_PORT, log_level="warning")
+uvicorn.run(main.app, host=main.INSTANCE_HOST, port=main.INSTANCE_PORT, log_level="warning", ws="websockets-sansio", proxy_headers=False)
 '''
 
 
@@ -204,6 +216,8 @@ class TwoProcessIsolationTests(unittest.TestCase):
         cls.thread = threading.Thread(target=cls.mock.serve_forever, daemon=True)
         cls.thread.start()
         cls.procs, cls.logs = {}, {}
+        cls.passwords = {name: secrets.token_urlsafe(24) for name in ("A", "B")}
+        cls.cookies, cls.csrf = {}, {}
         try:
             for name in ("A", "B"):
                 cls.start(name)
@@ -216,6 +230,11 @@ class TwoProcessIsolationTests(unittest.TestCase):
         port = cls.ports[name]
         env = instance_env(cls.roots[name], name, port)
         env["INSTANCE_MOCK_UPSTREAMS"] = f"127.0.0.1:{cls.mock.server_port}"
+        if not (cls.roots[name] / ".auth/access.sqlite3").exists():
+            args = [sys.executable, str(ROOT / "instance_admin.py"), "--data-root", str(cls.roots[name]), "--instance-id", name]
+            subprocess.run([*args, "init"], env=clean_env(), cwd=ROOT, check=True, capture_output=True)
+            subprocess.run([*args, "create", "--username", name, "--password-stdin"],
+                           input=cls.passwords[name], text=True, env=clean_env(), cwd=ROOT, check=True, capture_output=True)
         log = open(cls.root / f"{name}-process.log", "a+")
         cls.logs[name] = log
         proc = subprocess.Popen([sys.executable, "-c", CHILD], cwd=ROOT, env=env,
@@ -227,7 +246,14 @@ class TwoProcessIsolationTests(unittest.TestCase):
                 log.flush()
                 raise AssertionError((cls.root / f"{name}-process.log").read_text())
             try:
-                if cls.request(name, "GET", "/api/canvases").status_code == 200:
+                if cls.request(name, "GET", "/healthz").status_code == 200:
+                    origin = f"http://127.0.0.1:{port}"
+                    with httpx.Client(trust_env=False, timeout=10) as client:
+                        response = client.post(origin+"/api/auth/login", headers={"Origin": origin},
+                                               json={"username":name, "password":cls.passwords[name]})
+                        assert response.status_code == 200, response.status_code
+                        cls.cookies[name] = dict(client.cookies)
+                        cls.csrf[name] = client.get(origin+"/api/auth/me").json()["csrf"]
                     return
             except httpx.TransportError:
                 pass
@@ -258,8 +284,10 @@ class TwoProcessIsolationTests(unittest.TestCase):
 
     @classmethod
     def request(cls, name, method, path, **kwargs):
-        with httpx.Client(trust_env=False, timeout=5) as client:
-            return client.request(method, f"http://127.0.0.1:{cls.ports[name]}{path}", **kwargs)
+        headers = kwargs.pop("headers", {})
+        headers = {"Origin": f"http://127.0.0.1:{cls.ports[name]}", "X-CSRF-Token": cls.csrf.get(name, ""), **headers}
+        with httpx.Client(trust_env=False, timeout=5, cookies=cls.cookies.get(name, {})) as client:
+            return client.request(method, f"http://127.0.0.1:{cls.ports[name]}{path}", headers=headers, **kwargs)
 
     def ok(self, name, method, path, **kwargs):
         response = self.request(name, method, path, **kwargs)
@@ -353,19 +381,22 @@ class TwoProcessIsolationTests(unittest.TestCase):
 
     def test_custom_storage_urls_exports_and_shared_folders_work_inside_instance(self):
         folder = self.roots["A"] / "custom-storage"
-        self.ok("A", "PATCH", "/api/storage-settings", json={"generated": str(folder)})
+        self.assertEqual(self.request("A", "PATCH", "/api/storage-settings", json={"generated": str(folder)}).status_code, 403)
+        # A trusted local fixture configures storage before startup, never an auth bypass.
+        self.stop("A")
+        (self.roots["A"] / "data/storage_settings.json").write_text(json.dumps({"generated": str(folder)}))
+        self.start("A")
         try:
             exported = self.ok("A", "POST", "/api/smart-canvas/group-export",
                                json={"folder": str(folder), "items": [{"kind": "text", "name": "note", "text": "A-only"}]})
             self.assertEqual(exported["count"], 1)
             self.assertEqual(self.request("A", "GET", "/api/storage-files/generated/note.txt").text, "A-only")
             self.assertEqual(self.request("B", "GET", "/api/storage-files/generated/note.txt").status_code, 404)
-            shared = self.ok("A", "POST", "/api/shared-folders", json={"path": str(folder)})["folder"]
-            self.assertEqual(self.request("B", "GET", "/api/shared-folders/"+shared["id"]+"/tree").status_code, 404)
-            self.assertIn(self.request("A", "GET", "/api/shared-folders/"+shared["id"]+"/file",
-                                       params={"path": "../../B/assets/output/same-name.png"}).status_code, (400, 403))
+            self.assertEqual(self.request("A", "POST", "/api/shared-folders", json={"path": str(folder)}).status_code, 403)
         finally:
-            self.ok("A", "PATCH", "/api/storage-settings", json={})
+            self.stop("A")
+            (self.roots["A"] / "data/storage_settings.json").write_text("{}")
+            self.start("A")
 
     def test_prompt_projects_conversations_and_custom_workflows_are_independent(self):
         for name in ("A", "B"):
@@ -428,8 +459,9 @@ class TwoProcessIsolationTests(unittest.TestCase):
                 if key not in {"PROGRAM_ROOT", "STATIC_DIR", "INSTANCE_ID", "pid"}:
                     self.assertTrue(Path(value).is_relative_to(self.roots[name]), (key, value))
             config = self.ok(name, "GET", "/api/config")
-            self.assertFalse(config["has_api_key"])
-            self.assertFalse(config["has_ms_key"])
+            self.assertNotIn("has_api_key", config)
+            self.assertNotIn("has_ms_key", config)
+            self.assertNotIn("base_url", json.dumps(config))
         self.assertNotEqual(snapshots[0]["pid"], snapshots[1]["pid"])
 
     def test_mock_llm_uses_only_explicit_fake_provider(self):
@@ -437,7 +469,7 @@ class TwoProcessIsolationTests(unittest.TestCase):
             providers = [{"id": "mock", "name": "Mock", "protocol": "openai", "enabled": True,
                           "base_url": f"http://127.0.0.1:{self.mock.server_port}/v1",
                           "chat_models": ["mock-chat"], "api_key": "fake-"+name}]
-            self.ok(name, "PUT", "/api/providers", json=providers)
+            self.assertEqual(self.request(name, "PUT", "/api/providers", json=providers).status_code, 403)
             response = self.ok(name, "POST", "/api/canvas-llm",
                                json={"provider": "mock", "model": "mock-chat", "message": "reply OK only", "images": [], "videos": []})
             self.assertIn("MOCK OK", json.dumps(response))

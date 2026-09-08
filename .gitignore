@@ -1,4 +1,7 @@
 # Credentials
+/.auth/
+/.instance.json
+/.instance.lock
 /API/.env
 /API/openai-gpt-account-auth.json
 

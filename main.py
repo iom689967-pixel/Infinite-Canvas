@@ -43,6 +43,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from instance_auth import AuthStore, PRINCIPAL, task_namespace
+from instance_http import InstanceAuthMiddleware
+
+INSTANCE_AUTH = None
+if PATHS.explicit:
+    INSTANCE_AUTH = AuthStore(INSTANCE_DATA_ROOT, INSTANCE_ID, ttl=PATHS.session_ttl)
+    INSTANCE_AUTH.start_server()
+
 from providers.kie import (
     KIE_BASE_URL,
     KIE_MODEL_NAMES,
@@ -229,12 +237,13 @@ async def instance_control_boundary(request: Request, call_next):
             return JSONResponse(status_code=403, content={"detail": "独立实例禁用源码更新、回滚及全局 CLI 登录操作"})
     return await call_next(request)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if not PATHS.explicit:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -1774,6 +1783,8 @@ def fetch_release_update_notes(version: str, timeout: float = 3.0) -> Dict[str, 
     }
 
 def versioned_static_html(html: str) -> str:
+    if PATHS.explicit and "/static/js/instance-session.js" not in html:
+        html = html.replace("<head>", '<head><script src="/static/js/instance-session.js"></script>', 1)
     version = current_app_version()
     if not version:
         return html
@@ -2079,12 +2090,15 @@ def check_update():
 RELEASE_MANIFEST_SCHEMA_VERSION = 1
 RELEASE_MANIFEST_FILENAME = "release-manifest.json"
 LOCAL_UPDATE_PROTECTED_FILES = frozenset({
+    ".instance.json",
+    ".instance.lock",
     "history.json",
     "infinite-canvas-启动.command",
     "infinite-canvas-停止.command",
     "infinite-canvas-重启.command",
 })
 LOCAL_UPDATE_PROTECTED_PREFIXES = (
+    ".auth/",
     "api/",
     "data/",
     "assets/",
@@ -3708,6 +3722,11 @@ def get_comfy_history(comfy_address, prompt_id):
         return {}
 
 def safe_user_id(user_id, request: Request):
+    if PATHS.explicit:
+        principal = PRINCIPAL.get()
+        if not principal:
+            raise HTTPException(status_code=401, detail="请先登录")
+        return principal["subject"]
     candidate = (user_id or "").strip()
     if not candidate and request.client:
         candidate = f"ip-{request.client.host}"
@@ -12396,7 +12415,7 @@ async def build_chat_text_reply(payload, conversation):
 
 @app.get("/")
 async def index():
-    return static_html_response("index.html")
+    return static_html_response("instance-workspace.html" if PATHS.explicit else "index.html")
 
 @app.get("/api/view")
 def view_image(filename: str, type: str = "input", subfolder: str = ""):
@@ -15515,6 +15534,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    require_instance_provider(payload.provider_id, payload.model)
     if payload.provider_id == "kie":
         try:
             # 在创建本地后台任务之前完成模型、比例、分辨率、格式和数量校验，
@@ -15533,6 +15553,7 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
     cancel_event = asyncio.Event()
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
+            **({"owner": PRINCIPAL.get()["subject"]} if PATHS.explicit else {}),
             "id": task_id,
             "type": "online-image",
             "status": "queued",
@@ -15552,8 +15573,11 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
 async def get_canvas_image_task(task_id: str):
     with CANVAS_TASK_LOCK:
         task = dict(CANVAS_TASKS.get(task_id) or {})
-    if not task:
+    if not task or (PATHS.explicit and task.get("owner") != (PRINCIPAL.get() or {}).get("subject")):
         raise HTTPException(status_code=404, detail="画布任务不存在，可能服务已重启或任务已过期")
+    task.pop("owner", None)
+    if PATHS.explicit and task.get("error"):
+        task["error"] = "任务失败或已停止，请重试或联系管理员"
     return task
 
 
@@ -15561,7 +15585,7 @@ async def get_canvas_image_task(task_id: str):
 async def cancel_canvas_image_task(task_id: str):
     with CANVAS_TASK_LOCK:
         task = CANVAS_TASKS.get(task_id)
-        if not task:
+        if not task or (PATHS.explicit and task.get("owner") != (PRINCIPAL.get() or {}).get("subject")):
             raise HTTPException(status_code=404, detail="画布任务不存在")
         if task.get("status") in {"succeeded", "failed", "canceled"}:
             return {
@@ -17085,7 +17109,7 @@ def log_canvas_llm_cancelled(request_id, payload, started_at, phase):
 
 @app.post("/api/canvas-llm/cancel")
 async def cancel_canvas_llm(payload: CanvasLLMCancelRequest):
-    request_id = payload.request_id
+    request_id = task_namespace(payload.request_id)
     mark_canvas_llm_cancelled(request_id)
     task = CANVAS_LLM_ACTIVE_REQUESTS.get(request_id)
     active = bool(task and not task.done())
@@ -17258,7 +17282,8 @@ async def _canvas_llm_impl(payload: CanvasLLMRequest, request_id: str, started_a
 
 @app.post("/api/canvas-llm")
 async def canvas_llm(payload: CanvasLLMRequest):
-    request_id = payload.request_id or uuid.uuid4().hex
+    require_instance_provider(payload.provider, payload.model)
+    request_id = task_namespace(payload.request_id or uuid.uuid4().hex)
     started_at = time.monotonic()
     cleanup_canvas_llm_cancel_markers()
     if CANVAS_LLM_CANCEL_MARKERS.pop(request_id, None) is not None:
@@ -18641,6 +18666,7 @@ async def purge_canvas(canvas_id: str):
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+    require_instance_provider(payload.provider, payload.model)
     user_id = safe_user_id(x_user_id, request)
     conversation = (
         load_conversation(user_id, payload.conversation_id)
@@ -18872,6 +18898,7 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
 
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+    require_instance_provider(payload.provider, payload.model)
     if payload.mode == "image":
         raise HTTPException(status_code=400, detail="图片模式请使用 /api/chat")
 
@@ -20357,10 +20384,46 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
     )
     return generate(req)
 
+def require_instance_provider(provider_id, model=""):
+    if not PATHS.explicit:
+        return
+    if not PRINCIPAL.get():
+        raise HTTPException(status_code=401, detail="请先登录")
+    provider = get_api_provider(provider_id)
+    if not instance_provider_allowed(provider) or (model and model not in [*provider.get("chat_models", []), *provider.get("image_models", [])]):
+        raise HTTPException(status_code=403, detail="此 Provider 或模型尚未开放")
+
+def instance_provider_allowed(provider):
+    if not isinstance(provider, dict) or not provider.get("enabled", True) or provider.get("protocol") not in {"openai", "gemini"}:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(provider.get("base_url", ""))
+        return parsed.scheme == "http" and not parsed.username and not parsed.password and (parsed.hostname, parsed.port) in PATHS.upstreams
+    except ValueError:
+        return False
+
+def assistant_model_catalog():
+    providers = []
+    for provider in load_api_providers():
+        if not instance_provider_allowed(provider):
+            continue
+        providers.append({key: provider.get(key, [] if key.endswith("_models") else "")
+                          for key in ("id", "name", "protocol", "chat_models", "image_models")})
+        providers[-1].update(enabled=True, video_models=[])
+    return {"api_providers": providers,
+            "chat_models": list(dict.fromkeys(m for p in providers for m in p["chat_models"])),
+            "image_models": list(dict.fromkeys(m for p in providers for m in p["image_models"])),
+            "video_models": []}
+
+if PATHS.explicit:
+    app.add_middleware(InstanceAuthMiddleware, routes=app.routes, paths=PATHS,
+                       store=INSTANCE_AUTH, catalog=assistant_model_catalog)
+
 if __name__ == "__main__":
     import uvicorn
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
     uvicorn.run(app, host=INSTANCE_HOST, port=INSTANCE_PORT,
-                ws_ping_interval=None, ws_ping_timeout=None)
+                ws_ping_interval=None, ws_ping_timeout=None, proxy_headers=not PATHS.explicit,
+                ws="websockets-sansio" if PATHS.explicit else "auto")

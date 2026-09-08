@@ -4,6 +4,10 @@
   "include": [
     "main.py",
     "instance_paths.py",
+    "instance_auth.py",
+    "instance_http.py",
+    "instance_access.py",
+    "instance_admin.py",
     "VERSION",
     "release-manifest.json",
     "requirements.txt",
@@ -31,6 +35,9 @@
     "登录即梦CLI.command"
   ],
   "protected": [
+    ".auth/",
+    ".instance.json",
+    ".instance.lock",
     "API/",
     "data/",
     "assets/",

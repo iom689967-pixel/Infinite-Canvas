@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实例工作台 · Infinite-Canvas</title>
+<style>body{margin:0;font:14px system-ui;background:#10161e;color:#e9eef5}header{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid #354252}button{cursor:pointer;padding:8px 14px;background:#263448;border:1px solid #64758b;border-radius:8px;color:inherit}small{color:#acb9ca}#instance-identity{margin-left:auto}iframe{display:block;width:100%;height:calc(100vh - 64px);border:0;background:white}</style>
+</head><body><header><strong>Infinite-Canvas</strong>
+<button data-instance-page="/static/canvas-list.html">画布</button>
+<button data-instance-page="/static/asset-manager.html">素材 / Prompt</button>
+<button data-instance-page="/static/gpt-chat.html">对话</button>
+<small>真实 Provider、CLI、转码及管理功能尚未开放</small>
+<span id="instance-identity"></span><button id="instance-logout">退出</button></header>
+<iframe id="instance-frame" title="实例工作台" src="/static/canvas-list.html"></iframe>
+</body></html>

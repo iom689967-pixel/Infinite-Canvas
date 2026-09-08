@@ -74,6 +74,16 @@ class InstancePaths:
             raise RuntimeError("Invalid INSTANCE_PORT") from exc
         if not 1024 <= self.port <= 65535:
             raise RuntimeError("INSTANCE_PORT must be 1024..65535")
+        flag = os.environ.get("INSTANCE_AUTH_ALLOW_HTTP_LOOPBACK", "0")
+        if flag not in {"0", "1"}:
+            raise RuntimeError("INSTANCE_AUTH_ALLOW_HTTP_LOOPBACK must be 0 or 1")
+        self.auth_http_loopback = flag == "1"
+        try:
+            self.session_ttl = int(os.environ.get("INSTANCE_SESSION_TTL_SECONDS", "28800"))
+        except ValueError as exc:
+            raise RuntimeError("Invalid session lifetime") from exc
+        if not 1 <= self.session_ttl <= 86400:
+            raise RuntimeError("Session lifetime must be 1..86400 seconds")
         # Phase 1 has no shared services. Only administrator-selected local mock endpoints.
         self.upstreams = set()
         for item in os.environ.get("INSTANCE_MOCK_UPSTREAMS", "").split(","):
@@ -206,6 +216,12 @@ class InstancePaths:
         resolved = candidate.resolve()
         if not _inside(resolved, self.data_root):
             raise InstanceBoundaryError("Path is outside this instance")
+        rel = resolved.relative_to(self.data_root).as_posix().casefold()
+        private = (".auth", "api", ".runtime", ".instance.json", ".instance.lock",
+                   "global_config.json", "data/api_providers.json", "data/storage_settings.json",
+                   "data/shared_folders.json")
+        if any(rel == part or rel.startswith(part + "/") for part in private):
+            raise InstanceBoundaryError("Private instance configuration is not a user file")
         # Reject even in-root symlinks to keep delete/rename semantics unambiguous.
         for part in (candidate, *candidate.parents):
             if part == self.data_root:
