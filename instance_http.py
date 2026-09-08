@@ -11,6 +11,7 @@ from starlette.routing import Match
 
 from instance_access import PUBLIC_STATIC, ROUTE_ACCESS, WORKBENCH_STATIC
 from instance_auth import PRINCIPAL
+from instance_model_policy import failure as model_access_failure
 
 
 class InstanceAuthMiddleware:
@@ -153,6 +154,14 @@ class InstanceAuthMiddleware:
                     # Uploaded HTML/SVG must not execute as an authenticated application page.
                     message["headers"].append((b"content-security-policy", b"sandbox; default-src 'none'"))
             elif failed and message["type"] == "http.response.body":
+                try:
+                    payload = json.loads(message.get('body', b''))
+                    detail = payload['detail']
+                    if payload == {'detail':model_access_failure(detail['code']).detail}:
+                        failed = False
+                        return await send(message)
+                except (ValueError, KeyError, TypeError):
+                    pass
                 message = {"type": "http.response.body", "body": json.dumps({"detail": "请求失败或功能尚未开放，请重试或联系管理员"}, ensure_ascii=False).encode(), "more_body": False}
                 stopped = True
             await send(message)

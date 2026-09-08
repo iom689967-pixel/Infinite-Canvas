@@ -2538,7 +2538,8 @@ function imageProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine' && (p.image_models || []).length);
 }
 function isKieProviderId(providerId){
-    return String(providerId || '').trim().toLowerCase() === 'kie';
+    const provider = apiProviders.find(item => item.id === providerId);
+    return provider ? provider.protocol === 'kie' : String(providerId || '').trim().toLowerCase() === 'kie';
 }
 function kieCapabilityKey(providerId=settings.provider_id, model=settings.model){
     return `${String(providerId || '').trim().toLowerCase()}:${String(model || '').trim()}`;
@@ -19110,7 +19111,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 outputSlot.images = [];
             }
             outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model, status:'queued'}));
-            outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
+            outputSlot.pending = taskResult.controlled ? taskIds.length : Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
             scheduleSave();
@@ -19614,7 +19615,7 @@ async function runGeneration(options={}){
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, status:'queued', generationId:generationAttempt?.id || ''}));
             bindNodeGenerationAttemptTasks(pendingNode, taskIds, {providerId:outImages.providerId, model:outImages.model});
-            pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
+            pendingNode.pending = outImages.controlled ? taskIds.length : Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
             pendingNode.running = false;
@@ -19841,6 +19842,16 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         n:1,
         reference_images:imageRefs
     };
+    const limits = apiProviders.find(item => item.id === runSettings.provider_id)?.model_limits?.[runSettings.model];
+    if(limits){
+        if(count > limits.max_images) throw new Error(`单次最多生成 ${limits.max_images} 张图片`);
+        payload.n = count;
+        payload.request_id = crypto.randomUUID();
+        const response = await fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        if(!response.ok) throw new Error(await response.text());
+        const task = await response.json();
+        return {taskIds:[task.task_id], count, controlled:true, providerId:payload.provider_id, model:payload.model};
+    }
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
@@ -20565,8 +20576,12 @@ class ImageTaskRecoverSignal extends Error {
         this.taskId = data.taskId || data.task_id || '';
         this.recoverTaskId = data.recoverTaskId || data.upstream_task_id || data.task_id || '';
         this.providerId = data.providerId || data.provider_id || '';
+        this.controlled = !!data.controlled;
         this.kind = data.kind || 'image';
     }
+}
+function controlledImageTaskRecovery(taskId, message){
+    return new ImageTaskRecoverSignal({taskId, recoverTaskId:taskId, controlled:true, message});
 }
 function extractUpstreamTaskId(text){
     const match = String(text || '').match(/(?:task_id|taskId|task id)\s*[=:：]\s*([A-Za-z0-9_.:-]+)/i);
@@ -20718,7 +20733,14 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     task.recoverTaskId = recoverTaskId;
     render();
     try {
-        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        let data;
+        if(task.controlled){
+            const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh`, {method:'POST'});
+            if(!response.ok) throw new Error(await response.text());
+            data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId)};
+        } else {
+            data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        }
         if(data.status === 'succeeded'){
             task.failed = false;
             task.querying = false;
@@ -20802,6 +20824,9 @@ async function pollSmartCanvasTask(taskId){
                 response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {signal:controller.signal});
             } catch(error){
                 if(controller.signal.aborted) throw new SmartTaskCancelledSignal();
+                if(apiProviders.some(provider => provider.model_limits)){
+                    throw controlledImageTaskRecovery(taskId, '本地任务查询断开，可手动查询原任务；未重新提交');
+                }
                 throw error;
             }
             if(!response.ok) throw new Error(await response.text());
@@ -20814,6 +20839,9 @@ async function pollSmartCanvasTask(taskId){
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
                 if(recoverTaskId && !smartTaskHasTerminalFailure({status:task.upstream_status})){
                     throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+                }
+                if(task.recovery === 'query-existing'){
+                    throw controlledImageTaskRecovery(taskId, task.error);
                 }
                 throw new Error(task.error || tr('smart.errRunFailed'));
             }
@@ -20947,6 +20975,7 @@ async function resumeSmartPendingNode(node, logContext={}){
                 liveTask.failed = true;
                 liveTask.querying = false;
                 liveTask.recoverTaskId = e.recoverTaskId;
+                liveTask.controlled = !!e.controlled;
                 liveTask.providerId = e.providerId || liveTask.providerId || providerIdForSmartTask(node, liveTask);
                 liveTask.error = e.message || tr('smart.errRunFailed');
                 node.running = false;

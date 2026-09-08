@@ -45,8 +45,11 @@ from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
 from instance_auth import AuthStore, PRINCIPAL, task_namespace
 from instance_http import InstanceAuthMiddleware
+from instance_model_tasks import ControlledModels
+from instance_model_policy import failure as model_access_failure
 
 INSTANCE_AUTH = None
+INSTANCE_MODELS = None
 if PATHS.explicit:
     INSTANCE_AUTH = AuthStore(INSTANCE_DATA_ROOT, INSTANCE_ID, ttl=PATHS.session_ttl)
     INSTANCE_AUTH.start_server()
@@ -235,6 +238,9 @@ async def instance_control_boundary(request: Request, call_next):
         if (path.startswith(("/api/update-", "/api/codex", "/api/jimeng", "/api/gemini-cli"))
                 or path == "/api/check-update"):
             return JSONResponse(status_code=403, content={"detail": "独立实例禁用源码更新、回滚及全局 CLI 登录操作"})
+        if (INSTANCE_MODELS and INSTANCE_MODELS.policy.providers and request.method == 'POST'
+                and path in {'/api/local-assets/caption', '/api/local-assets/classify', '/api/asset-library/items/classify'}):
+            return JSONResponse(status_code=403, content={'detail':'自动素材描述/分类尚未开放，请使用 Canvas 获批模型'})
     return await call_next(request)
 
 if not PATHS.explicit:
@@ -1555,8 +1561,17 @@ def get_primary_provider_id(providers=None):
     return providers[0]["id"] if providers else "modelscope"
 
 def get_api_provider(provider_id="comfly"):
+    if PATHS.explicit and INSTANCE_MODELS and INSTANCE_MODELS.policy.providers:
+        configured = INSTANCE_MODELS.policy.providers.get(provider_id)
+        if not configured:
+            raise model_access_failure('not_allowed')
+        return {**configured, 'name':configured['id'], 'enabled':True,
+                'chat_models':list(configured['models']) if configured['protocol'] == 'gemini' else [],
+                'image_models':list(configured['models']) if configured['protocol'] == 'kie' else []}
     providers = load_api_providers()
     target = (provider_id or "").strip().lower()
+    if PATHS.explicit and not any(p['id'] == target for p in providers):
+        raise model_access_failure('not_configured', 503)
     # 兼容旧的 "comfly" 硬编码：若 comfly 不存在或未指定，回退到首选 provider
     if not target or not any(p["id"] == target for p in providers):
         target = get_primary_provider_id(providers)
@@ -3004,6 +3019,7 @@ class OnlineImageRequest(BaseModel):
     output_format: str = ""
     operation: str = ""
     resolution_type: str = ""
+    request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
 
 class MidjourneySubmitRequest(BaseModel):
     provider_id: str = ""
@@ -15534,6 +15550,8 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        return INSTANCE_MODELS.create(payload)
     require_instance_provider(payload.provider_id, payload.model)
     if payload.provider_id == "kie":
         try:
@@ -15571,6 +15589,8 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
 
 @app.get("/api/canvas-image-tasks/{task_id}")
 async def get_canvas_image_task(task_id: str):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        return INSTANCE_MODELS.get(task_id)
     with CANVAS_TASK_LOCK:
         task = dict(CANVAS_TASKS.get(task_id) or {})
     if not task or (PATHS.explicit and task.get("owner") != (PRINCIPAL.get() or {}).get("subject")):
@@ -15583,6 +15603,8 @@ async def get_canvas_image_task(task_id: str):
 
 @app.delete("/api/canvas-image-tasks/{task_id}")
 async def cancel_canvas_image_task(task_id: str):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        return INSTANCE_MODELS.cancel(task_id)
     with CANVAS_TASK_LOCK:
         task = CANVAS_TASKS.get(task_id)
         if not task or (PATHS.explicit and task.get("owner") != (PRINCIPAL.get() or {}).get("subject")):
@@ -15625,6 +15647,12 @@ async def cancel_canvas_image_task(task_id: str):
             "已停止本地等待；任务可能已提交服务商并继续执行"
         ),
     }
+
+@app.post("/api/canvas-image-tasks/{task_id}/refresh")
+async def refresh_controlled_image_task(task_id: str):
+    if not PATHS.explicit or not INSTANCE_MODELS.policy.providers:
+        raise model_access_failure('not_configured', 503)
+    return INSTANCE_MODELS.refresh(task_id)
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
@@ -15733,6 +15761,22 @@ def build_image_param_fields(engine: str, provider: dict, model: str):
 
 @app.get("/api/image-params")
 async def image_params(provider_id: str = "", model: str = ""):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        _, limits = INSTANCE_MODELS.policy.allowed(provider_id, model, 'image')
+        schema = build_kie_capability_schema(model)
+        schema['reference_image_limit'] = limits['max_references']
+        allowed = {'aspect_ratio':'aspect_ratios', 'resolution':'resolutions', 'output_format':'output_formats'}
+        for field in schema['fields']:
+            if field['key'] in allowed:
+                values = limits[allowed[field['key']]]
+                field['options'] = [option for option in field['options'] if option['value'] in values]
+                if field.get('default') not in values:
+                    field['default'] = values[0]
+            elif field['key'] == 'reference_images':
+                field.update(max=limits['max_references'], max_file_bytes=limits['max_reference_bytes'])
+            elif field['key'] == 'n':
+                field['max'] = limits['max_images']
+        return {**schema, 'engine':'api', 'provider_id':provider_id, 'submit':'/api/canvas-image-tasks'}
     providers = load_api_providers()
     provider = next((p for p in providers if p.get("id") == (provider_id or "").strip().lower()), None) or {}
     if is_kie_provider(provider):
@@ -17127,6 +17171,8 @@ async def cancel_canvas_llm(payload: CanvasLLMCancelRequest):
         "cancelled": True,
         "active": active,
         "pending_registration": not active,
+        **({'cancel_scope':'local-connection', 'upstream_cancel_confirmed':False,
+            'message':'已中断本地上游连接；未获得供应商停算或退款确认'} if PATHS.explicit else {}),
     }
 
 async def _canvas_llm_impl(payload: CanvasLLMRequest, request_id: str, started_at: float):
@@ -17296,6 +17342,8 @@ async def canvas_llm(payload: CanvasLLMRequest):
     if current_task:
         CANVAS_LLM_ACTIVE_REQUESTS[request_id] = current_task
     try:
+        if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+            return await INSTANCE_MODELS.llm(payload)
         return await _canvas_llm_impl(payload, request_id, started_at)
     except asyncio.CancelledError as exc:
         log_canvas_llm_cancelled(request_id, payload, started_at, "active_request")
@@ -18666,6 +18714,8 @@ async def purge_canvas(canvas_id: str):
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        raise model_access_failure('not_allowed')
     require_instance_provider(payload.provider, payload.model)
     user_id = safe_user_id(x_user_id, request)
     conversation = (
@@ -18898,6 +18948,8 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
 
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+        raise model_access_failure('not_allowed')
     require_instance_provider(payload.provider, payload.model)
     if payload.mode == "image":
         raise HTTPException(status_code=400, detail="图片模式请使用 /api/chat")
@@ -20389,6 +20441,9 @@ def require_instance_provider(provider_id, model=""):
         return
     if not PRINCIPAL.get():
         raise HTTPException(status_code=401, detail="请先登录")
+    if INSTANCE_MODELS and INSTANCE_MODELS.policy.providers:
+        INSTANCE_MODELS.policy.allowed(provider_id, model, 'llm')
+        return
     provider = get_api_provider(provider_id)
     if not instance_provider_allowed(provider) or (model and model not in [*provider.get("chat_models", []), *provider.get("image_models", [])]):
         raise HTTPException(status_code=403, detail="此 Provider 或模型尚未开放")
@@ -20403,6 +20458,8 @@ def instance_provider_allowed(provider):
         return False
 
 def assistant_model_catalog():
+    if INSTANCE_MODELS and INSTANCE_MODELS.policy.providers:
+        return INSTANCE_MODELS.policy.catalog()
     providers = []
     for provider in load_api_providers():
         if not instance_provider_allowed(provider):
@@ -20416,6 +20473,7 @@ def assistant_model_catalog():
             "video_models": []}
 
 if PATHS.explicit:
+    INSTANCE_MODELS = ControlledModels(PATHS, sys.modules[__name__])
     app.add_middleware(InstanceAuthMiddleware, routes=app.routes, paths=PATHS,
                        store=INSTANCE_AUTH, catalog=assistant_model_catalog)
 

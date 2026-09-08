@@ -13,6 +13,7 @@ import sys
 import sysconfig
 import tempfile
 from threading import Lock
+from instance_model_policy import OUTBOUND_ENDPOINTS
 
 
 class _InstanceLogStream:
@@ -292,7 +293,8 @@ class InstancePaths:
                     raise InstanceBoundaryError("Instance listener must use configured loopback host/port")
             elif event == "socket.connect":
                 address = args[1]
-                if not isinstance(address, tuple) or tuple(address[:2]) not in self.upstreams:
+                if not isinstance(address, tuple) or (tuple(address[:2]) not in self.upstreams
+                                                      and tuple(address[:2]) not in OUTBOUND_ENDPOINTS.get()):
                     raise InstanceBoundaryError("Only configured local mock upstreams are enabled in Phase 1")
             elif event in {"os.system", "os.fork", "os.forkpty", "os.posix_spawn", "os.exec"}:
                 raise InstanceBoundaryError("Shell/fork execution is disabled in explicit instances")

@@ -80,6 +80,7 @@ ROUTE_ACCESS = {
     "POST /api/canvas-image-tasks": "workbench",
     "GET /api/canvas-image-tasks/{task_id}": "workbench",
     "DELETE /api/canvas-image-tasks/{task_id}": "workbench",
+    "POST /api/canvas-image-tasks/{task_id}/refresh": "workbench",
     "POST /api/canvas-comfy-tasks": "disabled",
     "GET /api/canvas-comfy-tasks/{task_id}": "disabled",
     "GET /api/image-params": "workbench",

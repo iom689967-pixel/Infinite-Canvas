@@ -8,6 +8,8 @@
     "instance_http.py",
     "instance_access.py",
     "instance_admin.py",
+    "instance_model_policy.py",
+    "instance_model_tasks.py",
     "VERSION",
     "release-manifest.json",
     "requirements.txt",

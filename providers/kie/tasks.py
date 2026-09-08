@@ -115,7 +115,7 @@ async def poll_task(
         except KieAPIError:
             raise
         status = task_status(last_payload)
-        if first_query or status != last_logged_status:
+        if (first_query or status != last_logged_status) and not getattr(client, 'quiet', False):
             print(json.dumps({
                 "event": "kie_task_state",
                 "taskId": task_id,
@@ -130,12 +130,13 @@ async def poll_task(
                 await value
         if status == KIE_SUCCESS_STATUS:
             result_urls = parse_result_urls(last_payload, task_id)
-            print(json.dumps({
-                "event": "kie_task_result",
-                "taskId": task_id,
-                "finalState": status,
-                "resultUrlsCount": len(result_urls),
-            }, ensure_ascii=False), flush=True)
+            if not getattr(client, 'quiet', False):
+                print(json.dumps({
+                    "event": "kie_task_result",
+                    "taskId": task_id,
+                    "finalState": status,
+                    "resultUrlsCount": len(result_urls),
+                }, ensure_ascii=False), flush=True)
             return {
                 "taskId": task_id,
                 "status": status,

@@ -13,10 +13,18 @@ from test_instance_isolation import TwoProcessIsolationTests
 
 
 def main():
-    fixture = TwoProcessIsolationTests
+    controlled = '--controlled-models' in sys.argv
+    if controlled:
+        from test_instance_models import ControlledModelTests
+        fixture = ControlledModelTests()
+    else:
+        fixture = TwoProcessIsolationTests
     clipboard = None
     try:
-        fixture.setUpClass()
+        if controlled:
+            fixture.setUp()
+        else:
+            fixture.setUpClass()
         picture = fixture.root / "browser-upload.png"
         from PIL import Image
         Image.new("RGB", (64, 48), "#76a9d0").save(picture)
@@ -31,10 +39,20 @@ def main():
                 print("Temporary password copied; no credential output.", flush=True)
             elif command.strip() == "finish":
                 break
+            elif command.strip() == 'evidence' and controlled:
+                calls = fixture.mock.calls
+                print(json.dumps({'llm':sum(k=='llm' for k,_,_ in calls),
+                                  'reference_uploads':sum(k=='upload' for k,_,_ in calls),
+                                  'image_submissions':sum(k=='create' for k,_,_ in calls),
+                                  'result_downloads':sum(k=='media' for k,_,_ in calls),
+                                  'canvases':len(list((fixture.roots['A']/'data/canvases').glob('*.json')))}),flush=True)
     finally:
         if clipboard is not None:
             subprocess.run(["pbcopy"], input=clipboard, check=True)
-        fixture.tearDownClass()
+        if controlled:
+            fixture.doCleanups()
+        else:
+            fixture.tearDownClass()
         print("Temporary processes/data cleaned; original clipboard restored.", flush=True)
 
 

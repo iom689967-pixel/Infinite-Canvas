@@ -37,6 +37,7 @@ class KieClient:
         self.api_key = api_key
         self.base_url = str(base_url or KIE_BASE_URL).strip().rstrip("/")
         self._http_client = http_client
+        self.quiet = bool(getattr(http_client, 'quiet', False))
         self.last_http_status = None
         self.last_request_url = ""
 
@@ -59,7 +60,8 @@ class KieClient:
             response = await client.request(method, request_url, headers=self.headers(), **kwargs)
             self.last_http_status = response.status_code
         except httpx.HTTPError as exc:
-            raise KieAPIError(f"Kie 网络请求失败：{exc}", status_code=502) from exc
+            raise KieAPIError(f"Kie 网络请求失败：{exc}", status_code=502,
+                              code='timeout' if isinstance(exc, httpx.TimeoutException) else 'network') from exc
         finally:
             if owns_client:
                 await client.aclose()
@@ -87,12 +89,13 @@ class KieClient:
         task_id = str(data.get("taskId") or "").strip()
         if not task_id:
             raise KieAPIError("Kie 创建任务成功但没有返回 data.taskId", raw=raw)
-        print(json.dumps({
-            "event": "kie_create_task",
-            "httpStatus": self.last_http_status,
-            "requestUrl": self.last_request_url,
-            "taskId": task_id,
-        }, ensure_ascii=False), flush=True)
+        if not self.quiet:
+            print(json.dumps({
+                "event": "kie_create_task",
+                "httpStatus": self.last_http_status,
+                "requestUrl": self.last_request_url,
+                "taskId": task_id,
+            }, ensure_ascii=False), flush=True)
         return task_id, raw
 
     async def query_task(self, task_id):
@@ -101,10 +104,11 @@ class KieClient:
             raise KieAPIError("Kie taskId 不能为空", status_code=400)
         query = urllib.parse.urlencode({"taskId": task_id})
         raw = await self._request_json("GET", f"/api/v1/jobs/recordInfo?{query}")
-        print(json.dumps({
-            "event": "kie_query_task",
-            "httpStatus": self.last_http_status,
-            "requestUrl": self.last_request_url,
-            "taskId": task_id,
-        }, ensure_ascii=False), flush=True)
+        if not self.quiet:
+            print(json.dumps({
+                "event": "kie_query_task",
+                "httpStatus": self.last_http_status,
+                "requestUrl": self.last_request_url,
+                "taskId": task_id,
+            }, ensure_ascii=False), flush=True)
         return raw

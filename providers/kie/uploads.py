@@ -78,8 +78,9 @@ def _log_reference_source_cache(action, fingerprint=""):
 class KieReferenceUploadCache:
     """Persistent two-level cache for local sources and normalized Kie uploads."""
 
-    def __init__(self, path=KIE_REFERENCE_CACHE_PATH, *, ttl_seconds=None, now_fn=None):
+    def __init__(self, path=KIE_REFERENCE_CACHE_PATH, *, ttl_seconds=None, now_fn=None, url_validator=None):
         self.path = Path(path)
+        self.url_validator = url_validator
         self.ttl_seconds = max(
             60.0,
             _safe_timestamp(ttl_seconds, _cache_ttl_from_env()),
@@ -152,7 +153,8 @@ class KieReferenceUploadCache:
             created_at = _safe_timestamp(entry.get("created_at"))
             expires_at = _safe_timestamp(entry.get("expires_at"))
             url = str(entry.get("kie_url") or "").strip()
-            if entry.get("sha256") != digest or not url.startswith("https://") or validated_at <= 0:
+            valid_url = self.url_validator(url) if self.url_validator else url.startswith("https://")
+            if entry.get("sha256") != digest or not valid_url or validated_at <= 0:
                 entries.pop(digest, None)
                 self._write_payload_unlocked(entries, payload["sources"])
                 return "invalid", None
@@ -510,7 +512,7 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
     upload_name = f"{stem}-{digest}{meta['extension']}"
     try:
         response = await client.post(
-            f"{KIE_UPLOAD_BASE_URL}{KIE_STREAM_UPLOAD_PATH}",
+            f"{getattr(client, 'kie_upload_base_url', KIE_UPLOAD_BASE_URL).rstrip('/')}{KIE_STREAM_UPLOAD_PATH}",
             headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
             data={"uploadPath": KIE_UPLOAD_PATH, "fileName": upload_name},
             files={"file": (upload_name, content, meta["mime_type"])},
@@ -553,7 +555,8 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
         )
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     public_url = str(data.get("downloadUrl") or data.get("fileUrl") or "").strip()
-    if not public_url.startswith("https://"):
+    valid_url = client.validate_media_url(public_url) if hasattr(client, 'validate_media_url') else public_url.startswith("https://")
+    if not valid_url:
         raise KieReferenceError(
             "Kie File Upload 没有返回公网 HTTPS downloadUrl/fileUrl",
             index=index,
@@ -1385,6 +1388,8 @@ async def prepare_kie_references(
     finally:
         if owns_client:
             await client.aclose()
+    if getattr(client, 'quiet', False):
+        return prepared_urls, audits
     print(json.dumps({"event": "kie_reference_preflight", "references": audits}, ensure_ascii=False), flush=True)
     print(json.dumps({
         "event": "kie_reference_prepare_metrics",
