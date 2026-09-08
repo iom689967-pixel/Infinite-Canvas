@@ -19,6 +19,8 @@ from instance_paths import INSTANCE_DATA_ROOT
 import httpx
 from PIL import Image, ImageOps
 
+from .safe_log import log_kie_event
+
 
 KIE_UPLOAD_BASE_URL = "https://kieai.redpandaai.co"
 KIE_STREAM_UPLOAD_PATH = "/api/file-stream-upload"
@@ -1039,10 +1041,10 @@ async def prepare_kie_references(
     max_bytes,
     cache=None,
     http_client=None,
+    log_context=None,
 ):
     prepared_urls = []
     audits = []
-    timing_rows = []
     reference_contexts = []
     cache_hits = 0
     cache_misses = 0
@@ -1283,7 +1285,6 @@ async def prepare_kie_references(
                 "validate_ms": round(validate_ms, 3),
                 "total_reference_prepare_ms": round(reference_total_ms, 3),
             }
-            timing_rows.append(timing)
             audits.append({
                 "index": index,
                 "filename": filename,
@@ -1390,21 +1391,29 @@ async def prepare_kie_references(
             await client.aclose()
     if getattr(client, 'quiet', False):
         return prepared_urls, audits
-    print(json.dumps({"event": "kie_reference_preflight", "references": audits}, ensure_ascii=False), flush=True)
-    print(json.dumps({
-        "event": "kie_reference_prepare_metrics",
-        "total_reference_prepare_ms": round((time.perf_counter() - total_started) * 1000, 3),
-        "cache_hits": cache_hits,
-        "cache_misses": cache_misses,
-        "source_cache_hits": source_cache_hits,
-        "source_cache_misses": source_cache_misses,
-        "normalize_skipped_count": normalize_skipped_count,
-        "stale_normalize_avoided_count": stale_normalize_avoided_count,
-        "absolute_expired_count": absolute_expired_count,
-        "pre_submit_invalid_count": pre_submit_invalid_count,
-        "selective_reupload_count": selective_reupload_count,
-        "valid_reference_reuse_count": valid_reference_reuse_count,
-        "pre_submit_validation_ms": round(pre_submit_validation_ms, 3),
-        "references": timing_rows,
-    }, ensure_ascii=False), flush=True)
+    context = dict(log_context or {})
+    elapsed_ms = (time.perf_counter() - total_started) * 1000
+    log_kie_event(
+        "kie_reference_preflight", **context, stage="preflight",
+        reference_count=len(audits),
+        valid_reference_count=sum(1 for item in audits if item.get("public_url")),
+        invalid_reference_count=sum(1 for item in audits if not item.get("public_url")),
+        elapsed_ms=elapsed_ms,
+    )
+    log_kie_event(
+        "kie_reference_prepare_metrics", **context, stage="prepare",
+        reference_count=len(audits),
+        cache_hits=cache_hits,
+        cache_misses=cache_misses,
+        source_cache_hits=source_cache_hits,
+        source_cache_misses=source_cache_misses,
+        normalize_skipped_count=normalize_skipped_count,
+        stale_normalize_avoided_count=stale_normalize_avoided_count,
+        absolute_expired_count=absolute_expired_count,
+        pre_submit_invalid_count=pre_submit_invalid_count,
+        selective_reupload_count=selective_reupload_count,
+        valid_reference_reuse_count=valid_reference_reuse_count,
+        pre_submit_validation_ms=pre_submit_validation_ms,
+        elapsed_ms=elapsed_ms,
+    )
     return prepared_urls, audits

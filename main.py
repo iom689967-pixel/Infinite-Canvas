@@ -73,6 +73,7 @@ from providers.kie.tasks import (
     task_status as kie_task_status,
 )
 from providers.kie.uploads import KieReferenceError, prepare_kie_references
+from providers.kie.safe_log import log_kie_event, new_trace_id
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -11782,7 +11783,7 @@ def kie_reference_rules(model):
     }
 
 
-async def kie_public_reference_urls(model, reference_images):
+async def kie_public_reference_urls(model, reference_images, *, log_context=None):
     rules = kie_reference_rules(model)
     references = [ref for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")]
     if len(references) > rules["max"]:
@@ -11808,6 +11809,7 @@ async def kie_public_reference_urls(model, reference_images):
             references,
             resolve_local_path=resolve_local_path,
             max_bytes=rules["max_file_bytes"] or 30 * 1024 * 1024,
+            log_context=log_context,
         )
     except KieReferenceError as exc:
         raise HTTPException(status_code=400 if exc.stage != "kie-read" else 502, detail=str(exc)) from exc
@@ -11825,7 +11827,26 @@ async def generate_kie_provider_image(
     cancel_event=None,
     status_callback=None,
 ):
+    started_at = time.perf_counter()
+    trace_id = new_trace_id()
+    log_context = {
+        "trace_id": trace_id,
+        "provider": str((provider or {}).get("id") or "kie"),
+        "model": model,
+    }
     reference_audits = []
+
+    def log_failure(stage, category, exc):
+        status_code = getattr(exc, "status_code", None)
+        log_kie_event(
+            "kie_request_failed",
+            **log_context,
+            stage=stage,
+            http_status=status_code,
+            error_category=category,
+            elapsed_ms=(time.perf_counter() - started_at) * 1000,
+        )
+
     async def report_status(status, raw=None):
         if status_callback is None:
             return
@@ -11843,7 +11864,9 @@ async def generate_kie_provider_image(
     try:
         await report_status("preparing")
         ensure_not_cancelled()
-        reference_urls, reference_audits = await kie_public_reference_urls(model, reference_images)
+        reference_urls, reference_audits = await kie_public_reference_urls(
+            model, reference_images, log_context=log_context
+        )
         ensure_not_cancelled()
         create_payload, request_meta = build_kie_create_payload(
             model,
@@ -11854,12 +11877,23 @@ async def generate_kie_provider_image(
             output_format=output_format,
         )
         ensure_not_cancelled()
-        print(json.dumps({
-            "event": "kie_create_request",
-            "payload": create_payload,
-            "referenceAudits": reference_audits,
-        }, ensure_ascii=False), flush=True)
+        log_kie_event(
+            "kie_create_request",
+            **log_context,
+            stage="submit",
+            reference_count=len(reference_urls),
+            image_count=1,
+            resolution=request_meta.get("requested_resolution") or resolution,
+            aspect_ratio=request_meta.get("requested_aspect_ratio") or aspect_ratio,
+            output_format=request_meta.get("output_format") or output_format,
+            elapsed_ms=(time.perf_counter() - started_at) * 1000,
+        )
         client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
+        # Attribute assignment keeps lightweight test/custom clients compatible while
+        # giving the built-in client one request-scoped correlation context.
+        client.trace_id = trace_id
+        client.provider_id = log_context["provider"]
+        client.model = model
         # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
         await report_status("submitting")
         ensure_not_cancelled()
@@ -11885,18 +11919,22 @@ async def generate_kie_provider_image(
         }
         return {"type": "url", "value": urls[0]}, raw
     except KieValidationError as exc:
+        log_failure("validate", "validation", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KieTaskCancelled as exc:
+        log_failure("cancel", "canceled", exc)
         error = HTTPException(status_code=499, detail=str(exc))
         setattr(error, "upstream_task_id", exc.task_id)
         raise error from exc
     except TimeoutError as exc:
+        log_failure("poll", "timeout", exc)
         error = HTTPException(status_code=504, detail=str(exc))
         match = re.search(r"taskId=([^\s,]+)", str(exc))
         if match:
             setattr(error, "upstream_task_id", match.group(1))
         raise error from exc
     except KieTaskError as exc:
+        log_failure("poll", "upstream_task", exc)
         detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
         if reference_audits and any(token in str(exc).lower() for token in ("image info", "invalid image", "image format", "read image")):
             refs = "；".join(
@@ -11909,6 +11947,7 @@ async def generate_kie_provider_image(
         setattr(error, "upstream_task_id", exc.task_id)
         raise error from exc
     except KieAPIError as exc:
+        log_failure("submit_or_query", "upstream_api", exc)
         error_parts = [str(exc)]
         if exc.status_code:
             error_parts.append(f"HTTP {exc.status_code}")
@@ -11921,6 +11960,14 @@ async def generate_kie_provider_image(
         if exc.task_id:
             setattr(error, "upstream_task_id", exc.task_id)
         raise error from exc
+    except HTTPException as exc:
+        log_failure("prepare", "reference", exc)
+        raise
+    except Exception as exc:
+        # Do not let an unexpected upstream exception reach the server traceback with
+        # a possibly sensitive URL, request body, or vendor response in its message.
+        log_failure("unknown", "internal", exc)
+        raise HTTPException(status_code=502, detail="Kie 请求发生内部错误") from exc
 
 
 async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):

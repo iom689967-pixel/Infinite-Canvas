@@ -5,6 +5,7 @@ import json
 import time
 
 from .client import KieAPIError
+from .safe_log import log_kie_event
 
 
 KIE_WAITING_STATUSES = {"waiting", "queuing"}
@@ -116,12 +117,11 @@ async def poll_task(
             raise
         status = task_status(last_payload)
         if (first_query or status != last_logged_status) and not getattr(client, 'quiet', False):
-            print(json.dumps({
-                "event": "kie_task_state",
-                "taskId": task_id,
-                "state": status,
-                "firstQuery": first_query,
-            }, ensure_ascii=False), flush=True)
+            log_kie_event(
+                "kie_task_state", **getattr(client, "log_context", lambda: {})(),
+                stage="poll", status=status, first_query=first_query,
+                elapsed_ms=(time.monotonic() - started_at) * 1000,
+            )
             first_query = False
             last_logged_status = status
         if on_status is not None:
@@ -131,12 +131,11 @@ async def poll_task(
         if status == KIE_SUCCESS_STATUS:
             result_urls = parse_result_urls(last_payload, task_id)
             if not getattr(client, 'quiet', False):
-                print(json.dumps({
-                    "event": "kie_task_result",
-                    "taskId": task_id,
-                    "finalState": status,
-                    "resultUrlsCount": len(result_urls),
-                }, ensure_ascii=False), flush=True)
+                log_kie_event(
+                    "kie_task_result", **getattr(client, "log_context", lambda: {})(),
+                    stage="complete", status=status, result_count=len(result_urls),
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                )
             return {
                 "taskId": task_id,
                 "status": status,
