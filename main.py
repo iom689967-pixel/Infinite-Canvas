@@ -47,6 +47,26 @@ from instance_auth import AuthStore, PRINCIPAL, task_namespace
 from instance_http import InstanceAuthMiddleware
 from instance_model_tasks import ControlledModels
 from instance_model_policy import failure as model_access_failure
+from instance_storage_quota import StorageQuota
+
+INSTANCE_STORAGE = StorageQuota.for_paths(PATHS)
+PATHS.storage_quota = INSTANCE_STORAGE
+
+async def read_public_upload(file):
+    return await INSTANCE_STORAGE.read_upload(file, 50 * 1024**2) if INSTANCE_STORAGE else await file.read()
+
+def write_public_media(path, content):
+    if INSTANCE_STORAGE:
+        INSTANCE_STORAGE.write(path, content)
+    else:
+        with open(path, 'wb') as handle: handle.write(content)
+
+def copy_public_media(source, destination, preserve_metadata=True):
+    if INSTANCE_STORAGE:
+        with open(source, 'rb') as handle:
+            write_public_media(destination, handle.read(INSTANCE_STORAGE.max_upload + 1))
+    else:
+        (shutil.copy2 if preserve_metadata else shutil.copyfile)(source, destination)
 
 INSTANCE_AUTH = None
 INSTANCE_MODELS = None
@@ -3711,6 +3731,9 @@ def save_to_history(record, *, identity_key=None):
                 raise ValueError('Invalid history store')
             history = [item for item in history if item.get('task_id') != identity_key]
         history.insert(0, record)
+        if INSTANCE_STORAGE:
+            INSTANCE_STORAGE.replace_json(HISTORY_FILE, history[:5000])
+            return
         if identity_key is not None:
             # A recoverable task must not truncate existing history on a failed write.
             temporary = None
@@ -3819,6 +3842,9 @@ def canvas_path(canvas_id):
 def save_canvas(canvas):
     with CANVAS_LOCK:
         canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
+        if INSTANCE_STORAGE:
+            INSTANCE_STORAGE.replace_json(canvas_path(canvas['id']), canvas)
+            return
         with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
             json.dump(canvas, f, ensure_ascii=False, indent=2)
 
@@ -7867,7 +7893,7 @@ def import_local_image_file(path):
     filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
     dest = output_path_for(filename, "input")
     try:
-        shutil.copyfile(path, dest)
+        copy_public_media(path, dest, preserve_metadata=False)
     except OSError:
         raise HTTPException(status_code=500, detail="导入本地图片失败")
     return {"url": output_url_for(filename, "input"), "name": os.path.basename(path) or filename, "kind": "image"}
@@ -8039,7 +8065,7 @@ def make_asset_library_item(src: str, name: str = "", subdir: str = "") -> Tuple
     else:
         dest_path = os.path.join(ASSET_LIBRARY_DIR, dest_name)
         rel = dest_name
-    shutil.copy2(src, dest_path)
+    copy_public_media(src, dest_path)
     item = {
         "id": f"asset_{uuid.uuid4().hex[:12]}",
         "name": os.path.splitext(safe_name)[0][:120],
@@ -8313,8 +8339,7 @@ def make_workflow_library_item_from_bytes(raw: bytes, filename: str, name: str =
     dest_name = f"workflow_{uuid.uuid4().hex[:12]}_{safe_filename}"
     dest_path = os.path.join(ASSET_LIBRARY_DIR, dest_name)
     os.makedirs(ASSET_LIBRARY_DIR, exist_ok=True)
-    with open(dest_path, "wb") as f:
-        f.write(raw)
+    write_public_media(dest_path, raw)
     display_name = sanitize_asset_name(name or os.path.splitext(safe_filename)[0], "工作流")
     return {
         "id": f"wf_{uuid.uuid4().hex[:12]}",
@@ -10045,8 +10070,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
         elif "webp" in mime_type:
             filename = filename[:-4] + ".webp"
             path = output_path_for(filename, category)
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(image_data["value"]))
+        write_public_media(path, base64.b64decode(image_data["value"]))
         return output_url_for(filename, category)
     value = image_data["value"]
     if value.startswith("/output/") or value.startswith("/assets/"):
@@ -10064,8 +10088,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             elif "webp" in content_type:
                 filename = filename[:-4] + ".webp"
                 path = output_path_for(filename, category)
-            with open(path, "wb") as f:
-                f.write(response.content)
+            write_public_media(path, response.content)
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游图片失败: {e}; url={value}")
@@ -10143,8 +10166,7 @@ async def save_remote_video_to_output(url, prefix="video_", category="output"):
             elif "x-flv" in content_type or "flv" in content_type:
                 filename = f"{stem}.flv"
                 path = output_path_for(filename, category)
-            with open(path, "wb") as f:
-                f.write(response.content)
+            write_public_media(path, response.content)
             if os.path.getsize(path) <= 0:
                 raise RuntimeError("empty video response")
             return output_url_for(filename, category)
@@ -12635,7 +12657,7 @@ async def upload_image(files: List[UploadFile] = File(...)):
     uploaded_files = []
     files_content = []
     for file in files:
-        content = await file.read()
+        content = await read_public_upload(file)
         files_content.append((file, content))
 
     for file, content in files_content:
@@ -12667,7 +12689,7 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
     doc_exts = {".pdf", ".txt", ".md", ".markdown", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".json", ".zip", ".yaml", ".yml", ".log"}
     max_upload_bytes = 50 * 1024 * 1024
     for file in files:
-        content = await file.read()
+        content = await read_public_upload(file)
         if not content:
             continue
         if len(content) > max_upload_bytes:
@@ -12697,8 +12719,7 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
                 ext = ".bin"
         filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
         path = output_path_for(filename, "input")
-        with open(path, "wb") as f:
-            f.write(content)
+        write_public_media(path, content)
         uploaded.append({"url": output_url_for(filename, "input"), "name": file.filename or filename, "kind": kind, "mime": content_type})
     return {"files": uploaded}
 
@@ -12730,8 +12751,7 @@ async def upload_ai_base64(payload: Base64UploadRequest):
         kind, ext = "image", ".png"
     filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
     path = output_path_for(filename, "input")
-    with open(path, "wb") as f:
-        f.write(content)
+    write_public_media(path, content)
     return {"files": [{"url": output_url_for(filename, "input"), "name": payload.name or filename, "kind": kind}]}
 
 @app.post("/api/comfyui/upload-base64")
@@ -13044,7 +13064,7 @@ async def upload_local_assets(files: List[UploadFile] = File(...), folder: str =
     folder_rel, folder_abs = _local_upload_safe_folder(folder)
     os.makedirs(folder_abs, exist_ok=True)
     for file in files:
-        content = await file.read()
+        content = await read_public_upload(file)
         if not content:
             continue
         kind, ext = _local_upload_kind_ext(file.filename, file.content_type)
@@ -13056,8 +13076,7 @@ async def upload_local_assets(files: List[UploadFile] = File(...), folder: str =
         filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
         rel_name = f"{folder_rel}/{filename}".lstrip("/")
         path = os.path.join(folder_abs, filename)
-        with open(path, "wb") as f:
-            f.write(content)
+        write_public_media(path, content)
         if kind == "image":
             classification = await classify_asset_image_best_effort(path)
             if classification:
@@ -13124,8 +13143,7 @@ async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
                 filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
                 rel_name = f"{folder_rel}/{filename}".lstrip("/")
                 path = os.path.join(folder_abs, filename)
-                with open(path, "wb") as f:
-                    f.write(content)
+                write_public_media(path, content)
                 if payload.classify and kind == "image":
                     classification = await classify_asset_image_best_effort(path, payload.provider, payload.model, payload.ms_model, payload.prompt)
                     if classification:
@@ -16223,8 +16241,7 @@ async def save_video_bytes_to_output(data, prefix="video_", ext=".mp4"):
     extension = ext if ext in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".flv"} else ".mp4"
     filename = f"{prefix}{uuid.uuid4().hex[:10]}{extension}"
     path = output_path_for(filename, "output")
-    with open(path, "wb") as file:
-        file.write(data)
+    write_public_media(path, data)
     if os.path.getsize(path) <= 0:
         raise HTTPException(status_code=502, detail="上游视频下载为空")
     return output_url_for(filename, "output")
@@ -17280,6 +17297,9 @@ def build_canvas_workflow_archive(payload: CanvasWorkflowExportRequest) -> Tuple
     buffer = BytesIO()
     resources = []
     used = set()
+    export_bytes = len(json.dumps(nodes_payload).encode()) + len(json.dumps(connections_payload).encode())
+    if INSTANCE_STORAGE and export_bytes > INSTANCE_STORAGE.max_upload:
+        raise HTTPException(413, '单次导出超过大小限制，请减少选择范围')
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         if payload.include_resources:
             for url in canvas_workflow_collect_resource_refs(nodes_payload):
@@ -17288,6 +17308,9 @@ def build_canvas_workflow_archive(payload: CanvasWorkflowExportRequest) -> Tuple
                 path = output_file_from_url(url)
                 if not path or not os.path.isfile(path):
                     continue
+                export_bytes += os.path.getsize(path)
+                if INSTANCE_STORAGE and export_bytes > INSTANCE_STORAGE.max_upload:
+                    raise HTTPException(413, '单次导出超过大小限制，请减少选择范围')
                 archive_name = canvas_workflow_unique_archive_name(os.path.basename(path), used)
                 archive_path = f"resources/{archive_name}"
                 zf.write(path, archive_path)
@@ -17338,7 +17361,7 @@ async def upload_asset_library_workflows(
     _, cat = asset_library_workflow_category(lib, library_id, category_id)
     added = []
     for file in files[:100]:
-        raw = await file.read()
+        raw = await read_public_upload(file)
         filename = file.filename or "canvas-workflow.zip"
         lower = filename.lower()
         if not (lower.endswith(".json") or lower.endswith(".zip") or raw[:2] == b"PK"):
@@ -17353,7 +17376,7 @@ async def upload_asset_library_workflows(
 
 @app.post("/api/canvas-workflows/import")
 async def import_canvas_workflow(file: UploadFile = File(...)):
-    raw = await file.read()
+    raw = await read_public_upload(file)
     if not raw:
         raise HTTPException(status_code=400, detail="文件为空")
     name = str(file.filename or "").lower()
@@ -17362,6 +17385,12 @@ async def import_canvas_workflow(file: UploadFile = File(...)):
     try:
         if name.endswith(".zip") or raw[:2] == b"PK":
             with zipfile.ZipFile(BytesIO(raw), "r") as zf:
+                if INSTANCE_STORAGE:
+                    sizes = [info.file_size for info in zf.infolist() if not info.is_dir()]
+                    if len(sizes) > 1000 or any(size > INSTANCE_STORAGE.max_upload for size in sizes):
+                        raise HTTPException(413, '工作流压缩包超过导入大小限制')
+                    if sum(sizes) + INSTANCE_STORAGE.usage()['used_bytes'] > INSTANCE_STORAGE.limit:
+                        raise HTTPException(413, '当前工作区存储空间已满。')
                 candidates = [n for n in zf.namelist() if n.lower().endswith("workflow.json")]
                 workflow_name = "workflow.json" if "workflow.json" in zf.namelist() else (candidates[0] if candidates else "")
                 if not workflow_name:
@@ -17376,8 +17405,12 @@ async def import_canvas_workflow(file: UploadFile = File(...)):
                         continue
                     base = sanitize_export_filename(res.get("name") or os.path.basename(archive), os.path.basename(archive) or "resource.bin")
                     target = os.path.join(import_dir, f"{uuid.uuid4().hex[:8]}_{base}")
-                    with zf.open(archive) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
+                    if INSTANCE_STORAGE:
+                        with zf.open(archive) as src:
+                            write_public_media(target, src.read(INSTANCE_STORAGE.max_upload + 1))
+                    else:
+                        with zf.open(archive) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
                     rel = os.path.relpath(target, ASSETS_DIR).replace("\\", "/")
                     new_url = f"/assets/{rel}"
                     old_url = str(res.get("url") or "").strip()
@@ -17452,8 +17485,11 @@ async def export_smart_canvas_group(payload: SmartCanvasGroupExportRequest):
                 out_name = f"{name}-{suffix}{ext}"
                 suffix += 1
             used_names.add(out_name)
-            with open(os.path.join(target_dir, out_name), "w", encoding="utf-8") as f:
-                f.write(text)
+            if INSTANCE_STORAGE:
+                write_public_media(os.path.join(target_dir, out_name), text.encode('utf-8'))
+            else:
+                with open(os.path.join(target_dir, out_name), "w", encoding="utf-8") as f:
+                    f.write(text)
             count += 1
             continue
         src = output_file_from_url(item.url)
@@ -17471,7 +17507,7 @@ async def export_smart_canvas_group(payload: SmartCanvasGroupExportRequest):
             out_name = f"{name}-{suffix}{ext}"
             suffix += 1
         used_names.add(out_name)
-        shutil.copy2(src, os.path.join(target_dir, out_name))
+        copy_public_media(src, os.path.join(target_dir, out_name))
         count += 1
     if count <= 0:
         raise HTTPException(status_code=404, detail="没有可导出的内容")

@@ -56,6 +56,8 @@ class InstancePaths:
         self.data_root = self.program_root
         self.host, self.port = "0.0.0.0", 3000
         self._lock = None
+        self.public_beta = False
+        self.storage_quota = None
         configured_program = os.environ.get("PROGRAM_ROOT")
         if configured_program and Path(configured_program).resolve() != self.program_root:
             raise RuntimeError("PROGRAM_ROOT must match the installed source directory")
@@ -133,6 +135,7 @@ class InstancePaths:
                                               "data_root": str(self.data_root)}), encoding="utf-8")
             for rel in (".runtime/tmp", ".runtime/logs", ".runtime/home", "workflows", "API", "data"):
                 (self.data_root / rel).mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.public_beta = (self.data_root / '.auth/gateway-handoff.json').is_file()
             self._isolate_environment()
             # Use Python's built-in MIME database, never machine/user web-server config.
             mimetypes.knownfiles = []
@@ -273,13 +276,18 @@ class InstancePaths:
                 path, mode, flags = args
                 write = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
                 check(path, write)
+                if write and self.storage_quota: self.storage_quota.changed(path)
             elif event in {"os.listdir", "os.scandir"}:
                 check(args[0], directory=True)
             elif event in {"os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.utime", "os.truncate"}:
                 check(args[0], True)
+                if self.storage_quota: self.storage_quota.changed(args[0])
             elif event in {"os.rename", "os.link", "os.symlink"}:
                 check(args[0], True)
                 check(args[1], True)
+                if self.storage_quota:
+                    self.storage_quota.moved(args[0], args[1])
+                    self.storage_quota.changed(args[0]); self.storage_quota.changed(args[1])
                 if event in {"os.link", "os.symlink"}:
                     raise InstanceBoundaryError("Instance link creation is disabled")
             elif event == "subprocess.Popen":

@@ -10,6 +10,7 @@ def frontend_context(paths, principal):
     namespace = hashlib.sha256(('\0'.join((str(paths.data_root.resolve()), paths.instance_id,
                                           principal['username']))).encode()).hexdigest()[:32]
     return {'username': principal['username'], 'instance_id': paths.instance_id,
+            'public_beta': getattr(paths, 'public_beta', False),
             'storage_namespace': namespace,
             'capabilities': {'manage_own_providers': 'manage_own_providers' in principal.get('permissions', []),
                              'system_admin': False, 'local_generation': False,

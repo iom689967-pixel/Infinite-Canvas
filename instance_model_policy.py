@@ -31,6 +31,7 @@ def failure(code, status=403):
         'upstream': '上游请求失败，内部响应已隐藏',
         'download': '上游媒体地址或内容不符合安全规则',
         'conflict': '请求标识已使用，不能替换其内容',
+        'storage_full': '当前工作区存储空间已满。',
     }
     return HTTPException(status_code=status, detail={'code': code, 'message': messages[code]})
 
@@ -137,6 +138,9 @@ class ModelPolicy:
             if compiled['id'] in self.providers:
                 raise RuntimeError('Duplicate personal provider')
             self.providers[compiled['id']] = compiled
+        if getattr(paths, 'public_beta', False):
+            budget = json.loads((paths.data_root / '.auth/public-beta.json').read_text())
+            self.max_concurrent = min(self.max_concurrent, budget['max_concurrent_generations'])
 
     @staticmethod
     def integer(value, low, high):

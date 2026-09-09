@@ -7,3 +7,6 @@
 .instance-feature-notice { font: inherit; color: var(--muted, #777); font-size: 12px; padding: 8px 12px; }
 
 [data-local-pick-folder] { display: none !important; }
+
+#instance-storage-usage { display: none; font-size: 11px; line-height: 1.5; color: var(--muted, #777); padding-top: 8px; }
+.sidebar:hover #instance-storage-usage, .sidebar.is-pinned #instance-storage-usage { display: block; }

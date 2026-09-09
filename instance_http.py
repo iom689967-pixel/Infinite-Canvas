@@ -81,12 +81,35 @@ class InstanceAuthMiddleware:
         method = scope["method"]
         if path == "/healthz" and method == "GET":
             return await self.reply(scope, receive, send, JSONResponse({"ok": True}))
+        if getattr(self.paths, "public_beta", False) and path == '/__mio/health' and method == 'GET':
+            from public_beta_handoff import health_proof
+            return await self.reply(scope, receive, send, JSONResponse({'proof':health_proof(self.store.root, headers.get('x-mio-challenge',''))}))
+        if getattr(self.paths, "public_beta", False) and path == '/__mio/handoff' and method == 'POST':
+            if headers.get('origin') != self.origin:
+                return await self.reply(scope, receive, send, JSONResponse({'detail':'请求来源不受信任'},403))
+            from public_beta_handoff import consume_ticket
+            try:
+                body = bytearray()
+                async for chunk in Request(scope, receive).stream():
+                    body.extend(chunk)
+                    if len(body)>4096: raise ValueError()
+                new_token = consume_ticket(self.store, json.loads(body).get('ticket'))
+            except (ValueError, TypeError, AttributeError):
+                new_token = None
+            if not new_token:
+                return await self.reply(scope, receive, send, JSONResponse({'detail':'登录交接已失效，请重新登录'},401))
+            self.store.revoke(token)
+            response = JSONResponse({'ok':True})
+            response.set_cookie(self.cookie_name,new_token,max_age=self.store.ttl,httponly=True,secure=self.secure,samesite='strict',path='/')
+            return await self.reply(scope, receive, send, response)
         if path == "/login" and method == "GET":
             body = (self.paths.program_root / "static/instance-login.html").read_text(encoding="utf-8")
             return await self.reply(scope, receive, send, Response(body, media_type="text/html"))
         if path in PUBLIC_STATIC and method in {"GET", "HEAD"}:
             return await self.app(scope, receive, send)
         if path == "/api/auth/login" and method == "POST":
+            if getattr(self.paths, "public_beta", False):
+                return await self.reply(scope, receive, send, JSONResponse({'detail':'请从 Mio Canvas 入口登录'},403))
             if headers.get("origin") != self.origin or not headers.get("content-type", "").startswith("application/json"):
                 return await self.reply(scope, receive, send, JSONResponse({"detail": "请求来源不受信任"}, 403))
             request = Request(scope, receive)
@@ -129,6 +152,30 @@ class InstanceAuthMiddleware:
             response = JSONResponse({"ok": True})
             response.delete_cookie(self.cookie_name, path="/", secure=self.secure, httponly=True, samesite="strict")
             return await self.reply(scope, receive, send, response)
+        quota = getattr(self.paths, 'storage_quota', None)
+        ingress_error = None
+        if quota and path == '/api/instance/storage' and method == 'GET':
+            return await self.reply(scope, receive, send, JSONResponse(quota.usage()))
+        if quota and method in {'POST','PUT','PATCH'}:
+            original_receive = receive
+            total = 0
+            available = max(0, quota.limit - quota.usage()['used_bytes'])
+            non_content_write = path.endswith(('/delete','/refresh')) or path == '/api/canvas-workflows/export'
+            if not available and not non_content_write:
+                return await self.reply(scope, receive, send, JSONResponse({'detail':'当前工作区存储空间已满。'},413))
+            async def limited_receive():
+                nonlocal total, ingress_error
+                message = await original_receive()
+                if message['type'] == 'http.request':
+                    total += len(message.get('body', b''))
+                    if total > quota.max_upload + 1024**2:
+                        ingress_error = '请求超过上传大小限制'
+                        raise HTTPException(413, ingress_error)
+                    if not non_content_write and (not available or total > available + 65536):
+                        ingress_error = '当前工作区存储空间已满。'
+                        raise HTTPException(413, ingress_error)
+                return message
+            receive = limited_receive
         full_api = path in {'/api/instance/provider-settings', '/api/instance/provider-settings/test-connection', '/api/instance/provider-settings/probe-async', '/api/instance/provider-settings/fetch-models'}
         own_api = full_api or path in {'/api/instance/providers', '/api/instance/providers/discover'}
         own_page = path in {'/static/api-settings.html', '/static/js/api-settings.js', '/static/js/instance-api-settings.js'}
@@ -199,6 +246,9 @@ class InstanceAuthMiddleware:
                     return await self.reply(scope, receive, send, JSONResponse({"detail": "会话已失效"}, 401))
                 return await send({"type": "http.response.body", "body": b"", "more_body": False})
             if message["type"] == "http.response.start":
+                if ingress_error:
+                    stopped = True
+                    return await self.reply(scope, receive, send, JSONResponse({'detail':ingress_error},413))
                 started = True
                 failed = message["status"] >= 500
                 message["headers"] = [(k, v) for k, v in message.get("headers", [])
@@ -230,8 +280,13 @@ class InstanceAuthMiddleware:
                 elif path == "/api/models":
                     result = {key: result[key] for key in ("chat_models", "image_models", "video_models")}
                 return await self.reply(scope, receive, private_send, JSONResponse(result))
-            await self.app(scope, receive, private_send)
+            try:
+                await self.app(scope, receive, private_send)
+            except HTTPException as exc:
+                if started: raise
+                await self.reply(scope, receive, send, JSONResponse({'detail':exc.detail}, exc.status_code))
         finally:
+            if quota: quota.sync()
             PRINCIPAL.reset(context)
 
     async def websocket(self, scope, receive, send, token, principal):

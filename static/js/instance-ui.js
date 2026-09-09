@@ -3,6 +3,7 @@
     'use strict';
     const session = window.InstanceSession;
     if (!session) return;
+    if(session.identity.public_beta && window === window.top) document.title='Mio Canvas';
     function hide(selector) { document.querySelectorAll(selector).forEach(el => el.setAttribute('data-instance-hidden', '')); }
     function deny(selector) {
         document.querySelectorAll(selector).forEach(el => {
@@ -38,7 +39,7 @@
         const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
         icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg>';
         const label = document.createElement('span'); label.className = 'side-pill-text instance-account-name';
-        label.textContent = session.identity.username; identity.title = `${session.identity.username} · ${session.identity.instance_id}`;
+        label.textContent = session.identity.username; identity.title = session.identity.public_beta ? session.identity.username : `${session.identity.username} · ${session.identity.instance_id}`;
         identity.append(icon, label);
         const logout = document.createElement('button'); logout.id = 'instance-logout'; logout.type = 'button';
         logout.className = 'side-pill'; logout.title = '退出登录'; logout.setAttribute('aria-label', '退出登录');
@@ -47,5 +48,15 @@
         const text = document.createElement('span'); text.className = 'side-pill-text'; text.textContent = '退出登录';
         logout.append(arrow, text); logout.addEventListener('click', () => session.logout());
         account.append(identity, logout); actions.append(account);
+        if(session.identity.public_beta){
+            const storage=document.createElement('div');storage.className='instance-account';storage.id='instance-storage-usage';
+            account.append(storage);
+            session.ready.then(async()=>{
+                const response=await fetch('/api/instance/storage');
+                if(!response.ok) return;
+                const usage=await response.json();
+                storage.textContent=`存储 ${(usage.used_bytes/1024**2).toFixed(1)} MiB / ${(usage.quota_bytes/1024**3).toFixed(1)} GiB`;
+            }).catch(()=>{});
+        }
     }
 })();

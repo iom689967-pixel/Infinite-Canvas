@@ -396,6 +396,8 @@ class ControlledModels:
                 code = exc.code
             if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
                 code = exc.detail['code']
+            if isinstance(exc, HTTPException) and exc.status_code == 413 and exc.detail == '当前工作区存储空间已满。':
+                code = 'storage_full'
             outstanding = submitted or known
             terminal_failure = isinstance(exc, KieTaskError) and task_status(exc.raw) == 'fail'
             if isinstance(exc, KieTaskError) and task_status(exc.raw) in {'fail','success'}:
@@ -410,6 +412,8 @@ class ControlledModels:
                        error_code=code, outstanding=outstanding, recovery='' if terminal_failure else self.recovery(job))
             if recover_result:
                 job.update(upstream_status='success', local_result_status='pending')
+                if code == 'storage_full':
+                    job['error'] = '图片已在上游生成成功；当前工作区存储空间已满。请删除文件后恢复结果。'
         finally:
             self.save(job)
             if client:
