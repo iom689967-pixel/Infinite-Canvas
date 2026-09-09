@@ -1,3 +1,9 @@
+// One editor; only its persistence/permission context differs for signed-in instances.
+const personalSettings = Boolean(document.getElementById('instance-context'));
+function settingsFetch(url, options) {
+    const target = personalSettings ? url.replace('/api/providers', '/api/instance/provider-settings') : url;
+    return fetch(target, options);
+}
 let providers = [];
 let selectedId = '';
 const providerList = document.getElementById('providerList');
@@ -9,6 +15,10 @@ const baseInput = document.getElementById('baseInput');
 const protocolInput = document.getElementById('protocolInput');
 const imageRequestModeInput = document.getElementById('imageRequestModeInput');
 const imageEditRouteInput = document.getElementById('imageEditRouteInput');
+const providerEnabledInput = document.getElementById('providerEnabledInput');
+const providerPrimaryInput = document.getElementById('providerPrimaryInput');
+const imageGenerationEndpointInput = document.getElementById('imageGenerationEndpointInput');
+const imageEditEndpointInput = document.getElementById('imageEditEndpointInput');
 const keyInput = document.getElementById('keyInput');
 const keyHint = document.getElementById('keyHint');
 const rhFreeKeyInput = document.getElementById('rhFreeKeyInput');
@@ -391,6 +401,7 @@ function visibleProviders(){
     return (providers || []).filter(item => !isProviderTemporarilyHidden(item));
 }
 function isFixedProvider(itemOrId){
+    if(personalSettings) return false;
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
     // 即梦 CLI 不再是固定平台：可删除、可排序，未添加则不存在。
     return id === 'modelscope' || id === 'runninghub' || id === 'volcengine' || id === 'kie';
@@ -781,13 +792,16 @@ function syncEditor(){
             ? 'general'
             : (imageEditRouteInput?.value || item.image_edit_route)
     );
-    item.image_generation_endpoint = '';
-    item.image_edit_endpoint = '';
+    item.image_generation_endpoint = imageGenerationEndpointInput?.value.trim() || '';
+    item.image_edit_endpoint = imageEditEndpointInput?.value.trim() || '';
+    item.enabled = providerEnabledInput ? providerEnabledInput.checked : item.enabled !== false;
+    item.primary = providerPrimaryInput ? providerPrimaryInput.checked : item.primary === true;
+    if(item.primary) providers.forEach(other=>{if(other.id !== item.id) other.primary=false;});
     item.rh_apps = normalizeRhEntries(item.rh_apps || [], 'app');
     item.rh_workflows = normalizeRhEntries(item.rh_workflows || [], 'workflow');
     const key = keyInput.value.trim();
-    if(key && item.id !== 'kie') item.api_key = key;
-    if(item.id === 'kie'){
+    if(key && (personalSettings || item.id !== 'kie')) item.api_key = key;
+    if(item.id === 'kie' && !personalSettings){
         item.name = 'Kie';
         item.base_url = KIE_DEFAULT_BASE_URL;
         item.protocol = 'kie';
@@ -799,13 +813,13 @@ function syncEditor(){
         item.model_names = {...KIE_MODEL_NAMES};
         delete item.api_key;
     }
-    if(item.id === 'runninghub'){
+    if(item.id === 'runninghub' || item.protocol === 'runninghub'){
         const freeKey = rhFreeKeyInput?.value.trim() || '';
         const walletKey = rhWalletKeyInput?.value.trim() || '';
         if(freeKey) item.api_key = freeKey;
         if(walletKey) item.wallet_api_key = walletKey;
     }
-    if(item.id === 'volcengine'){
+    if(item.id === 'volcengine' || item.protocol === 'volcengine'){
         const ak = volcAkInput?.value.trim() || '';
         const sk = volcSkInput?.value.trim() || '';
         if(ak) item.volcengine_access_key_id = ak;
@@ -827,6 +841,7 @@ function updateProtocolFromInput(){
         if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
         return;
     }
+    syncEditor();
     const value = String(protocolInput.value || 'openai').toLowerCase();
     item.protocol = API_PROTOCOLS.includes(value) ? value : 'openai';
     if(CLI_PROTOCOLS.has(item.protocol)) item.base_url = '';
@@ -2391,7 +2406,7 @@ function renderProviderList(){
                 </button>
             `;
         }
-        if(item.id === 'volcengine'){
+        if(item.id === 'volcengine' || item.protocol === 'volcengine'){
             return `
                 <button class="provider-card provider-card-banner ${active} ${stateClass}" type="button" onclick="selectProvider('${escapeHtml(item.id)}')">
                     <span class="provider-banner-inner">
@@ -2464,7 +2479,7 @@ function handleProviderDragEnd(){
 function renderEditor(){
     const item = provider();
     if(!item) return;
-    const isKie = item.id === 'kie';
+    const isKie = item.id === 'kie' && !personalSettings;
     editorTitle.textContent = item.name || item.id;
     nameInput.value = item.name || '';
     idInput.value = item.id || '';
@@ -2472,6 +2487,10 @@ function renderEditor(){
     clearVerifyResult();
     baseInput.placeholder = EXAMPLE_BASE_URL;
     baseInput.value = item.base_url || '';
+    if(providerEnabledInput) providerEnabledInput.checked = item.enabled !== false;
+    if(providerPrimaryInput) providerPrimaryInput.checked = item.primary === true;
+    if(imageGenerationEndpointInput) imageGenerationEndpointInput.value = item.image_generation_endpoint || '';
+    if(imageEditEndpointInput) imageEditEndpointInput.value = item.image_edit_endpoint || '';
     nameInput.disabled = isKie;
     idInput.disabled = isKie;
     baseInput.disabled = isKie;
@@ -2502,9 +2521,14 @@ function renderEditor(){
         imageEditRouteInput.value = normalizeImageEditRoute(item.image_edit_route);
         imageEditRouteInput.disabled = item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
     }
+    if(personalSettings){
+        let hint=document.getElementById('personalModelSupport');
+        if(!hint){hint=document.createElement('p');hint.id='personalModelSupport';hint.className='hint';settingsContent.append(hint);}
+        hint.textContent=Object.entries(item.model_support||{}).map(([model,state])=>model+' · '+(state==='runnable'?'可运行':state)).join('；');
+    }
     keyInput.value = '';
     keyInput.placeholder = item.has_key ? `${tr('api.keepCurrentKey')} ${item.key_preview || ''}` : tr('api.enterKey');
-    keyHint.textContent = item.has_key ? `${tr('api.keySaved')}${item.key_env || 'API/.env'}` : tr('api.noKey');
+    keyHint.textContent = personalSettings ? (item.has_key ? 'API Key 已配置（不回显）' : 'API Key 未配置') : (item.has_key ? `${tr('api.keySaved')}${item.key_env || 'API/.env'}` : tr('api.noKey'));
     keyInput.disabled = isKie;
     const keyActions = keyInput.closest('.key-input-line')?.querySelector('.key-actions');
     if(keyActions) keyActions.style.display = isKie ? 'none' : '';
@@ -2522,7 +2546,7 @@ function renderEditor(){
         keyHint.textContent = item.has_key ? 'KIE_API_KEY 已在 API/.env 配置' : 'KIE_API_KEY 尚未在 API/.env 配置';
     }
     const isModelScope = item.id === 'modelscope';
-    const isRunningHub = item.id === 'runninghub';
+    const isRunningHub = item.id === 'runninghub' || item.protocol === 'runninghub';
     const isVolcengine = item.id === 'volcengine' || String(protocolInput?.value || item.protocol || '').toLowerCase() === 'volcengine';
     const isStandaloneVolcengine = item.id === 'volcengine';
     const isJimeng = String(protocolInput?.value || item.protocol || '').toLowerCase() === 'jimeng';
@@ -2896,7 +2920,7 @@ async function loadGeminiCliHelp(){
     }
 }
 function currentProviderApiKey(item){
-    if(item?.id === 'runninghub'){
+    if(item?.id === 'runninghub' || item?.protocol === 'runninghub'){
         return rhWalletKeyInput?.value.trim() || rhFreeKeyInput?.value.trim() || '';
     }
     return keyInput.value.trim();
@@ -2948,7 +2972,7 @@ function isRunningHubContext(item, baseUrl=''){
 function applyDetectedImageRequestMode(mode){
     const item = provider();
     if(!item || !imageRequestModeInput) return false;
-    if(item.id === 'kie'){
+    if(item.id === 'kie' && !personalSettings){
         syncKieSelectOptions(true);
         imageRequestModeInput.value = 'kie';
         return false;
@@ -2968,7 +2992,7 @@ function applyDetectedProtocol(protocol){
     const item = provider();
     const detected = String(protocol || '').toLowerCase();
     if(!item || !protocolInput || !API_PROTOCOLS.includes(detected)) return false;
-    if(item.id === 'kie'){
+    if(item.id === 'kie' && !personalSettings){
         syncKieSelectOptions(true);
         protocolInput.value = 'kie';
         item.protocol = 'kie';
@@ -3026,7 +3050,7 @@ function runninghubModelSourceNote(data){
 async function probeAsync(){
     const item = provider();
     if(!item) return;
-    if(item.id === 'kie'){
+    if(item.id === 'kie' && !personalSettings){
         await verifyKieSettings('protocol');
         return;
     }
@@ -3052,13 +3076,13 @@ async function probeAsync(){
         const apiKey = currentProviderApiKey(item);
         const currentProtocol = String(protocolInput?.value || item.protocol || 'openai').toLowerCase();
         if(isRunningHubContext(item, baseUrl)){
-            const data = await fetch('/api/providers/test-connection', {
+            const data = await settingsFetch('/api/providers/test-connection', {
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
                 body:JSON.stringify({
                     base_url:baseUrl,
                     api_key:apiKey,
-                    provider_id:'runninghub',
+                    provider_id:personalSettings ? item.id : 'runninghub',
                     protocol:'runninghub',
                     image_request_mode:'openai'
                 })
@@ -3066,6 +3090,7 @@ async function probeAsync(){
                 if(!r.ok) throw new Error((await r.json()).detail || '请求失败');
                 return r.json();
             });
+            if(data.ok !== true) throw new Error(data.message || '协议尚未验证');
             applyDetectedProtocol('runninghub');
             setFetchedModelState(data);
             const openBtn = document.getElementById('openPickerBtn');
@@ -3073,7 +3098,7 @@ async function probeAsync(){
             showVerifyResult(`<span style="color:#15803d;font-size:11px;font-weight:800">✓ RunningHub OpenAPI 验证通过 · 找到 ${data.model_count || data.total || 0} 个模型${runninghubModelSourceNote(data)}</span>`);
             return;
         }
-        const data = await fetch('/api/providers/probe-async', {
+        const data = await settingsFetch('/api/providers/probe-async', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -3091,36 +3116,26 @@ async function probeAsync(){
         const isAsync = data.ok === true && detectedProtocol === 'apimart';
         const isOpenAiCompat = data.ok === true && detectedProtocol === 'openai';
         const keepManualProtocol = ['gemini', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(currentProtocol);
-        if(protocolInput && !keepManualProtocol){
+        if(data.ok === true && protocolInput && !keepManualProtocol){
             applyDetectedProtocol(detectedProtocol || (isAsync ? 'apimart' : 'openai'));
         }
-        if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
+        if(data.ok !== false && data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
         if(isTudouHost) applyDetectedImageRequestMode('tudou-async');
-        const rawJson = JSON.stringify(data.raw, null, 2);
+        const rawJson = JSON.stringify({status:data.status_code, protocol:data.protocol, checks:data.checks}, null, 2);
         const probeMessage = String(data.message || '');
         const hideTasksEndpointTip = probeMessage.includes('/v1/tasks/');
         const color = (isAsync || isOpenAiCompat || data.ok === true) ? '#15803d' : data.ok === null ? '#b45309' : '#64748b';
         const icon = (isAsync || isOpenAiCompat || data.ok === true) ? '✓' : '⚠';
-        const proto = detectedProtocol === 'volcengine'
-            ? '方舟/Ark 任务协议'
-            : isAsync
-                ? 'APIMart 异步'
-                : detectedProtocol === 'openai'
-                    ? 'OpenAI 兼容'
-                    : keepManualProtocol
-                    ? (currentProtocol === 'gemini' ? 'Gemini' : currentProtocol.toUpperCase())
-                    : 'OpenAI 兼容';
+        const proto = {kie:'Kie 图片',volcengine:'方舟/Ark 任务协议',apimart:'APIMart 异步',openai:'OpenAI 兼容',gemini:'Gemini',runninghub:'RunningHub OpenAPI'}[data.ok === true ? detectedProtocol : currentProtocol] || currentProtocol;
         showVerifyResult(`
             ${hideTasksEndpointTip ? '' : `<div style="font-size:11px;font-weight:800;color:${color}">${icon} ${escapeHtml(probeMessage)}</div>`}
-            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong> · 图片接口：<strong style="color:var(--text)">${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}</strong></div>
+            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${data.ok !== true ? '保留当前协议' : keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong> · 图片接口：<strong style="color:var(--text)">${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}</strong></div>
             <details style="margin-top:6px">
-                <summary style="font-size:10.5px;color:var(--muted);cursor:pointer;font-weight:700;user-select:none">▸ 查看原始响应 (HTTP ${data.status_code})</summary>
+                <summary style="font-size:10.5px;color:var(--muted);cursor:pointer;font-weight:700;user-select:none">▸ 查看验证摘要 (HTTP ${data.status_code})</summary>
                 <pre style="margin-top:6px;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line-2);font-size:10.5px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:200px;overflow:auto">${escapeHtml(rawJson)}</pre>
             </details>`);
     } catch(e){
-        const keepManualProtocol = ['gemini', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(String(protocolInput?.value || item.protocol || '').toLowerCase());
-        if(protocolInput && !keepManualProtocol){ protocolInput.value = 'openai'; protocolInput.dispatchEvent(new Event('change')); }
-        const suffix = keepManualProtocol ? '，已保留当前手动选择的协议' : '，协议已设为 OpenAI 兼容';
+        const suffix = '，已保留当前手动选择的协议';
         showVerifyResult(`<div style="font-size:11px;font-weight:800;color:#b45309">⚠ ${escapeHtml(e.message || String(e))}${suffix}</div>`);
     } finally {
         if(btn){ btn.disabled = false; btn.querySelector('span').textContent = '验证协议'; refreshIcons(); }
@@ -3130,7 +3145,7 @@ async function probeAsync(){
 async function testConnection(){
     const item = provider();
     if(!item) return;
-    if(item.id === 'kie'){
+    if(item.id === 'kie' && !personalSettings){
         await verifyKieSettings('address');
         return;
     }
@@ -3145,12 +3160,12 @@ async function testConnection(){
     try {
         const apiKey = currentProviderApiKey(item);
         const runninghubContext = isRunningHubContext(item, baseUrl);
-        const data = await fetch('/api/providers/test-connection', {
+        const data = await settingsFetch('/api/providers/test-connection', {
             method: 'POST', headers: {'Content-Type':'application/json'},
             body: JSON.stringify({
                 base_url: baseUrl,
                 api_key: apiKey,
-                provider_id: runninghubContext ? 'runninghub' : item.id,
+                provider_id: personalSettings ? item.id : runninghubContext ? 'runninghub' : item.id,
                 protocol: runninghubContext ? 'runninghub' : (protocolInput?.value || 'openai'),
                 image_request_mode: imageRequestModeInput?.value || item.image_request_mode || 'openai'
             })
@@ -3342,7 +3357,7 @@ function providerModelBadge(model, label){
 async function fetchModels(){
     const item = provider();
     if(!item) return;
-    if(item.id === 'kie'){
+    if(item.id === 'kie' && !personalSettings){
         setFetchedModelState({all:[...KIE_IMAGE_MODELS], image_models:[...KIE_IMAGE_MODELS], model_names:{...KIE_MODEL_NAMES}});
         setStatus(`Kie 固定使用 GPT Image 2 和 Nano Banana Pro · 可用模型：${KIE_IMAGE_MODELS.length}`);
         return;
@@ -3358,13 +3373,13 @@ async function fetchModels(){
     setStatus(tr('api.fetchingModels') || '正在从上游拉取模型列表...');
     try {
         const runninghubContext = isRunningHubContext(item, baseUrl);
-        const data = await fetch('/api/providers/fetch-models', {
+        const data = await settingsFetch('/api/providers/fetch-models', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
                 base_url:baseUrl,
                 api_key:apiKey,
-                provider_id:runninghubContext ? 'runninghub' : item.id,
+                provider_id:personalSettings ? item.id : runninghubContext ? 'runninghub' : item.id,
                 protocol:runninghubContext ? 'runninghub' : (protocolInput?.value || 'openai'),
                 image_request_mode:imageRequestModeInput?.value || item.image_request_mode || 'openai'
             })
@@ -3372,13 +3387,14 @@ async function fetchModels(){
             if(!r.ok) throw new Error((await r.json()).detail || (tr('api.urlInvalid') || '拉取失败'));
             return r.json();
         });
+        if(data.ok === false) throw new Error(data.message || '模型目录尚未验证');
         setFetchedModelState(data);
         const detectedProtocol = String(data.protocol || '').toLowerCase();
         const currentProtocol = String(protocolInput?.value || item.protocol || '').toLowerCase();
         if(detectedProtocol && currentProtocol !== 'gemini' && detectedProtocol !== currentProtocol){
             applyDetectedProtocol(detectedProtocol);
         }
-        if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
+        if(data.ok !== false && data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
         // 启用「选择模型」按钮，并 statusbar 显示已拉取数量
         const openBtn = document.getElementById('openPickerBtn');
         if(openBtn){ openBtn.disabled = false; openBtn.style.opacity = '1'; }
@@ -3529,6 +3545,8 @@ async function clearKeyOnly(){
     if(!item) return;
     if(!item.has_key && !keyInput.value){ return; }
     if(!confirm(tr('api.confirmClearKey') || '确认清除当前 Key？')) return;
+    keyInput.value='';
+    delete item.api_key;
     item._clearKey = true;
     const ok = await saveProviders();
     if(ok) keyInput.value = '';
@@ -3676,8 +3694,9 @@ function addProvider(){
     renderEditor();
 }
 async function addCliProvider(kind){
+    if(personalSettings) return;
     const preset = CLI_PROVIDER_PRESETS[kind];
-    if(!preset) return;
+    if(!preset || personalSettings) return;
     recommendInlineOpen = false;
     syncRecommendView();
     renderRecommendApi();
@@ -3732,7 +3751,7 @@ function deleteProvider(){
     const item = provider();
     if(!item) return;
     if(isFixedProvider(item)){ alert(tr('api.defaultNoDelete') || '默认平台不能删除'); return; }
-    if(providers.length <= 1){ alert(tr('api.keepOne')); return; }
+    if(!personalSettings && providers.length <= 1){ alert(tr('api.keepOne')); return; }
     providers = providers.filter(p => p.id !== item.id);
     selectedId = providers[0]?.id || '';
     renderEditor();
@@ -3740,7 +3759,7 @@ function deleteProvider(){
 }
 async function saveRhKeyOnly(kind){
     const item = provider();
-    if(!item || item.id !== 'runninghub') return;
+    if(!item || (item.id !== 'runninghub' && item.protocol !== 'runninghub')) return;
     const input = kind === 'wallet' ? rhWalletKeyInput : rhFreeKeyInput;
     const key = input?.value.trim() || '';
     if(!key){ alert('请输入 Key'); return; }
@@ -3750,8 +3769,10 @@ async function saveRhKeyOnly(kind){
 }
 async function clearRhKeyOnly(kind){
     const item = provider();
-    if(!item || item.id !== 'runninghub') return;
+    if(!item || (item.id !== 'runninghub' && item.protocol !== 'runninghub')) return;
     if(!confirm(tr('api.confirmClearKey') || '确认清除当前 Key？')) return;
+    if(kind === 'wallet'){if(rhWalletKeyInput) rhWalletKeyInput.value='';delete item.wallet_api_key;}
+    else {if(rhFreeKeyInput) rhFreeKeyInput.value='';keyInput.value='';delete item.api_key;}
     if(kind === 'wallet') item._clearWalletKey = true;
     else item._clearKey = true;
     const ok = await saveProviders();
@@ -3762,7 +3783,7 @@ async function clearRhKeyOnly(kind){
 }
 async function saveVolcengineAssetKeys(){
     const item = provider();
-    if(!item || item.id !== 'volcengine') return;
+    if(!item || !isVolcengineProvider(item)) return;
     const ak = volcAkInput?.value.trim() || '';
     const sk = volcSkInput?.value.trim() || '';
     if(!ak && !sk){ alert('请输入火山素材库 AK 或 SK'); return; }
@@ -3775,8 +3796,11 @@ async function saveVolcengineAssetKeys(){
 }
 async function clearVolcengineAssetKeys(){
     const item = provider();
-    if(!item || item.id !== 'volcengine') return;
+    if(!item || !isVolcengineProvider(item)) return;
     if(!confirm('确认清除火山素材库 AK/SK？')) return;
+    if(volcAkInput) volcAkInput.value='';
+    if(volcSkInput) volcSkInput.value='';
+    delete item.volcengine_access_key_id;delete item.volcengine_secret_access_key;
     item._clearVolcengineAccessKey = true;
     item._clearVolcengineSecretKey = true;
     const ok = await saveProviders();
@@ -3859,11 +3883,11 @@ function removeModel(kind, index){
 async function loadProviders(){
     setStatus(tr('api.loading'));
     try {
-        const data = await fetch('/api/providers').then(r => r.json());
+        const data = await settingsFetch('/api/providers').then(r => r.json());
         providers = data.providers || [];
         selectedId = sortedProviders()[0]?.id || '';
         renderEditor();
-        openRecommendApi();
+        if(!personalSettings) openRecommendApi();
         setStatus('');
     } catch(err) {
         setStatus(tr('api.loadFailed'));
@@ -3897,8 +3921,8 @@ async function saveProviders(){
             item.chat_models = unique(item.chat_models || []);
             item.video_models = unique(item.video_models || []);
         }
-        item.image_generation_endpoint = '';
-        item.image_edit_endpoint = '';
+        item.image_generation_endpoint = String(item.image_generation_endpoint || '').trim();
+        item.image_edit_endpoint = String(item.image_edit_endpoint || '').trim();
         item.image_models = unique(item.image_models || []);
         item.chat_models = unique(item.chat_models || []);
         item.video_models = unique(item.video_models || []);
@@ -3927,7 +3951,7 @@ async function saveProviders(){
     }
     setStatus(tr('api.saving'));
     try {
-        const res = await fetch('/api/providers', {
+        const res = await settingsFetch('/api/providers', {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify(providers.map(item => ({
@@ -3940,7 +3964,7 @@ async function saveProviders(){
                 image_generation_endpoint:item.image_generation_endpoint || '',
                 image_edit_endpoint:item.image_edit_endpoint || '',
                 enabled:item.enabled !== false,
-                primary:false,
+                primary:item.primary === true,
                 image_models:item.image_models || [],
                 chat_models:item.chat_models || [],
                 video_models:item.video_models || [],
@@ -3948,10 +3972,10 @@ async function saveProviders(){
                 model_protocols:(item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {},
                 ms_loras:item.id === 'modelscope' ? (item.ms_loras || []) : [],
                 ms_defaults_version:item.id === 'modelscope' ? (item.ms_defaults_version || 1) : 0,
-                rh_apps:item.id === 'runninghub' ? (item.rh_apps || []) : [],
-                rh_workflows:item.id === 'runninghub' ? (item.rh_workflows || []) : [],
-                volcengine_project_name:item.id === 'volcengine' ? (item.volcengine_project_name || VOLCENGINE_DEFAULT_PROJECT_NAME) : '',
-                volcengine_region:item.id === 'volcengine' ? (item.volcengine_region || VOLCENGINE_DEFAULT_REGION) : '',
+                rh_apps:(item.id === 'runninghub' || item.protocol === 'runninghub') ? (item.rh_apps || []) : [],
+                rh_workflows:(item.id === 'runninghub' || item.protocol === 'runninghub') ? (item.rh_workflows || []) : [],
+                volcengine_project_name:isVolcengineProvider(item) ? (item.volcengine_project_name || VOLCENGINE_DEFAULT_PROJECT_NAME) : '',
+                volcengine_region:isVolcengineProvider(item) ? (item.volcengine_region || VOLCENGINE_DEFAULT_REGION) : '',
                 volcengine_access_key_id:item.volcengine_access_key_id || undefined,
                 volcengine_secret_access_key:item.volcengine_secret_access_key || undefined,
                 api_key:item.api_key || undefined,
@@ -3984,6 +4008,11 @@ async function saveProviders(){
     } catch(err) {
         setStatus(err.message || tr('api.saveFailed'));
         return false;
+    } finally {
+        if(personalSettings){
+            for(const item of providers) for(const key of ['api_key','wallet_api_key','volcengine_access_key_id','volcengine_secret_access_key']) delete item[key];
+            for(const input of [keyInput,rhFreeKeyInput,rhWalletKeyInput,volcAkInput,volcSkInput]) if(input) input.value='';
+        }
     }
 }
 function escapeHtml(str){
@@ -4021,6 +4050,13 @@ window.addEventListener('studio-lang-change', () => {
     else renderEditor();
 });
 window.onload = () => {
+    if(personalSettings){
+        document.querySelectorAll('.cli-quick-group,.dx-os-banner,.api-link-btn').forEach(el=>el.style.display='none');
+        protocolInput?.querySelectorAll('option').forEach(el=>{if(CLI_PROTOCOLS.has(el.value))el.remove();});
+        document.querySelectorAll('input[type=password]').forEach(el=>el.autocomplete='off');
+        const subtitle=document.querySelector('.page-head .sub');
+        if(subtitle){subtitle.removeAttribute('data-i18n');subtitle.textContent='管理自己的平台、协议和模型。Key 保存到本实例私有凭证存储，不回显。';}
+    }
     if(window.StudioTheme) window.StudioTheme.apply();
     if(window.StudioI18n) window.StudioI18n.apply();
     syncRecommendView();

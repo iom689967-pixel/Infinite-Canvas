@@ -11,10 +11,10 @@ import tempfile
 import uuid
 from urllib.parse import unquote, urlsplit
 
-import httpx
 from fastapi import HTTPException
+from provider_schema import NETWORK_PROTOCOLS
 
-from instance_model_policy import GuardedClient, ModelPolicy, failure, origin
+from instance_model_policy import origin
 
 ID = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}')
 MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}')
@@ -42,7 +42,7 @@ def validate_item(policy, item):
         raise ValueError()
     if not isinstance(item['name'], str) or not 1 <= len(item['name']) <= 100:
         raise ValueError()
-    if item['protocol'] not in {'openai', 'gemini', 'kie'} or type(item['enabled']) is not bool:
+    if item['protocol'] not in NETWORK_PROTOCOLS or type(item['enabled']) is not bool:
         raise ValueError()
     url = item['base_url']
     if not isinstance(url, str) or len(url) > 2048 or '\\' in url or any(ord(c) < 33 for c in url):
@@ -75,9 +75,13 @@ def validate_item(policy, item):
 
 
 def compile_personal(policy, stored):
-    if set(stored) != FIELDS | {'credential_file', 'revision'}:
+    if not FIELDS | {'credential_file', 'revision'} <= set(stored) or set(stored) - FIELDS - {'credential_file', 'revision', 'settings', 'secret_refs'}:
         raise ValueError('Invalid personal provider storage')
     validate_item(policy, {k: stored[k] for k in FIELDS})
+    for ref in stored.get('secret_refs', {}).values():
+        if not re.fullmatch(r'credentials/personal-[0-9a-f]{32}\.key', ref):
+            raise ValueError('Invalid credential reference')
+        policy.private_file(policy.paths.data_root / '.auth' / ref)
     credential = stored['credential_file']
     if credential and not re.fullmatch(r'credentials/personal-[0-9a-f]{32}\.key', credential):
         raise ValueError('Invalid personal credential reference')
@@ -141,100 +145,45 @@ class OwnProviders:
                 'max_concurrent': policy.max_concurrent}
 
     def save(self, body, delete=False):
-        # Synchronous commit on the ASGI event loop: no create/discover can interleave.
-        if self.discovering or self.models.llm_active or self.models.runners or self.models.outstanding():
-            raise HTTPException(409, '仍有运行中或提交状态未确认的任务；配置未修改，请先处理原任务')
-        config = self.config()
-        policy = self.models.policy
-        entries = {p['id']: p for p in config.get('personal_providers', [])}
+        from instance_provider_settings import FullProviderSettings
         if not isinstance(body, dict) or not isinstance(body.get('id'), str):
             raise ValueError()
-        provider_id = body['id']
-        if provider_id in {p['id'] for p in config['providers']}:
-            raise HTTPException(403, '管理员提供的 Provider 不属于个人可编辑配置')
-        old = entries.get(provider_id)
-        new_key_path = None
+        settings = FullProviderSettings(self)
+        items = {p['id']: settings.settings(p) for p in self.config().get('personal_providers', [])}
+        pid = body['id']
+        if pid in {p['id'] for p in self.config()['providers']}:
+            raise HTTPException(403, '管理员 Provider 不属于个人配置')
         if delete:
-            if set(body) != {'id'} or not old:
+            if set(body) != {'id'} or pid not in items:
                 raise HTTPException(404, '本实例没有此个人 Provider')
-            del entries[provider_id]
+            del items[pid]
         else:
             if set(body) - FIELDS - {'api_key', 'clear_key'} or not FIELDS <= set(body):
                 raise ValueError()
-            item = {k: body[k] for k in FIELDS}
-            validate_item(policy, item)
-            key = body.get('api_key')
-            clear = body.get('clear_key', False)
-            if type(clear) is not bool or (key is not None and (not isinstance(key, str) or not key or len(key) > 4096 or any(c in key for c in '\r\n'))):
+            validate_item(self.models.policy, {k: body[k] for k in FIELDS})
+            if type(body.get('clear_key', False)) is not bool:
                 raise ValueError()
-            if clear and key is not None:
-                raise ValueError()
-            # A changed base path can also select a different tenant/authentication target.
-            if old and (old['base_url'].rstrip('/') != item['base_url'].rstrip('/') or old['protocol'] != item['protocol']) and old['credential_file'] and key is None and not clear:
-                raise HTTPException(409, '地址或协议已更改，请提供匹配的新 Key，或明确清除旧 Key')
-            credential = old['credential_file'] if old and not clear else ''
-            if key is not None:
-                directory = policy.paths.data_root / '.auth/credentials'
-                if directory.is_symlink():
-                    raise ValueError()
-                directory.mkdir(mode=0o700, exist_ok=True)
-                credential = 'credentials/personal-' + uuid.uuid4().hex + '.key'
-                new_key_path = policy.paths.data_root / '.auth' / credential
-                atomic_private(new_key_path, key)
-            entries[provider_id] = dict(item, credential_file=credential, revision=uuid.uuid4().hex)
-            compile_personal(policy, entries[provider_id])
-        config['personal_providers'] = list(entries.values())
-        try:
-            atomic_private(policy.file, json.dumps(config, ensure_ascii=False))
-        except Exception:
-            if new_key_path:
-                new_key_path.unlink(missing_ok=True)
-            raise
-        self.models.policy = ModelPolicy(policy.paths)
-        if old and old['credential_file'] and old['credential_file'] != entries.get(provider_id, {}).get('credential_file'):
-            (policy.paths.data_root / '.auth' / old['credential_file']).unlink(missing_ok=True)
+            item = items.get(pid, {}) | {k:v for k,v in body.items() if k != 'models'}
+            for category, purpose in [('image','image'), ('chat','llm'), ('video','video')]:
+                item[category+'_models'] = [m['id'] for m in body['models'] if m['purpose'] == purpose]
+            items[pid] = item
+        settings.save(list(items.values()))
         return self.public()
 
     async def discover(self, body):
+        from instance_provider_settings import FullProviderSettings
         if not isinstance(body, dict) or set(body) != {'id'}:
             raise ValueError()
-        policy = self.models.policy
-        provider = policy.providers.get(body['id'])
+        provider = self.models.policy.providers.get(body['id'])
         if not provider or not provider.get('personal') or not provider.get('enabled'):
             raise HTTPException(404, '本实例没有已启用的个人 Provider')
-        if self.discovering:
-            raise HTTPException(429, '模型发现正在进行')
-        if provider['protocol'] == 'kie':
-            from providers.kie.models import KIE_UI_MODELS
-            return {'models': [{'id': m, 'purpose': 'image'} for m in KIE_UI_MODELS], 'source': '已适配的 Kie 模型目录；未执行生成或连接验证'}
-        self.models.check_capacity()
-        self.discovering = True
-        self.models.llm_active += 1
-        client = GuardedClient(policy, provider, timeout=15)
-        try:
-            base = provider['base_url'].rstrip('/')
-            gemini = provider['protocol'] == 'gemini'
-            if gemini:
-                base = re.sub(r'/v1(?:beta)?$', '', base) + '/v1beta'
-            key = policy.credential(provider)
-            headers = {'x-goog-api-key': key} if gemini else {'Authorization': 'Bearer '+key}
-            import asyncio
-            async with asyncio.timeout(15):
-                response = await client.get(base + '/models', headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            models = []
-            for m in data.get('models' if gemini else 'data', [])[:200]:
-                name = str(m.get('name' if gemini else 'id', '')).removeprefix('models/')
-                if MODEL.fullmatch(name) and '..' not in name and key not in name:
-                    models.append({'id': name, 'purpose': 'llm'})
-            return {'models': models, 'source': '上游模型列表；未执行生成'}
-        except (httpx.HTTPError, ValueError, TypeError, KeyError, TimeoutError):
-            raise failure('upstream', 502) from None
-        finally:
-            self.discovering = False
-            self.models.llm_active -= 1
-            await client.aclose()
+        result = await FullProviderSettings(self).probe({
+            'provider_id': provider['id'], 'base_url': provider['base_url'],
+            'protocol': provider['protocol'],
+        }, 'fetch-models')
+        return {'models': [dict(id=m, purpose=purpose)
+            for category,purpose in [('image','image'),('chat','llm'),('video','video')]
+            for m in result.get(category+'_models', [])], 'source': result.get('message','只读模型目录')}
 
 
 def task_provider_revision(policy, provider):

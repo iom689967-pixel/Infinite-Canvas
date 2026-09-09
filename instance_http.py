@@ -129,14 +129,18 @@ class InstanceAuthMiddleware:
             response = JSONResponse({"ok": True})
             response.delete_cookie(self.cookie_name, path="/", secure=self.secure, httponly=True, samesite="strict")
             return await self.reply(scope, receive, send, response)
-        own_api = path in {'/api/instance/providers', '/api/instance/providers/discover'}
-        own_page = path in {'/static/api-settings.html', '/static/js/instance-api-settings.js'}
+        full_api = path in {'/api/instance/provider-settings', '/api/instance/provider-settings/test-connection', '/api/instance/provider-settings/probe-async', '/api/instance/provider-settings/fetch-models'}
+        own_api = full_api or path in {'/api/instance/providers', '/api/instance/providers/discover'}
+        own_page = path in {'/static/api-settings.html', '/static/js/api-settings.js', '/static/js/instance-api-settings.js'}
         if own_api or own_page:
             if not self.own_providers or 'manage_own_providers' not in principal.get('permissions', []):
                 return await self.reply(scope, receive, send, JSONResponse({'detail': '未获本实例 API 管理权限'}, 403))
             if own_api:
                 try:
-                    if path == '/api/instance/providers' and method == 'GET':
+                    if full_api and path == '/api/instance/provider-settings' and method == 'GET':
+                        from instance_provider_settings import FullProviderSettings
+                        result = FullProviderSettings(self.own_providers).public()
+                    elif path == '/api/instance/providers' and method == 'GET':
                         result = self.own_providers.public()
                     elif method in {'PUT', 'DELETE', 'POST'}:
                         chunks = bytearray()
@@ -145,7 +149,16 @@ class InstanceAuthMiddleware:
                             if len(chunks) > 65536:
                                 raise ValueError()
                         body = json.loads(chunks)
-                        if path.endswith('/discover') and method == 'POST':
+                        if full_api:
+                            from instance_provider_settings import FullProviderSettings
+                            adapter = FullProviderSettings(self.own_providers)
+                            if path == '/api/instance/provider-settings' and method == 'PUT':
+                                result = adapter.save(body)
+                            elif path != '/api/instance/provider-settings' and method == 'POST':
+                                result = await adapter.probe(body, path.rsplit('/',1)[1])
+                            else:
+                                raise HTTPException(405, '不支持此方法')
+                        elif path.endswith('/discover') and method == 'POST':
                             result = await self.own_providers.discover(body)
                         elif path == '/api/instance/providers' and method in {'PUT', 'DELETE'}:
                             result = self.own_providers.save(body, delete=method == 'DELETE')
@@ -164,9 +177,6 @@ class InstanceAuthMiddleware:
                 return await self.reply(scope, receive, send, JSONResponse({'detail': '不支持此方法'}, 405))
             if path.endswith('.html'):
                 body = (self.paths.program_root / 'static/api-settings.html').read_text()
-                import re
-                body = re.sub(r'<script src="/static/js/api-settings.js[^\"]*"></script>',
-                              '<script src="/static/js/instance-session.js"></script><script src="/static/js/instance-api-settings.js"></script>', body)
                 return await self.reply(scope, receive, send, Response(authenticated_html(body, self.paths, principal), media_type='text/html'))
         if not own_page and self.classify(scope) != "workbench":
             return await self.reply(scope, receive, send, JSONResponse({"detail": "此功能尚未开放或需要本机管理员操作"}, 403))

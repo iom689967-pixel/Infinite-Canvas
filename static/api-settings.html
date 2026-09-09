@@ -284,6 +284,7 @@
                                         <option value="gemini" data-i18n="api.protocolGemini">Gemini 协议</option>
                                         <option value="volcengine">方舟/Ark 任务协议</option>
                                         <option value="runninghub">RunningHub OpenAPI</option>
+                                        <option value="kie">Kie 图片</option>
                                         <option value="jimeng">即梦 CLI</option>
                                         <option value="codex">OpenAI Codex CLI</option>
                                         <option value="gemini-cli">Antigravity CLI</option>
@@ -299,6 +300,22 @@
                                     </select>
                                 </div>
                             </div>
+                            <label class="field">
+                                <span class="label">图片编辑路由</span>
+                                <div class="field-frame image-request-mode-wrap"><select id="imageEditRouteInput" aria-label="图片编辑路由"><option value="general">编辑：标准接口</option><option value="auto">编辑：自动选择</option><option value="chat">编辑：聊天接口</option></select></div>
+                            </label>
+                            <div class="field">
+                                <span class="label">平台状态</span>
+                                <label class="hint"><input id="providerEnabledInput" type="checkbox"> 启用平台</label>
+                                <label class="hint"><input id="providerPrimaryInput" type="checkbox"> 默认平台</label>
+                            </div>
+                            <details class="field full">
+                                <summary class="label">自定义图片端点（留空使用默认）</summary>
+                                <div class="endpoint-grid">
+                                    <label class="field"><span class="label">文生图端点</span><div class="field-frame"><input id="imageGenerationEndpointInput" type="text" placeholder="/v1/images/generations"></div></label>
+                                    <label class="field"><span class="label">图片编辑端点</span><div class="field-frame"><input id="imageEditEndpointInput" type="text" placeholder="/v1/images/edits"></div></label>
+                                </div>
+                            </details>
                             <div id="verifyResult" style="display:none;padding:2px 0;grid-column:1/-1"></div>
                         </div>
                     </section>
