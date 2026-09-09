@@ -1,0 +1,9 @@
+/* Small account/permission additions; layout, typography, color and icons remain shared. */
+[data-instance-hidden] { display: none !important; }
+[data-instance-denied] { opacity: .45; cursor: not-allowed !important; }
+.instance-account { width: 100%; padding: 0 8px; box-sizing: border-box; }
+.instance-account .side-pill { width: 100%; }
+.instance-account-name { overflow: hidden; text-overflow: ellipsis; }
+.instance-feature-notice { font: inherit; color: var(--muted, #777); font-size: 12px; padding: 8px 12px; }
+
+[data-local-pick-folder] { display: none !important; }

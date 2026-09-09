@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from instance_access import PUBLIC_STATIC, ROUTE_ACCESS, WORKBENCH_STATIC
 from instance_auth import PRINCIPAL
+from instance_frontend import authenticated_html, frontend_context
 from instance_model_policy import failure as model_access_failure
 
 
@@ -46,6 +47,8 @@ class InstanceAuthMiddleware:
         return "denied"
 
     async def reply(self, scope, receive, send, response):
+        if scope.get('_instance_namespace'):
+            response.headers['X-Instance-Namespace'] = scope['_instance_namespace']
         response.headers.update({"Cache-Control": "no-store, private", "Pragma": "no-cache",
                                  "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
         await response(scope, receive, send)
@@ -69,6 +72,8 @@ class InstanceAuthMiddleware:
             return await self.reply(scope, receive, send, JSONResponse({"detail": "请求来源或传输方式不受信任"}, 403))
         token = self.cookie(headers)
         principal = self.store.validate(token)
+        if principal:
+            scope['_instance_namespace'] = frontend_context(self.paths, principal)['storage_namespace']
         if websocket:
             if not principal or headers.get("origin") != self.origin or self.classify(scope) != "workbench":
                 return await send({"type": "websocket.close", "code": 1008})
@@ -118,15 +123,14 @@ class InstanceAuthMiddleware:
             if headers.get("origin") != self.origin or not hmac.compare_digest(headers.get("x-csrf-token", ""), principal["csrf"]):
                 return await self.reply(scope, receive, send, JSONResponse({"detail": "CSRF 或请求来源校验失败"}, 403))
         if path == "/api/auth/me" and method == "GET":
-            return await self.reply(scope, receive, send, JSONResponse({k: principal[k] for k in ("username", "role", "instance_id", "csrf", "expires", "permissions")}))
+            return await self.reply(scope, receive, send, JSONResponse({k: principal[k] for k in ("username", "role", "instance_id", "csrf", "expires", "permissions")} | frontend_context(self.paths, principal)))
         if path == "/api/auth/logout" and method == "POST":
             self.store.revoke(token)
             response = JSONResponse({"ok": True})
             response.delete_cookie(self.cookie_name, path="/", secure=self.secure, httponly=True, samesite="strict")
             return await self.reply(scope, receive, send, response)
         own_api = path in {'/api/instance/providers', '/api/instance/providers/discover'}
-        own_page = path in {'/static/api-settings.html', '/static/js/instance-api-settings.js',
-                            '/static/js/i18n/api-settings.js'}
+        own_page = path in {'/static/api-settings.html', '/static/js/instance-api-settings.js'}
         if own_api or own_page:
             if not self.own_providers or 'manage_own_providers' not in principal.get('permissions', []):
                 return await self.reply(scope, receive, send, JSONResponse({'detail': '未获本实例 API 管理权限'}, 403))
@@ -163,7 +167,7 @@ class InstanceAuthMiddleware:
                 import re
                 body = re.sub(r'<script src="/static/js/api-settings.js[^\"]*"></script>',
                               '<script src="/static/js/instance-session.js"></script><script src="/static/js/instance-api-settings.js"></script>', body)
-                return await self.reply(scope, receive, send, Response(body, media_type='text/html'))
+                return await self.reply(scope, receive, send, Response(authenticated_html(body, self.paths, principal), media_type='text/html'))
         if not own_page and self.classify(scope) != "workbench":
             return await self.reply(scope, receive, send, JSONResponse({"detail": "此功能尚未开放或需要本机管理员操作"}, 403))
         scope.setdefault("state", {})["principal"] = principal
@@ -188,10 +192,11 @@ class InstanceAuthMiddleware:
                 started = True
                 failed = message["status"] >= 500
                 message["headers"] = [(k, v) for k, v in message.get("headers", [])
-                                      if k.lower() not in {b"cache-control", b"pragma", b"content-length"}]
+                                      if k.lower() not in {b"cache-control", b"pragma", b"content-length", b"x-instance-namespace"}]
                 message["headers"] += [(b"cache-control", b"no-store, private"), (b"pragma", b"no-cache"),
                                        (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
-                                       (b"x-frame-options", b"SAMEORIGIN")]
+                                       (b"x-frame-options", b"SAMEORIGIN"),
+                                       (b"x-instance-namespace", frontend_context(self.paths, principal)['storage_namespace'].encode())]
                 if path.startswith(("/assets/", "/output/", "/api/storage-files/")) or path == "/api/download-output":
                     # Uploaded HTML/SVG must not execute as an authenticated application page.
                     message["headers"].append((b"content-security-policy", b"sandbox; default-src 'none'"))

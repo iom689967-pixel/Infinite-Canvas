@@ -71,8 +71,9 @@ class OwnProviderTests(unittest.TestCase):
         self.assertIn('manage_own_providers',me['permissions'])
         self.assertEqual(self.request('A','GET','/static/api-settings.html').status_code,200)
         self.assertEqual(self.request('A','GET','/static/js/i18n/api-settings.js').status_code,200)
-        for path in (API, '/static/api-settings.html', '/static/js/instance-api-settings.js', '/static/js/i18n/api-settings.js'):
+        for path in (API, '/static/api-settings.html', '/static/js/instance-api-settings.js'):
             self.assertEqual(self.request('B','GET',path).status_code,403)
+        self.assertEqual(self.request('B','GET','/static/js/i18n/api-settings.js').status_code,200)
         for headers in ({'X-CSRF-Token':''}, {'Origin':'http://evil.example'}):
             self.assertEqual(self.request('A','PUT',API,headers=headers,json=self.item()).status_code,403)
         with httpx.Client(trust_env=False) as client:

@@ -172,6 +172,18 @@ ROUTE_ACCESS = {
 }
 
 WORKBENCH_STATIC = frozenset([
+    '/static/angle.html',
+    '/static/comfyui-settings.html',
+    '/static/css/instance-ui.css',
+    '/static/enhance.html',
+    '/static/index.html',
+    '/static/js/comfyui-settings.js',
+    '/static/js/instance-storage.js',
+    '/static/js/instance-ui.js',
+    '/static/klein.html',
+    '/static/online.html',
+    '/static/zimage.html',
+
     "/static/instance-workspace.html",
     "/static/asset-manager.html",
     "/static/canvas-list.html",
@@ -202,6 +214,8 @@ WORKBENCH_STATIC = frozenset([
     "/static/js/i18n.js",
     "/static/js/i18n/canvas.js",
     "/static/js/i18n/common.js",
+    "/static/js/i18n/comfyui-settings.js",
+    "/static/js/i18n/api-settings.js",
     "/static/js/i18n/smart-canvas.js",
     "/static/js/i18n/studio.js",
     "/static/js/i18n/validate-i18n.js",

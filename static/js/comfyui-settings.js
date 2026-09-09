@@ -204,6 +204,7 @@ function defaultMiniTestNodes(){
 // —— ComfyUI 后端地址管理 ——
 let comfyInstances = [];
 async function loadComfyInstances(){
+    if(window.InstanceSession && !window.InstanceSession.can('system_admin')) return;
     try {
         const data = await fetch('/api/comfyui/instances').then(r => r.json());
         comfyInstances = Array.isArray(data.instances) ? data.instances : [];
@@ -943,7 +944,7 @@ function renderPreview(){
     const resultHtml = runResult
         ? `<div class="run-result"><img src="${escapeAttr(runResult)}" onclick="openImagePreview('${escapeAttr(runResult)}')"><div class="run-status">${tr('comfy.runSuccess')}</div></div>`
         : '';
-    const runButton = `<button id="runBtn" class="run-btn" type="button" onclick="onRun()">
+    const runButton = `<button ${window.InstanceSession ? 'disabled aria-disabled="true" title="当前实例未开放执行"' : ''} id="runBtn" class="run-btn" type="button" onclick="onRun()">
             <i data-lucide="play" class="w-4 h-4"></i><span>${tr('comfy.runTest')}</span>
         </button>`;
     previewCard.innerHTML = `
@@ -1273,6 +1274,7 @@ async function pickImage(fieldId){
 }
 
 async function onRun(){
+    if(window.InstanceSession && !window.InstanceSession.can('local_generation')) return;
     if(!selectedName || !currentConfig) return;
     const btn = document.getElementById('runBtn');
     if(btn){ btn.disabled = true; btn.querySelector('span').textContent = tr('comfy.runningTest'); }

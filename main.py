@@ -1799,8 +1799,9 @@ def fetch_release_update_notes(version: str, timeout: float = 3.0) -> Dict[str, 
     }
 
 def versioned_static_html(html: str) -> str:
-    if PATHS.explicit and "/static/js/instance-session.js" not in html:
-        html = html.replace("<head>", '<head><script src="/static/js/instance-session.js"></script>', 1)
+    if PATHS.explicit:
+        from instance_frontend import authenticated_html
+        html = authenticated_html(html, PATHS, PRINCIPAL.get())
     version = current_app_version()
     if not version:
         return html
@@ -12478,7 +12479,7 @@ async def build_chat_text_reply(payload, conversation):
 
 @app.get("/")
 async def index():
-    return static_html_response("instance-workspace.html" if PATHS.explicit else "index.html")
+    return static_html_response("index.html")
 
 @app.get("/api/view")
 def view_image(filename: str, type: str = "input", subfolder: str = ""):
