@@ -34,7 +34,7 @@ process.stdout.write(JSON.stringify({batch,calls,blocked,isKie:isKieProviderId('
     def test_recovery_uses_only_local_owned_task_and_preserves_old_result_guards(self):
         query=function_source('querySmartImageTaskNow')
         self.assertIn('/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh',query)
-        self.assertIn('pollSmartCanvasTask(task.taskId)',query)
+        self.assertIn('pollSmartCanvasTask(task.taskId, node, task)',query)
         poll=function_source('pollSmartCanvasTask')
         self.assertIn("task.recovery === 'query-existing'",poll)
         self.assertIn('controlledImageTaskRecovery(taskId, task.error)',poll)

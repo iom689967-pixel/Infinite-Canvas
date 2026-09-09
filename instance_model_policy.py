@@ -236,6 +236,8 @@ class GuardedClient:
         return True
 
     async def request(self, method, url, **kwargs):
+        if getattr(self, 'query_only', False) and method.upper() not in {'GET', 'HEAD'}:
+            raise failure('not_allowed')
         diagnostic = getattr(self, 'reference_diagnostic', None)
         if diagnostic:
             diagnostic('http')

@@ -38,9 +38,18 @@ class ControlledModels:
             # No createTask is ever replayed after a process crash.
             for row in db.execute('SELECT id,data FROM jobs').fetchall():
                 job = json.loads(row['data'])
-                if job['status'] in {'queued', 'preparing', 'submitting', 'submitted', 'generating', 'waiting', 'queuing'}:
-                    job.update(status='failed', recovery=self.recovery(job),
-                               error='服务重启，提交状态待确认；不会自动重新提交', outstanding=bool(job.get('outstanding')))
+                recoverable = (bool(job['upstream']) and all(e.get('remote_done') for e in job['upstream'])
+                               and not job.get('submission_uncertain') and job.get('upstream_status') != 'fail')
+                if job['status'] == 'failed' and recoverable:
+                    job.update(status='result_recovery_required', upstream_status='success', local_result_status='pending',
+                               error='图片已在上游生成成功，本地结果尚未恢复')
+                    db.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), row['id']))
+                if job['status'] in {'queued', 'preparing', 'submitting', 'submitted', 'generating', 'waiting', 'queuing', 'result_pending_download'}:
+                    job.update(status='result_recovery_required' if recoverable else 'failed', recovery=self.recovery(job),
+                               error='图片已在上游生成成功，本地结果尚未恢复' if recoverable else '服务重启，提交状态待确认；不会自动重新提交',
+                               outstanding=False if recoverable else bool(job.get('outstanding')))
+                    if recoverable:
+                        job.update(upstream_status='success', local_result_status='pending')
                     db.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), row['id']))
         os.chmod(self.database, 0o600)
 
@@ -166,11 +175,41 @@ class ControlledModels:
         self.references([r.url for r in payload.reference_images], limits)
         return provider, limits
 
+    def validate_binding(self, binding, owner):
+        if not binding:
+            return
+        canvas = self.app.load_canvas(binding['canvas_id'])
+        # Canvas.owner is an editable display label, not an authorization identity.
+        # load_canvas uses this instance's data root; task ownership is session-bound.
+        if (PRINCIPAL.get() or {}).get('subject') != owner:
+            raise HTTPException(404, '本用户没有此任务')
+        node = next((n for n in canvas.get('nodes', []) if n.get('id') == binding['node_id']), None)
+        if not node or (binding.get('generation_id') and not any(
+                a.get('id') == binding['generation_id'] for a in node.get('generationHistory', []))):
+            raise HTTPException(409, '原节点或生成版本已不存在，结果不会转移到其他节点')
+
+    @staticmethod
+    def phase(job):
+        if job['status'] == 'succeeded': return 'completed_local'
+        if job['status'] in {'result_recovery_required', 'result_pending_download'}: return job['status']
+        if job.get('upstream_status') == 'fail': return 'upstream_failed'
+        if job.get('upstream_status') == 'success': return 'upstream_success'
+        if job['status'] in {'waiting', 'queuing', 'generating'}: return 'processing'
+        return job['status']
+
     def create(self, payload):
         provider, _ = self.validate_image(payload)
         owner = PRINCIPAL.get()['subject']
         params = payload.model_dump()
         nonce = params.pop('request_id', '')
+        binding = {k: params.pop(k, '') for k in ('canvas_id', 'node_id', 'generation_id')}
+        if any(binding.values()):
+            if not binding['canvas_id'] or not binding['node_id']:
+                raise HTTPException(400, '画布与节点关联必须完整')
+            self.validate_binding(binding, owner)
+        else:
+            binding = {}
+        params['binding'] = binding
         fingerprint = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()
         with self.db() as db:
             for row in db.execute('SELECT * FROM jobs WHERE owner=? ORDER BY updated DESC', (owner,)):
@@ -185,6 +224,7 @@ class ControlledModels:
         job = {'id':'canvas_img_'+uuid.uuid4().hex, 'owner':owner, 'status':'queued', 'params':params,
                'provider_revision':task_provider_revision(self.policy, provider),
                'provider_id':payload.provider_id, 'model':payload.model, 'upstream':[], 'result':None,
+               'binding':binding, 'upstream_status':'', 'local_result_status':'not_ready', 'recovery_attempts':0,
                'error':'', 'outstanding':True, 'recovery':'', 'submission_uncertain':False, 'created_at':time.time()}
         with self.db() as db:
             db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (job['id'],owner,fingerprint,nonce,json.dumps(job),time.time()))
@@ -204,6 +244,9 @@ class ControlledModels:
 
     def public(self, job):
         return {k:job.get(k) for k in ('id','status','provider_id','model','result','error','recovery','created_at')} | {
+            'phase':self.phase(job), 'binding':job.get('binding', {}),
+            'upstream_status':job.get('upstream_status', 'success' if any(e.get('remote_done') for e in job['upstream']) else ''),
+            'local_result_status':job.get('local_result_status', 'completed' if job['status']=='succeeded' else 'pending'),
             'has_upstream_task':bool(job['upstream']), 'upstream_cancel_supported':False,
             'local_wait_active':job['id'] in self.runners and not self.runners[job['id']].done(),
             'cancel_scope':job.get('cancel_scope',''), 'error_code':job.get('error_code','')}
@@ -213,6 +256,12 @@ class ControlledModels:
 
     def refresh(self, task_id):
         job = self.owned(task_id)
+        self.validate_binding(job.get('binding'), job['owner'])
+        if job['status'] == 'succeeded':
+            return self.public(job)
+        configured = self.policy.providers.get(job['provider_id'])
+        if not configured or not configured.get('enabled', True):
+            raise HTTPException(409, '原 Provider 已删除或禁用；恢复不可用，不会使用其他 Provider 或重新生成')
         provider, _ = self.policy.allowed(job['provider_id'], job['model'], 'image')
         if job.get('provider_revision') != task_provider_revision(self.policy, provider):
             raise HTTPException(409, '原任务配置已变化或为旧版本任务；禁止使用新凭证查询，也不会重新提交')
@@ -221,7 +270,9 @@ class ControlledModels:
                 self.check_capacity()
                 job['outstanding'] = True
                 self.save(job)
-            job['status'] = 'submitted'
+            job['status'] = 'result_pending_download' if any(e.get('remote_done') for e in job['upstream']) else 'submitted'
+            job['recovery_attempts'] = job.get('recovery_attempts', 0) + 1
+            job['recovery_started_at'] = time.time()
             self.save(job)
             # A refresh can only query existing IDs; it cannot create remaining batch images.
             self.launch(job, query_only=True)
@@ -250,7 +301,8 @@ class ControlledModels:
             provider, limits = self.policy.allowed(job['provider_id'], job['model'], 'image')
             if job.get('provider_revision') != task_provider_revision(self.policy, provider):
                 raise failure('conflict', 409)
-            client = GuardedClient(self.policy, provider, timeout=120)
+            client = GuardedClient(self.policy, provider, timeout=min(120, limits['timeout_seconds']))
+            client.query_only = query_only
             credential = self.policy.credential(provider)
             client.used_credential = credential
             kie = KieClient(credential, base_url=provider['base_url'], http_client=client)
@@ -280,6 +332,8 @@ class ControlledModels:
                 if cancel.is_set():
                     raise KieTaskCancelled('local stop')
                 if index >= len(job['upstream']):
+                    if query_only:
+                        raise HTTPException(409, '恢复操作禁止创建任务')
                     body, _ = build_create_payload(job['model'], params['prompt'], urls,
                         params['aspect_ratio'], params['resolution'], params['output_format'])
                     job.update(status='submitting', submission_uncertain=True); self.save(job)
@@ -291,12 +345,19 @@ class ControlledModels:
                 if entry['done']:
                     continue
                 async def status(value, _raw):
+                    job['upstream_status'] = value
                     job['status'] = value if value in {'waiting','queuing','generating'} else 'submitted'
+                    if value == 'success':
+                        # Persist success before result JSON parsing or local I/O can fail.
+                        entry['remote_done'] = True
+                        job.update(status='result_pending_download', local_result_status='pending')
                     self.save(job)
                 result = await poll_task(kie, entry['id'], timeout_seconds=limits['timeout_seconds'],
                     initial_interval=.05 if self.policy.mode == 'mock' else 2.5, cancel_event=cancel, on_status=status)
-                entry['remote_done'] = True; self.save(job)
-                for url in result['resultUrls'][:1]:
+                entry['remote_done'] = True
+                job.update(upstream_status='success', status='result_pending_download', local_result_status='pending')
+                self.save(job)
+                for url in ([] if entry.get('local') else result['resultUrls'][:1]):
                     if cancel.is_set():
                         raise KieTaskCancelled('local stop')
                     response = await client.get(url)
@@ -308,6 +369,7 @@ class ControlledModels:
                         normalized = BytesIO(); image.convert('RGB').save(normalized, 'PNG')
                     local = await self.app.save_ai_image_to_output({'type':'b64','value':base64.b64encode(normalized.getvalue()).decode()}, prefix='controlled_')
                     entry['local'] = [local]
+                    self.save(job)
                 entry['done'] = True; self.save(job)
             images = [url for entry in job['upstream'] for url in entry['local']]
             result = {'images':images, 'image_items':[self.app.image_output_meta(url) for url in images],
@@ -318,8 +380,10 @@ class ControlledModels:
                 job.update(status='failed', result=result, outstanding=True, recovery='manual-reconcile',
                            error='已保存已知任务结果；另有提交状态不明，需管理员核对，未自动补交')
             else:
-                self.app.save_to_history(result)
-                job.update(status='succeeded', result=result, outstanding=False, error='', recovery='')
+                result['local_result_status'] = 'completed'
+                self.app.save_to_history(result, identity_key=job['id'])
+                job.update(status='succeeded', result=result, outstanding=False, error='', error_code='', recovery='',
+                           local_result_status='completed', completed_local_at=time.time(), upstream_status='success')
         except (asyncio.CancelledError, KieTaskCancelled):
             # Never claim provider cancellation: these adapters have no cancellation API.
             job.update(status='canceled', cancel_scope='local-only' if submitted or job['upstream'] else 'pre-submit',
@@ -338,8 +402,14 @@ class ControlledModels:
                 outstanding = False
             if known and not job.get('submission_uncertain') and all(entry.get('remote_done') for entry in job['upstream']):
                 outstanding = False
-            job.update(status='failed', error=failure(code,502).detail['message'], error_code=code, outstanding=outstanding,
-                       recovery='' if terminal_failure else self.recovery(job))
+            if terminal_failure:
+                job['upstream_status'] = 'fail'
+            recover_result = not terminal_failure and any(e.get('remote_done') for e in job['upstream']) and not job.get('submission_uncertain')
+            job.update(status='result_recovery_required' if recover_result else 'failed',
+                       error='图片已在上游生成成功，本地结果尚未恢复' if recover_result else failure(code,502).detail['message'],
+                       error_code=code, outstanding=outstanding, recovery='' if terminal_failure else self.recovery(job))
+            if recover_result:
+                job.update(upstream_status='success', local_result_status='pending')
         finally:
             self.save(job)
             if client:

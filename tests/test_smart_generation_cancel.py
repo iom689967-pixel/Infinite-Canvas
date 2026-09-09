@@ -208,7 +208,7 @@ class SmartCanvasCancelFrontendContractTests(unittest.TestCase):
         run = function_source("runGeneration")
         resume = function_source("resumeSmartPendingNode")
         resume_all = function_source("resumeSmartPendingTasks")
-        self.assertIn("await runApiGeneration(prompt, refs)", run)
+        self.assertIn("await runApiGeneration(prompt, refs, settings, pendingNode)", run)
         self.assertIn("await resumeSmartPendingNode", run)
         self.assertIn("completeNodeGenerationAttempt", resume)
         self.assertIn("if(error?.smartTaskCancelled) return", resume_all)

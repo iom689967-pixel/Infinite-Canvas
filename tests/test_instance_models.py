@@ -208,7 +208,7 @@ class ControlledModelTests(unittest.TestCase):
         deadline=time.monotonic()+5
         while time.monotonic()<deadline:
             data=self.ok(name,'GET','/api/canvas-image-tasks/'+task)
-            if data['status'] in {'failed','canceled','succeeded'} and not data['local_wait_active']:
+            if data['status'] in {'failed','canceled','succeeded','result_recovery_required'} and not data['local_wait_active']:
                 return data
             time.sleep(.05)
         self.fail('Temporary model task deadline')
@@ -350,7 +350,7 @@ class ControlledModelTests(unittest.TestCase):
     def test_result_ssrf_and_redirects_fail_before_owner_access(self):
         for prompt in ('EVIL_RESULT','REDIRECT_RESULT'):
             task=self.ok('A','POST','/api/canvas-image-tasks',json=self.image_payload(prompt))['task_id']
-            result=self.wait_job(task);self.assertEqual(result['status'],'failed');self.assertEqual(result['error_code'],'download')
+            result=self.wait_job(task);self.assertEqual(result['status'],'result_recovery_required');self.assertEqual(result['upstream_status'],'success');self.assertEqual(result['error_code'],'download')
             self.assertNotIn('3000',json.dumps(result))
 
     def test_credentials_never_appear_in_catalog_errors_canvas_exports_or_logs(self):

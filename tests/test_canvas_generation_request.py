@@ -26,7 +26,7 @@ class CanvasGenerationRequestTests(unittest.TestCase):
     def test_smart_canvas_normalizes_resolution_case_before_request(self):
         source = (ROOT / "static/js/smart-canvas.js").read_text(encoding="utf-8")
         match = re.search(
-            r"async function runApiGeneration\(prompt, refs, runSettings=settings\)\{(?P<body>.*?)\n\}",
+            r"async function runApiGeneration\(prompt, refs, runSettings=settings, bindingNode=null\)\{(?P<body>.*?)\n\}",
             source,
             re.DOTALL,
         )

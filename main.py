@@ -3023,6 +3023,9 @@ class OnlineImageRequest(BaseModel):
     operation: str = ""
     resolution_type: str = ""
     request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
+    canvas_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
+    node_id: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9_-]*$")
+    generation_id: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9_-]*$")
 
 class MidjourneySubmitRequest(BaseModel):
     provider_id: str = ""
@@ -3691,17 +3694,37 @@ def comfy_class_is_debug_text(class_type):
     ct = str(class_type or "").lower()
     return bool(ct) and any(h in ct for h in COMFY_DEBUG_TEXT_CLASS_HINTS)
 
-def save_to_history(record):
+def save_to_history(record, *, identity_key=None):
     with HISTORY_LOCK:
         history = []
         if os.path.exists(HISTORY_FILE):
             try:
                 with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                     history = json.load(f)
-            except: pass
+            except Exception:
+                if identity_key is not None:
+                    raise
         if "timestamp" not in record:
             record["timestamp"] = time.time()
+        if identity_key is not None:
+            if not isinstance(history, list):
+                raise ValueError('Invalid history store')
+            history = [item for item in history if item.get('task_id') != identity_key]
         history.insert(0, record)
+        if identity_key is not None:
+            # A recoverable task must not truncate existing history on a failed write.
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=os.path.dirname(HISTORY_FILE), delete=False) as f:
+                    temporary = f.name
+                    json.dump(history[:5000], f, ensure_ascii=False, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, HISTORY_FILE)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+            return
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history[:5000], f, ensure_ascii=False, indent=4)
 
@@ -15206,7 +15229,7 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
 
 @app.get("/api/canvas-image-tasks/{task_id}")
 async def get_canvas_image_task(task_id: str):
-    if PATHS.explicit and INSTANCE_MODELS.policy.providers:
+    if PATHS.explicit:
         return INSTANCE_MODELS.get(task_id)
     with CANVAS_TASK_LOCK:
         task = dict(CANVAS_TASKS.get(task_id) or {})
@@ -15266,8 +15289,14 @@ async def cancel_canvas_image_task(task_id: str):
     }
 
 @app.post("/api/canvas-image-tasks/{task_id}/refresh")
-async def refresh_controlled_image_task(task_id: str):
-    if not PATHS.explicit or not INSTANCE_MODELS.policy.providers:
+async def refresh_controlled_image_task(task_id: str, request: Request):
+    try:
+        body = await request.body()
+        if len(body) > 2048 or (body and json.loads(body) != {}):
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(400, '恢复请求不接受 Provider、任务或节点覆盖参数') from None
+    if not PATHS.explicit:
         raise model_access_failure('not_configured', 503)
     return INSTANCE_MODELS.refresh(task_id)
 
