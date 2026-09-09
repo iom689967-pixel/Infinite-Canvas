@@ -236,6 +236,9 @@ class GuardedClient:
         return True
 
     async def request(self, method, url, **kwargs):
+        diagnostic = getattr(self, 'reference_diagnostic', None)
+        if diagnostic:
+            diagnostic('http')
         endpoint = origin(url)
         headers = dict(kwargs.pop('headers', {}))
         has_auth = any(k.lower() in {'authorization', 'x-goog-api-key'} for k in headers)
@@ -254,6 +257,8 @@ class GuardedClient:
                 raise failure('download', 502)
             addresses = {endpoint[1:]}
         else:
+            if diagnostic:
+                diagnostic('dns')
             private = getattr(self.policy, 'private_targets', {}).get(endpoint, frozenset())
             if endpoint[0] != 'https' or (endpoint[2] != 443 and not private):
                 raise failure('download', 502)
@@ -263,21 +268,61 @@ class GuardedClient:
                 ip = ipaddress.ip_address(value)
                 return (ip.is_global and not (ip.is_multicast or ip.is_reserved)) or value in private
             if not addresses or any(not approved(ip) for ip, _ in addresses):
+                if diagnostic:
+                    diagnostic('dns', destination='rejected')
                 raise failure('download', 502)
+            if diagnostic:
+                diagnostic('dns', destination='approved_private' if private else 'public')
         context = OUTBOUND_ENDPOINTS.set(frozenset(addresses))
         try:
+            if diagnostic:
+                diagnostic('http')
             # Do not carry an upstream Set-Cookie into uploads or media downloads either.
             self.client.cookies.clear()
             # Stream and cap every response before buffering; even an approved CDN is untrusted.
             async with self.client.stream(method, url, headers=headers, **kwargs) as response:
+                if diagnostic:
+                    diagnostic('response', http_status=response.status_code,
+                               media_type=response.headers.get('content-type', '').split(';')[0],
+                               http_version=response.http_version, streaming=True, headers_received=True,
+                               content_length_present='content-length' in response.headers,
+                               content_length=(int(response.headers['content-length'])
+                                   if response.headers.get('content-length', '').isascii()
+                                   and response.headers.get('content-length', '').isdigit()
+                                   and len(response.headers['content-length']) <= 9 else None),
+                               content_encoding=response.headers.get('content-encoding', 'none').lower(),
+                               transfer_encoding=response.headers.get('transfer-encoding', 'none').lower())
                 if 300 <= response.status_code < 400:
+                    if diagnostic:
+                        diagnostic('redirect', redirect_count=1)
                     raise failure('download', 502)
                 data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > 32*1024*1024:
-                        raise failure('download', 502)
-                return httpx.Response(response.status_code, headers=response.headers, content=bytes(data), request=response.request)
+                body_bytes_read = 0
+                if diagnostic:
+                    diagnostic('body_read', body_read_started=True, body_bytes_read=0)
+                try:
+                    async for chunk in response.aiter_bytes():
+                        body_bytes_read += len(chunk)
+                        if len(data) + len(chunk) > 32*1024*1024:
+                            raise failure('download', 502)
+                        data.extend(chunk)
+                finally:
+                    if diagnostic:
+                        diagnostic('body_read', body_read_started=True, body_bytes_read=body_bytes_read)
+                if diagnostic:
+                    diagnostic('response_rebuild', body_bytes_read=len(data))
+                # aiter_bytes has already decoded Content-Encoding and HTTP framing.
+                # Reusing wire headers would decode the buffered content a second time.
+                buffered_headers = response.headers.copy()
+                for name in ('content-encoding', 'content-length', 'transfer-encoding'):
+                    buffered_headers.pop(name, None)
+                return httpx.Response(response.status_code, headers=buffered_headers, content=bytes(data),
+                                      request=response.request,
+                                      extensions={'http_version': response.extensions.get('http_version', b'HTTP/1.1')})
+        except Exception as exc:
+            if diagnostic and hasattr(diagnostic, 'failed'):
+                diagnostic.failed(exc)
+            raise
         finally:
             OUTBOUND_ENDPOINTS.reset(context)
 

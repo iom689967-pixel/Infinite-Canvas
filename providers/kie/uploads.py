@@ -37,6 +37,12 @@ _CACHE_SOURCE_LOCKS_BY_LOOP = weakref.WeakKeyDictionary()
 _DEFAULT_REFERENCE_CACHE = None
 
 
+def _diagnose(client, stage, **values):
+    callback = getattr(client, 'reference_diagnostic', None)
+    if callback:
+        callback(stage, **values)
+
+
 def _safe_timestamp(value, default=0.0):
     try:
         return float(value)
@@ -399,6 +405,7 @@ def _decode_data_url(value, *, index, filename):
 
 
 async def _download_public_image(client, url, *, index, filename, max_bytes):
+    _diagnose(client, 'media', reference_index=index)
     try:
         response = await client.get(url, headers={"Accept": "image/*"})
     except httpx.HTTPError as exc:
@@ -406,6 +413,7 @@ async def _download_public_image(client, url, *, index, filename, max_bytes):
             f"公网地址下载失败：{exc}", index=index, filename=filename
         ) from exc
     content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    _diagnose(client, 'media', http_status=response.status_code, media_type=content_type, empty=not bool(getattr(response, 'content', b'')))
     if response.status_code != 200:
         raise KieReferenceError(
             "公网地址没有返回 HTTP 200",
@@ -509,6 +517,7 @@ def normalize_image_bytes(content, *, index, filename, max_bytes):
 
 
 async def _upload_normalized_image(client, api_key, content, meta, *, index, filename, content_hash=""):
+    _diagnose(client, 'upload', reference_index=index, file_size=len(content), media_type=meta['mime_type'])
     digest = str(content_hash or hashlib.sha256(content).hexdigest())[:12]
     stem = _safe_filename(filename, f"reference-{index}")
     upload_name = f"{stem}-{digest}{meta['extension']}"
@@ -527,6 +536,8 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
             content_type=meta["mime_type"],
         ) from exc
     response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    _diagnose(client, 'response', http_status=response.status_code, media_type=response_type, empty=not bool(getattr(response, 'content', b'')))
+    _diagnose(client, 'json', json_ok=False)
     try:
         payload = response.json()
     except ValueError as exc:
@@ -545,6 +556,7 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
             http_status=response.status_code,
             content_type=response_type,
         )
+    _diagnose(client, 'json', json_ok=True)
     code = payload.get("code")
     if response.status_code != 200 or code not in (None, 200, "200") or payload.get("success") is False:
         message = payload.get("msg") or payload.get("message") or "Kie File Upload 未成功"
@@ -556,6 +568,8 @@ async def _upload_normalized_image(client, api_key, content, meta, *, index, fil
             content_type=response_type,
         )
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    _diagnose(client, 'extract', has_data=isinstance(payload.get('data'), dict),
+              has_download_url=bool(data.get('downloadUrl')), has_file_url=bool(data.get('fileUrl')))
     public_url = str(data.get("downloadUrl") or data.get("fileUrl") or "").strip()
     valid_url = client.validate_media_url(public_url) if hasattr(client, 'validate_media_url') else public_url.startswith("https://")
     if not valid_url:
@@ -1064,6 +1078,7 @@ async def prepare_kie_references(
     client = http_client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
         for index, ref in enumerate(references or [], 1):
+            _diagnose(client, 'resolve', reference_index=index)
             reference_started = time.perf_counter()
             raw_url = ref.get("url", "") if isinstance(ref, dict) else ref
             source_url = str(raw_url or "").strip()
@@ -1109,6 +1124,7 @@ async def prepare_kie_references(
                 )
             else:
                 local_path = resolve_local_path(source_url)
+                _diagnose(client, 'resolve', exists=bool(local_path and os.path.isfile(local_path)))
                 if not local_path or not os.path.isfile(local_path):
                     raise KieReferenceError(
                         f"无法解析本地图片来源（实际形式：{source_form}）",
@@ -1139,6 +1155,7 @@ async def prepare_kie_references(
                 async with source_lock:
                     source_cache_wait_ms = (time.perf_counter() - source_wait_started) * 1000
                     source_lookup_started = time.perf_counter()
+                    _diagnose(client, 'cache')
                     source_lookup_state, source_entry = cache.lookup_source(source_fingerprint)
                     source_cache_lookup_ms = (time.perf_counter() - source_lookup_started) * 1000
                     if source_lookup_state == "hit":
@@ -1190,6 +1207,7 @@ async def prepare_kie_references(
 
                     if not public_url:
                         source_cache_misses += 1
+                        _diagnose(client, 'read', file_size=local_source['size'])
                         try:
                             with open(local_source["path"], "rb") as handle:
                                 content = handle.read(max_bytes + 1)
@@ -1206,10 +1224,12 @@ async def prepare_kie_references(
                                 content_type=source_type,
                             )
                         normalize_started = time.perf_counter()
+                        _diagnose(client, 'normalize', media_type=source_type)
                         normalized, meta = normalize_image_bytes(
                             content, index=index, filename=filename, max_bytes=max_bytes
                         )
                         normalize_ms = (time.perf_counter() - normalize_started) * 1000
+                        _diagnose(client, 'normalized', file_size=len(normalized), width=meta['width'], height=meta['height'], media_type=meta['mime_type'])
                         digest = hashlib.sha256(normalized).hexdigest()
                         resolution = await _resolve_normalized_upload(
                             cache,

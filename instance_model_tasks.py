@@ -19,6 +19,7 @@ from PIL import Image
 from instance_auth import PRINCIPAL
 from instance_model_policy import GuardedClient, ModelPolicy, failure
 from instance_providers import task_provider_revision
+from instance_reference_diagnostics import ReferenceDiagnostics
 from providers.kie.client import KieClient, KieAPIError
 from providers.kie.models import build_create_payload, KieValidationError
 from providers.kie.tasks import poll_task, KieTaskCancelled, KieTaskError, task_status
@@ -262,9 +263,18 @@ class ControlledModels:
                 # Separate cache namespace for provider + credential rotation; never share upload ownership.
                 namespace = hashlib.sha256((provider['id']+credential).encode()).hexdigest()[:24]
                 cache = KieReferenceUploadCache(self.paths.data_root/f'.auth/reference-cache/{namespace}.json', url_validator=client.validate_media_url)
-                urls, _audits = await prepare_kie_references(credential, references,
-                    resolve_local_path=lambda value:self.paths.user_path(self.app.output_file_from_url(value)),
-                    max_bytes=limits['max_reference_bytes'], cache=cache, http_client=client)
+                diagnostic = ReferenceDiagnostics()
+                client.reference_diagnostic = diagnostic
+                try:
+                    urls, _audits = await prepare_kie_references(credential, references,
+                        resolve_local_path=lambda value:self.paths.user_path(self.app.output_file_from_url(value)),
+                        max_bytes=limits['max_reference_bytes'], cache=cache, http_client=client)
+                    diagnostic('complete')
+                except Exception as exc:
+                    diagnostic.failed(exc)
+                    raise
+                finally:
+                    client.reference_diagnostic = None
             count = len(job['upstream']) if query_only else params['n']
             for index in range(count):
                 if cancel.is_set():
