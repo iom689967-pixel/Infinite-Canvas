@@ -30,7 +30,7 @@ def main():
                 # Reads only names/sizes, never workspace file contents or credentials.
                 root=supervisor.root(instance)
                 config=json.loads((root/'.auth/public-beta.json').read_text())
-                values=StorageQuota(root,config['storage_quota'],config['max_upload']).recount()
+                values=StorageQuota(root,config['storage_quota'],config['max_upload'],config.get('min_free_disk_bytes',0)).recount()
             else:
                 values={k:instance[k] for k in ('username','instance_id','status','assigned_port','data_root','pid','last_started_at')}
         print(json.dumps(values,ensure_ascii=False,indent=2));return 0

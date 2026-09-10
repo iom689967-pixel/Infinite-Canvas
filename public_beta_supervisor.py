@@ -62,6 +62,8 @@ class Supervisor:
         name=self.store.username(username)
         self.store.limit('registration-name',name,3)
         if password!=confirmation: raise BetaError('两次密码输入不一致')
+        if shutil.disk_usage(self.config.instances_root).free < self.config.min_free_disk:
+            raise BetaError('服务器存储资源不足，暂时停止新注册',503)
         try: encoded=password_hash(password)
         except (ValueError,TypeError): raise BetaError('密码长度必须为 12–1024 个字符') from None
         with self.locked():
@@ -83,7 +85,8 @@ class Supervisor:
                     'gateway-handoff.json':{'user_id':instance['user_id'],'username':name,
                         'key':instance_key(self.store.key,instance['instance_id']).hex()},
                     'public-beta.json':{'storage_quota':self.config.storage_quota,'max_upload':self.config.max_upload,
-                        'max_concurrent_generations':self.config.concurrency},
+                        'max_concurrent_generations':self.config.concurrency,
+                        'min_free_disk_bytes':self.config.min_free_disk},
                     'model-access.json':{'schema_version':1,'mode':'mock' if self.config.mock_upstreams else 'live',
                         'max_concurrent':self.config.concurrency,'providers':[],'personal_providers':[]}}
                 for filename,data in files.items():
@@ -129,6 +132,18 @@ class Supervisor:
                 return response.status_code==200 and hmac.compare_digest(response.json().get('proof',''),expected)
         except (httpx.HTTPError,ValueError,TypeError): return False
 
+    def running_count(self):
+        with self.store.db() as db:
+            rows=[dict(row) for row in db.execute("SELECT user_id,pid,process_started,status FROM instances WHERE status IN ('starting','running')")]
+        live=0
+        for row in rows:
+            if row['pid'] and self.process_start(row['pid'])==row['process_started']:
+                live+=1
+            else:
+                with self.store.db() as db:
+                    db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(row['user_id'],))
+        return live
+
     def start(self, uid):
         with self.locked():
             instance=self.store.instance(uid)
@@ -143,6 +158,8 @@ class Supervisor:
             if not self.available(instance['assigned_port']):
                 # Keep the persisted mapping stable. Never connect to another process or guess.
                 raise BetaError('工作区端口暂时不可用，请联系管理员',503)
+            if self.running_count() >= self.config.max_running_instances:
+                raise BetaError('当前正在运行的工作区已达服务器安全上限，请稍后再试',503)
             child=subprocess.Popen([sys.executable,str(self.program/'public_beta_worker.py'),'serve'],cwd=self.program,
                 env=self.env(instance),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                 start_new_session=True)

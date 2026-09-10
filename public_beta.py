@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import hmac
+import ipaddress
 import json
 import secrets
 
@@ -16,17 +17,23 @@ from public_beta_supervisor import Supervisor
 COOKIE='mio_beta_session'
 
 
-def page(kind):
+def page(kind, config):
     title={'home':'Mio Canvas','login':'登录 Mio Canvas','register':'注册 Mio Canvas','starting':'正在启动你的工作区…'}[kind]
     if kind=='home':
-        body='<p>Public Beta · 免费使用 · API 由用户自行配置</p><nav><a href="/login">登录</a><a href="/register">注册</a></nav>'
+        register='<a href="/register">注册</a>' if config.registration_mode != 'closed' else ''
+        body='<p>Public Beta · 免费使用 · API 由用户自行配置</p><nav><a href="/login">登录</a>'+register+'</nav>'
     elif kind=='starting':
         body='<p>请稍候，工作区健康后会自动打开。</p><button id="retry">重试</button><p><a href="/login">返回登录</a></p>'
+    elif kind=='register' and config.registration_mode == 'closed':
+        body='<p>当前 Mio Canvas Public Beta 暂未开放注册。</p><p><a href="/login">已有账号，登录</a></p>'
     else:
         confirm='<label>确认密码<input name="confirmation" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>' if kind=='register' else ''
-        body='<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" minlength="12" maxlength="1024" autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form><p><a href="/'+('login' if kind=='register' else 'register')+'">'+('已有账号，登录' if kind=='register' else '注册账号')+'</a></p>'
+        invite='<label>测试邀请码<input name="invite_code" type="password" maxlength="1024" autocomplete="one-time-code" required></label>' if kind=='register' and config.registration_mode=='invite' else ''
+        register_link='<p><a href="/register">注册账号</a></p>' if kind=='login' and config.registration_mode!='closed' else ''
+        alternative='<p><a href="/login">已有账号，登录</a></p>' if kind=='register' else register_link
+        body='<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" minlength="12" maxlength="1024" autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+invite+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form>'+alternative
     script=''
-    if kind in {'login','register'}:
+    if kind in {'login','register'} and not (kind=='register' and config.registration_mode=='closed'):
         script="""document.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const values=Object.fromEntries(new FormData(e.target));const r=await fetch('/api/beta/"""+kind+"""',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});const d=await r.json();if(!r.ok)throw new Error(d.detail);e.target.reset();location.replace('/workspace');}catch(e){document.querySelector('#message').textContent=e.message||'请求失败';}finally{b.disabled=false;}});"""
     elif kind=='starting':
         script="""async function enter(){const b=document.querySelector('#retry');b.disabled=true;try{const m=await fetch('/api/beta/me').then(r=>r.json());const r=await fetch('/api/beta/enter',{method:'POST',headers:{'X-CSRF-Token':m.csrf}});const d=await r.json();if(!r.ok)throw new Error(d.detail);location.replace('/');}catch(e){document.querySelector('#message').textContent=e.message||'暂时无法启动';}finally{b.disabled=false;}}document.querySelector('#retry').onclick=enter;enter();"""
@@ -43,11 +50,28 @@ def create_app(config):
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.store=store;app.state.supervisor=supervisor
 
+    def connection(scope, headers):
+        peer=str((scope.get('client') or ('',0))[0])
+        if config.proxied:
+            try:
+                if str(ipaddress.ip_address(peer)) not in config.trusted_proxies: raise ValueError()
+                forwarded=headers.get('x-forwarded-for','')
+                if ',' in forwarded or str(ipaddress.ip_address(forwarded))!=forwarded: raise ValueError()
+            except ValueError:
+                return ''
+            expected_scheme=config.origin.split(':',1)[0]
+            if headers.get('host')!=config.public_host or headers.get('x-forwarded-proto')!=expected_scheme:
+                return ''
+            return forwarded
+        if headers.get('host')!=config.public_host or scope.get('scheme')!='http': return ''
+        return peer
+
     @app.middleware('http')
     async def boundary(request, call_next):
-        # Actual socket peer only. No X-Forwarded-For authority in local development.
-        if request.headers.get('host')!=f'127.0.0.1:{config.port}' or request.url.scheme!='http':
+        client_ip=connection(request.scope,request.headers)
+        if not client_ip:
             return JSONResponse({'detail':'请求来源不受信任'},403)
+        request.scope.setdefault('state',{})['beta_client_ip']=client_ip
         if request.method not in {'GET','HEAD','OPTIONS'} and request.headers.get('origin')!=config.origin:
             return JSONResponse({'detail':'请求来源不受信任'},403)
         try: response=await call_next(request)
@@ -80,23 +104,31 @@ def create_app(config):
 
     def signed_in(token):
         response=JSONResponse({'ok':True})
-        response.set_cookie(COOKIE,token,httponly=True,samesite='strict',max_age=config.session_ttl,path='/')
+        response.set_cookie(COOKIE,token,httponly=True,secure=config.secure,samesite='strict',max_age=config.session_ttl,path='/')
         return response
+
+    def outward_cookie(value):
+        return value+'; Secure' if config.secure and '; secure' not in value.lower() else value
 
     @app.get('/healthz')
     async def health(): return {'ok':True}
 
     @app.get('/login')
-    async def login_page(): return HTMLResponse(page('login'))
+    async def login_page(): return HTMLResponse(page('login',config))
 
     @app.get('/register')
-    async def register_page(): return HTMLResponse(page('register'))
+    async def register_page(): return HTMLResponse(page('register',config))
 
     @app.post('/api/beta/register')
     async def register(request:Request):
+        if config.registration_mode=='closed': raise BetaError('当前 Mio Canvas Public Beta 暂未开放注册。',403)
         values=await body(request)
-        if set(values)!={'username','password','confirmation'}: raise BetaError('注册字段不正确')
-        token=await asyncio.to_thread(supervisor.register,values['username'],values['password'],values['confirmation'],request.client.host)
+        expected={'username','password','confirmation'} | ({'invite_code'} if config.registration_mode=='invite' else set())
+        if set(values)!=expected: raise BetaError('注册字段不正确')
+        if config.registration_mode=='invite':
+            store.limit('registration-invite',request.state.beta_client_ip,config.register_limit)
+        if not config.invite_valid(values.pop('invite_code','')): raise BetaError('邀请码无效',403)
+        token=await asyncio.to_thread(supervisor.register,values['username'],values['password'],values['confirmation'],request.state.beta_client_ip)
         store.revoke(request.cookies.get(COOKIE,''))
         return signed_in(token)
 
@@ -104,7 +136,7 @@ def create_app(config):
     async def login(request:Request):
         values=await body(request)
         if set(values)!={'username','password'}: raise BetaError('登录字段不正确')
-        token=await asyncio.to_thread(store.login,values['username'],values['password'],request.client.host)
+        token=await asyncio.to_thread(store.login,values['username'],values['password'],request.state.beta_client_ip)
         store.revoke(request.cookies.get(COOKIE,''))
         return signed_in(token)
 
@@ -121,7 +153,7 @@ def create_app(config):
     @app.websocket('/ws/stats')
     async def stats(socket:WebSocket):
         token=socket.cookies.get(COOKIE,'');principal=store.principal(token)
-        if not principal or socket.headers.get('origin')!=config.origin or socket.headers.get('host')!=f'127.0.0.1:{config.port}':
+        if not principal or socket.headers.get('origin')!=config.origin or not connection(socket.scope,socket.headers):
             await socket.close(code=1008);return
         uid=principal['id']
         if websocket_counts.get(uid,0)>=8:
@@ -161,7 +193,7 @@ def create_app(config):
     @app.get('/workspace')
     async def starting(request:Request):
         current(request)
-        return HTMLResponse(page('starting'))
+        return HTMLResponse(page('starting',config))
 
     @app.post('/api/beta/enter')
     async def enter(request:Request):
@@ -174,7 +206,7 @@ def create_app(config):
         # Disable/session revocation can race a slow start; never issue a usable central session after it.
         current(request)
         response=JSONResponse({'ok':True})
-        for cookie in reply.headers.get_list('set-cookie'): response.headers.append('set-cookie',cookie)
+        for cookie in reply.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(cookie))
         return response
 
     async def forward(request,principal):
@@ -207,9 +239,9 @@ def create_app(config):
             else: await upstream.aclose();await client.aclose();raise BetaError('工作区重定向不可用',502)
         async def close(): await upstream.aclose();await client.aclose()
         response=StreamingResponse(upstream.aiter_raw(),status_code=upstream.status_code,headers=copied,background=BackgroundTask(close))
-        for value in upstream.headers.get_list('set-cookie'): response.headers.append('set-cookie',value)
+        for value in upstream.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(value))
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
-            response.delete_cookie(COOKIE,path='/',httponly=True,samesite='strict')
+            response.delete_cookie(COOKIE,path='/',httponly=True,secure=config.secure,samesite='strict')
         return response
 
     @app.api_route('/{path:path}',methods=['GET','HEAD','POST','PUT','PATCH','DELETE'])
@@ -217,13 +249,13 @@ def create_app(config):
         if path.startswith(('__mio/','api/beta/')): raise BetaError('未开放此接口',404)
         principal=store.principal(request.cookies.get(COOKIE,''))
         if not principal:
-            if not path and request.method=='GET': return HTMLResponse(page('home'))
+            if not path and request.method=='GET': return HTMLResponse(page('home',config))
             if request.method=='GET' and 'text/html' in request.headers.get('accept','') and (path.endswith('.html') or not path):
                 return RedirectResponse('/login',303)
             raise BetaError('请先登录',401)
         instance=store.instance(principal['id'])
         if not path and request.method=='GET' and (instance['status']!='running' or not request.cookies.get(instance_cookie(instance))):
-            return HTMLResponse(page('starting'))
+            return HTMLResponse(page('starting',config))
         return await forward(request,principal)
 
     return app
@@ -232,7 +264,7 @@ def create_app(config):
 def main():
     import uvicorn
     config=BetaConfig.from_env()
-    uvicorn.run(create_app(config),host='127.0.0.1',port=config.port,proxy_headers=False,access_log=False,log_level='warning')
+    uvicorn.run(create_app(config),host=config.host,port=config.port,proxy_headers=False,access_log=False,log_level='warning')
 
 
 if __name__=='__main__': main()

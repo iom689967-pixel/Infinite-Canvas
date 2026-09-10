@@ -20,6 +20,7 @@ from instance_auth import PRINCIPAL
 from instance_model_policy import GuardedClient, ModelPolicy, failure
 from instance_providers import task_provider_revision
 from instance_reference_diagnostics import ReferenceDiagnostics
+from instance_storage_quota import SERVER_FULL
 from providers.kie.client import KieClient, KieAPIError
 from providers.kie.models import build_create_payload, KieValidationError
 from providers.kie.tasks import poll_task, KieTaskCancelled, KieTaskError, task_status
@@ -398,6 +399,8 @@ class ControlledModels:
                 code = exc.detail['code']
             if isinstance(exc, HTTPException) and exc.status_code == 413 and exc.detail == '当前工作区存储空间已满。':
                 code = 'storage_full'
+            if isinstance(exc, HTTPException) and exc.status_code == 503 and exc.detail == SERVER_FULL:
+                code = 'server_storage_full'
             outstanding = submitted or known
             terminal_failure = isinstance(exc, KieTaskError) and task_status(exc.raw) == 'fail'
             if isinstance(exc, KieTaskError) and task_status(exc.raw) in {'fail','success'}:
@@ -414,6 +417,8 @@ class ControlledModels:
                 job.update(upstream_status='success', local_result_status='pending')
                 if code == 'storage_full':
                     job['error'] = '图片已在上游生成成功；当前工作区存储空间已满。请删除文件后恢复结果。'
+                if code == 'server_storage_full':
+                    job['error'] = '图片已在上游生成成功；服务器存储保护已暂停写入，请稍后恢复结果。'
         finally:
             self.save(job)
             if client:

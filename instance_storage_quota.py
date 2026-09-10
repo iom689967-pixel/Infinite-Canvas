@@ -7,17 +7,20 @@ from contextlib import contextmanager
 from pathlib import Path
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from threading import RLock
 from fastapi import HTTPException
 
 FULL='当前工作区存储空间已满。'
+SERVER_FULL='服务器存储资源不足，暂时停止新的内容写入。'
 
 
 class StorageQuota:
-    def __init__(self, root, limit, max_upload):
+    def __init__(self, root, limit, max_upload, min_free_disk=0):
         self.root=Path(root).resolve();self.limit=limit;self.max_upload=max_upload
+        self.min_free_disk=min_free_disk
         self.database=self.root/'.auth/storage.sqlite3'
         self.lock=RLock();self.reserved=0;self.dirty=set();self.moves=[]
         with self.db() as db:
@@ -30,7 +33,7 @@ class StorageQuota:
     def for_paths(cls,paths):
         if not getattr(paths,'public_beta',False): return None
         config=json.loads((paths.data_root/'.auth/public-beta.json').read_text())
-        return cls(paths.data_root,config['storage_quota'],config['max_upload'])
+        return cls(paths.data_root,config['storage_quota'],config['max_upload'],config.get('min_free_disk_bytes',0))
 
     @contextmanager
     def db(self):
@@ -106,13 +109,16 @@ class StorageQuota:
     def usage(self):
         self.sync()
         with self.db() as db: used=db.execute('SELECT used FROM total WHERE id=1').fetchone()[0]
-        return {'used_bytes':used,'quota_bytes':self.limit,'max_upload_bytes':self.max_upload}
+        return {'used_bytes':used,'quota_bytes':self.limit,'max_upload_bytes':self.max_upload,
+                'server_write_available':shutil.disk_usage(self.root).free >= self.min_free_disk}
 
     @contextmanager
     def reserve(self,size):
         with self.lock:
             used=self.usage()['used_bytes']
             if size<0 or used+self.reserved+size>self.limit: raise HTTPException(413,FULL)
+            if size and shutil.disk_usage(self.root).free-size < self.min_free_disk:
+                raise HTTPException(503,SERVER_FULL)
             self.reserved+=size
         try: yield
         finally:

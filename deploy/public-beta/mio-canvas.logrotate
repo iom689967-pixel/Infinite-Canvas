@@ -1,0 +1,12 @@
+/opt/mio-canvas/logs/*.log {
+    daily
+    rotate 14
+    size 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su mio-canvas mio-canvas
+    create 0600 mio-canvas mio-canvas
+}

@@ -3,12 +3,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
+import urllib.parse
 import uuid
 
 from instance_auth import password_hash, verify_password
@@ -35,6 +38,7 @@ def private_directory(value):
 class BetaConfig:
     root: Path
     instances_root: Path
+    host: str = '127.0.0.1'
     port: int = 32100
     port_start: int = 32000
     port_end: int = 32999
@@ -48,36 +52,98 @@ class BetaConfig:
     ticket_ttl: int = 45
     session_ttl: int = 28800
     mock_upstreams: str = ''
+    external_origin: str = ''
+    trusted_proxies: tuple = ()
+    registration_mode: str = 'open'
+    invite_hash: str = ''
+    min_free_disk: int = 2 * 1024**3
+    max_running_instances: int = 4
+    backup_root: Path = None
+    backup_retention: int = 7
 
     def __post_init__(self):
         self.root = private_directory(self.root)
         self.instances_root = private_directory(self.instances_root)
+        self.backup_root = private_directory(self.backup_root or self.root.parent/'backups')
         if self.root == self.instances_root or self.root.is_relative_to(self.instances_root) or self.instances_root.is_relative_to(self.root):
             raise ValueError('Gateway 与用户实例目录必须分离')
+        for left,right in ((self.backup_root,self.root),(self.backup_root,self.instances_root)):
+            if left == right or left.is_relative_to(right) or right.is_relative_to(left):
+                raise ValueError('备份目录必须与运行数据分离')
+        if self.host != '127.0.0.1':
+            raise ValueError('Gateway 只能监听 127.0.0.1')
         if not 1024 <= self.port <= 65535 or not 1024 <= self.port_start <= self.port_end <= 65535:
             raise ValueError('无效 loopback 端口范围')
-        for value in (self.max_users, self.storage_quota, self.max_upload, self.concurrency, self.register_limit, self.login_limit, self.window_seconds):
+        for value in (self.max_users, self.storage_quota, self.max_upload, self.concurrency, self.register_limit, self.login_limit, self.window_seconds, self.backup_retention):
             if type(value) is not int or value < 1:
                 raise ValueError('资源限制必须为正整数')
-        if not 1 <= self.concurrency <= 8 or not 1 <= self.ticket_ttl <= 60 or not 1 <= self.session_ttl <= 86400:
+        if type(self.min_free_disk) is not int or self.min_free_disk < 0:
+            raise ValueError('磁盘安全余量必须是非负整数')
+        if not 1 <= self.concurrency <= 8 or not 1 <= self.max_running_instances <= 20 or not 1 <= self.ticket_ttl <= 60 or not 1 <= self.session_ttl <= 86400:
             raise ValueError('会话或并发配置无效')
+        if self.registration_mode not in {'open','closed','invite'}:
+            raise ValueError('注册模式必须为 open、closed 或 invite')
+        if self.registration_mode == 'invite' and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
+            raise ValueError('邀请码模式需要 SHA-256 摘要')
+        if self.invite_hash and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
+            raise ValueError('邀请码摘要格式无效')
+        parsed=urllib.parse.urlsplit(self.external_origin or self.listen_origin)
+        if parsed.scheme not in {'http','https'} or not parsed.hostname or parsed.username or parsed.password or parsed.path not in {'','/'} or parsed.query or parsed.fragment:
+            raise ValueError('Public Beta Origin 必须是完整且无路径的 http(s) origin')
+        normalized=f'{parsed.scheme}://{parsed.netloc}'
+        if self.external_origin and self.external_origin.rstrip('/') != normalized:
+            raise ValueError('Public Beta Origin 格式无效')
+        if self.external_origin and parsed.scheme != 'https':
+            raise ValueError('公网 Public Beta Origin 必须使用 HTTPS')
+        self.external_origin=normalized if self.external_origin else ''
+        normalized_proxies=[]
+        for value in self.trusted_proxies:
+            address=ipaddress.ip_address(value)
+            if not address.is_loopback: raise ValueError('Trusted proxy 只允许本机地址')
+            normalized_proxies.append(str(address))
+        self.trusted_proxies=tuple(normalized_proxies)
+        if self.external_origin and not self.trusted_proxies:
+            raise ValueError('公网 Origin 必须配置本机 trusted proxy')
         if self.mock_upstreams and not all(re.fullmatch(r'127\.0\.0\.1:[0-9]{4,5}', s) for s in self.mock_upstreams.split(',')):
             raise ValueError('Mock 只允许管理员明确配置 loopback 上游')
 
     @property
-    def origin(self):
-        return f'http://127.0.0.1:{self.port}'
+    def listen_origin(self): return f'http://{self.host}:{self.port}'
+
+    @property
+    def origin(self): return self.external_origin or self.listen_origin
+
+    @property
+    def secure(self): return self.origin.startswith('https://')
+
+    @property
+    def public_host(self): return urllib.parse.urlsplit(self.origin).netloc
+
+    @property
+    def proxied(self): return bool(self.external_origin)
+
+    def invite_valid(self,value):
+        if self.registration_mode != 'invite': return self.registration_mode == 'open'
+        if not isinstance(value,str) or len(value)>1024: return False
+        return secrets.compare_digest(hashlib.sha256(value.encode()).hexdigest(),self.invite_hash)
 
     @classmethod
     def from_env(cls):
         env = os.environ
         names = {'port':'GATEWAY_PORT', 'port_start':'INSTANCE_PORT_START', 'port_end':'INSTANCE_PORT_END',
                  'max_users':'MAX_PUBLIC_USERS', 'storage_quota':'INSTANCE_STORAGE_QUOTA',
-                 'max_upload':'MAX_UPLOAD_BYTES', 'concurrency':'MAX_CONCURRENT_GENERATIONS'}
+                 'max_upload':'MAX_UPLOAD_BYTES', 'concurrency':'MAX_CONCURRENT_GENERATIONS',
+                 'min_free_disk':'MIN_FREE_DISK_BYTES','max_running_instances':'MAX_RUNNING_INSTANCES',
+                 'backup_retention':'PUBLIC_BETA_BACKUP_RETENTION'}
         values = {key:int(env[name]) for key,name in names.items() if name in env}
         return cls(Path(env.get('PUBLIC_BETA_ROOT', '~/.infinite-canvas/public-beta')).expanduser(),
                    Path(env.get('PUBLIC_BETA_INSTANCES_ROOT', '~/.infinite-canvas/instances')).expanduser(),
-                   mock_upstreams=env.get('PUBLIC_BETA_MOCK_UPSTREAMS',''), **values)
+                   host=env.get('GATEWAY_HOST','127.0.0.1'),mock_upstreams=env.get('PUBLIC_BETA_MOCK_UPSTREAMS',''),
+                   external_origin=env.get('PUBLIC_BETA_ORIGIN',''),
+                   trusted_proxies=tuple(filter(None,(v.strip() for v in env.get('PUBLIC_BETA_TRUSTED_PROXIES','').split(',')))),
+                   registration_mode=env.get('PUBLIC_BETA_REGISTRATION_MODE','open').strip().lower(),
+                   invite_hash=env.get('PUBLIC_BETA_INVITE_CODE_HASH','').strip().lower(),
+                   backup_root=Path(env.get('PUBLIC_BETA_BACKUP_ROOT','~/.infinite-canvas/backups')).expanduser(), **values)
 
 
 class GatewayStore:
@@ -90,7 +156,11 @@ class GatewayStore:
         if not self.key_path.exists():
             with open(self.key_path, 'xb') as f:
                 os.chmod(self.key_path, 0o600); f.write(secrets.token_bytes(32))
+        key_stat=self.key_path.stat()
+        if not stat.S_ISREG(key_stat.st_mode) or stat.S_IMODE(key_stat.st_mode) & 0o077:
+            raise ValueError('Gateway handoff key 权限不安全')
         self.key = self.key_path.read_bytes()
+        if len(self.key)!=32: raise ValueError('Gateway handoff key 格式无效')
         with self.db() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,

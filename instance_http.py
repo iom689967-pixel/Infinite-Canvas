@@ -14,6 +14,7 @@ from instance_access import PUBLIC_STATIC, ROUTE_ACCESS, WORKBENCH_STATIC
 from instance_auth import PRINCIPAL
 from instance_frontend import authenticated_html, frontend_context
 from instance_model_policy import failure as model_access_failure
+from instance_storage_quota import SERVER_FULL
 
 
 class InstanceAuthMiddleware:
@@ -160,7 +161,9 @@ class InstanceAuthMiddleware:
             original_receive = receive
             total = 0
             available = max(0, quota.limit - quota.usage()['used_bytes'])
-            non_content_write = path.endswith(('/delete','/refresh')) or path == '/api/canvas-workflows/export'
+            non_content_write = path.endswith('/delete') or path == '/api/canvas-workflows/export'
+            if not quota.usage()['server_write_available'] and not non_content_write:
+                return await self.reply(scope, receive, send, JSONResponse({'detail':SERVER_FULL},503))
             if not available and not non_content_write:
                 return await self.reply(scope, receive, send, JSONResponse({'detail':'当前工作区存储空间已满。'},413))
             async def limited_receive():

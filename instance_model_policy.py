@@ -32,6 +32,7 @@ def failure(code, status=403):
         'download': '上游媒体地址或内容不符合安全规则',
         'conflict': '请求标识已使用，不能替换其内容',
         'storage_full': '当前工作区存储空间已满。',
+        'server_storage_full': '服务器存储资源不足，暂时停止新的内容写入。',
     }
     return HTTPException(status_code=status, detail={'code': code, 'message': messages[code]})
 

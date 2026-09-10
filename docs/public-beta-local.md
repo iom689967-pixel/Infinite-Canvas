@@ -44,20 +44,26 @@ Gateway 负责身份、注册目录、实例映射和转发；Canvas、Prompt、
 |---|---|
 | PUBLIC_BETA_ROOT | `~/.infinite-canvas/public-beta` |
 | PUBLIC_BETA_INSTANCES_ROOT | `~/.infinite-canvas/instances` |
+| PUBLIC_BETA_BACKUP_ROOT | `~/.infinite-canvas/backups` |
+| GATEWAY_HOST | `127.0.0.1`（不能改为公网监听） |
 | GATEWAY_PORT | 32100 |
 | INSTANCE_PORT_START / INSTANCE_PORT_END | 32000 / 32999 |
 | MAX_PUBLIC_USERS | 20（包括禁用账号，已有用户不受注册满额影响） |
 | INSTANCE_STORAGE_QUOTA | 5368709120 bytes，即 5 GiB |
 | MAX_UPLOAD_BYTES | 52428800 bytes，即 50 MiB |
 | MAX_CONCURRENT_GENERATIONS | 2（只限制生成任务，不限制浏览编辑） |
+| MAX_RUNNING_INSTANCES | 4（服务器级同时运行工作区保护） |
+| MIN_FREE_DISK_BYTES | 2147483648 bytes（VPS 配置可提高） |
+| PUBLIC_BETA_REGISTRATION_MODE | `open`（生产首次部署应设为 `closed` 或 `invite`） |
 
 新实例在注册时固化资源预算到私有 `.auth/public-beta.json`。修改 Gateway 默认预算影响
 随后创建的实例；已有实例的调整属于管理员操作，需修改该实例预算并安全重启该实例。
 MAX_PUBLIC_USERS 直接由 Gateway 服务配置控制，不需要改源码。
 
 注册 IP 默认 5 次/300 秒，同用户名 3 次/300 秒，登录失败 IP 默认 10 次/300 秒。
-无永久封禁；成功登录清除该 IP 的失败 bucket。开发模式只使用实际 socket peer，
-不信任 X-Forwarded-For。未来部署 trusted proxy/HTTPS 需另行实现并验收。
+无永久封禁；成功登录清除该 IP 的失败 bucket。开发模式只使用实际 socket peer。
+生产模式要求 HTTPS Origin 和本机 trusted proxy；只有 socket peer 在精确允许列表内时，
+才接受单一、合法的 X-Forwarded-For。任意代理链、错误 Host/scheme 均拒绝。
 
 配额是应用层保护，不是 OS 磁盘硬 quota。内容计数保存在实例 `.auth/storage.sqlite3`，
 认证、运行临时文件及凭证目录为运营开销，不计入内容额度。首次初始化/管理员重算才
@@ -72,7 +78,7 @@ MAX_PUBLIC_USERS 直接由 Gateway 服务配置控制，不需要改源码。
 
 ## SSO、进程与网络边界
 
-Gateway 登录发 HttpOnly/SameSite=Strict cookie（本轮 loopback HTTP）。进入工作区时
+Gateway 登录发 HttpOnly/SameSite=Strict cookie；HTTPS 生产模式同时强制 Secure。进入工作区时
 服务端将 45 秒 ticket POST 给已验证健康的目标实例，ticket 不经过浏览器 URL、日志或
 localStorage。实例通过固有用户/实例绑定验证签名、期限和唯一 nonce，事务消费后建立
 自身正常 Session。实例直接密码登录在 Beta 模式下关闭，用户只需 Gateway 一次登录。
@@ -86,6 +92,8 @@ Supervisor 使用跨进程文件锁和固定 argv/env。端口在配置范围内
 Gateway 端口、3000 和真实占用端口；映射持久化，启动遇占用不接管、不偷偷换目标。
 健康证明绑定实例私有派生密钥。停进程核对 PID、OS start time 及实例进程记录，
 不根据端口杀进程。禁用先撤销中央及实例 Session，再停止实例，数据保留。
+
+VPS 的发行、systemd、Caddy、备份和生产安全设计见 `docs/public-beta-vps.md`。
 
 ## 本地运行步骤
 

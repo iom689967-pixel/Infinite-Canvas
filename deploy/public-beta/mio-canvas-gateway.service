@@ -1,0 +1,39 @@
+[Unit]
+Description=Mio Canvas Public Beta Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mio-canvas
+Group=mio-canvas
+WorkingDirectory=/opt/mio-canvas/app
+EnvironmentFile=/opt/mio-canvas/config/public-beta.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/mio-canvas/venv/bin/python /opt/mio-canvas/app/public_beta.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=4096
+MemoryHigh=900M
+MemoryMax=1200M
+CPUQuota=180%
+ReadWritePaths=/opt/mio-canvas/public-beta /opt/mio-canvas/instances /opt/mio-canvas/logs /opt/mio-canvas/runtime /opt/mio-canvas/backups
+StandardOutput=append:/opt/mio-canvas/logs/gateway.log
+StandardError=append:/opt/mio-canvas/logs/gateway.log
+
+[Install]
+WantedBy=multi-user.target
