@@ -70,9 +70,13 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         await self.register()
         r=await self.client.post('/api/beta/register',json={'username':'ALICE','password':PASSWORD,'confirmation':PASSWORD})
         self.assertEqual(r.status_code,409)
-        for name,pw in [('bad/name',PASSWORD),('a',PASSWORD),('bob','123456')]:
+        for name,pw in [('bad/name',PASSWORD),('a',PASSWORD),('bob','12345')]:
             r=await self.client.post('/api/beta/register',json={'username':name,'password':pw,'confirmation':pw})
             self.assertEqual(r.status_code,400)
+        page=(await self.client.get('/register')).text
+        self.assertIn('minlength="6"',page);self.assertNotIn('minlength="12"',page)
+        r=await self.client.post('/api/beta/register',json={'username':'six','password':'123456','confirmation':'123456'})
+        self.assertEqual(r.status_code,200)
 
     async def test_capacity_existing_login_still_works(self):
         self.config.max_users=1;await self.register()

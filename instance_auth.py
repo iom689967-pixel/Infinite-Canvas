@@ -21,11 +21,12 @@ import time
 PRINCIPAL = ContextVar("instance_principal", default=None)
 PASSWORD_JOBS = BoundedSemaphore(2)
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**17, 8, 1
+PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH = 6, 1024
 
 
 def password_hash(password):
-    if not isinstance(password, str) or not 12 <= len(password) <= 1024:
-        raise ValueError("密码长度必须为 12–1024 个字符")
+    if not isinstance(password, str) or not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
+        raise ValueError(f"密码长度必须为 {PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 个字符")
     salt = secrets.token_bytes(32)
     with PASSWORD_JOBS:
         digest = hashlib.scrypt(password.encode(), salt=salt, n=SCRYPT_N, r=SCRYPT_R,
@@ -38,7 +39,7 @@ def verify_password(password, encoded):
         algorithm, n, r, p, salt, digest = encoded.split("$")
         if (algorithm, n, r, p) != ("scrypt", "131072", "8", "1"):
             return False
-        if not isinstance(password, str) or len(password) > 1024:
+        if not isinstance(password, str) or len(password) > PASSWORD_MAX_LENGTH:
             return False
         with PASSWORD_JOBS:
             actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt),

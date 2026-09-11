@@ -30,7 +30,7 @@ Gateway 负责身份、注册目录、实例映射和转发；Canvas、Prompt、
 | security_events | allowlist event、内部 user_id、时间；不存请求内容或原始异常 |
 
 注册字段仅用户名、密码、确认密码；不收集邮箱。用户名 3–32 位 ASCII 字母、数字、
-下划线或连字符，首字符必须字母或数字，统一小写。密码 12–1024 字符，沿用 scrypt。
+下划线或连字符，首字符必须字母或数字，统一小写。密码 6–1024 字符，沿用 scrypt。
 用户名不作为路径。数据根为 `~/.infinite-canvas/instances/<random_uuid>/`，初始化
 `data/`、`assets/`、`output/`、`workflows/custom/`、`runtime/`、`.auth/`，不复制 owner 内容。
 

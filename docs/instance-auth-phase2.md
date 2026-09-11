@@ -30,7 +30,7 @@ assistant_data=$(mktemp -d /tmp/canvas-assistant01.XXXXXX)
 .venv/bin/python instance_admin.py --data-root "$assistant_data" --instance-id assistant01 create --username assistant01
 ```
 
-密码须为 12–1024 字符，输入隐藏。不能提供安全终端时默认拒绝，绝不降级回显。
+密码须为 6–1024 字符，输入隐藏。不能提供安全终端时默认拒绝，绝不降级回显。
 自动化可显式使用 `--password-stdin` 配合私有进程管道；不要使用带明文密码的
 shell 参数、脚本常量、日志或文档。没有注册、找回密码或网页账号管理入口。
 成功标志：仅输出操作完成，实例 `.auth/access.sqlite3` 存在，未输出密码/哈希。

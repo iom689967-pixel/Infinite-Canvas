@@ -22,6 +22,12 @@ import test_instance_isolation as isolation
 
 
 class AuthenticationUnitTests(unittest.TestCase):
+    def test_password_length_accepts_six_and_rejects_five(self):
+        encoded = password_hash("123456")
+        self.assertTrue(verify_password("123456", encoded))
+        with self.assertRaises(ValueError):
+            password_hash("12345")
+
     def test_scrypt_hash_is_salted_and_uses_reviewed_parameters(self):
         password = secrets.token_urlsafe(24)
         first, second = password_hash(password), password_hash(password)

@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from instance_auth import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
 from public_beta_store import BetaConfig, GatewayStore, BetaError
 from public_beta_supervisor import Supervisor
 
@@ -27,11 +28,12 @@ def page(kind, config):
     elif kind=='register' and config.registration_mode == 'closed':
         body='<p>当前 Mio Canvas Public Beta 暂未开放注册。</p><p><a href="/login">已有账号，登录</a></p>'
     else:
-        confirm='<label>确认密码<input name="confirmation" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label>' if kind=='register' else ''
+        password_bounds=f'minlength="{PASSWORD_MIN_LENGTH}" maxlength="{PASSWORD_MAX_LENGTH}"'
+        confirm='<label>确认密码<input name="confirmation" type="password" '+password_bounds+' autocomplete="new-password" required></label>' if kind=='register' else ''
         invite='<label>测试邀请码<input name="invite_code" type="password" maxlength="1024" autocomplete="one-time-code" required></label>' if kind=='register' and config.registration_mode=='invite' else ''
         register_link='<p><a href="/register">注册账号</a></p>' if kind=='login' and config.registration_mode!='closed' else ''
         alternative='<p><a href="/login">已有账号，登录</a></p>' if kind=='register' else register_link
-        body='<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" minlength="12" maxlength="1024" autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+invite+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form>'+alternative
+        body='<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" '+password_bounds+' autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+invite+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form>'+alternative
     script=''
     if kind in {'login','register'} and not (kind=='register' and config.registration_mode=='closed'):
         script="""document.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const values=Object.fromEntries(new FormData(e.target));const r=await fetch('/api/beta/"""+kind+"""',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});const d=await r.json();if(!r.ok)throw new Error(d.detail);e.target.reset();location.replace('/workspace');}catch(e){document.querySelector('#message').textContent=e.message||'请求失败';}finally{b.disabled=false;}});"""
