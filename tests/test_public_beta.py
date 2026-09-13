@@ -349,6 +349,27 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,200)
         await self.enter();self.assertEqual((await self.client.get('/api/canvases/'+canvas['id'])).status_code,200)
 
+    async def test_disable_releases_capacity_revokes_sessions_and_retains_private_files(self):
+        self.config.max_users=1
+        p=await self.register();await self.enter()
+        ref=(await self.client.post('/api/ai/upload',files={'files':('tiny.png',self.image,'image/png')})).json()['files'][0]['url']
+        canvas=(await self.client.post('/api/canvases',json={'title':'Retained seat fixture'})).json()['canvas']
+        root=Path(self.store.instance(p['id'])['data_root'])
+        await asyncio.to_thread(self.supervisor.account_status,'alice',False)
+        self.assertEqual(self.store.capacity()['active_seats'],0)
+        self.assertEqual(self.store.instance(p['id'])['status'],'stopped')
+        self.assertTrue(root.is_dir())
+        self.assertEqual((await self.client.get(ref)).status_code,401)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,401)
+        await self.register('bob')
+        with self.assertRaises(BetaError):await asyncio.to_thread(self.supervisor.account_status,'alice',True)
+        await asyncio.to_thread(self.supervisor.account_status,'bob',False)
+        await asyncio.to_thread(self.supervisor.account_status,'alice',True)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,200)
+        await self.enter()
+        self.assertEqual((await self.client.get(ref)).content,self.image)
+        self.assertEqual((await self.client.get('/api/canvases/'+canvas['id'])).status_code,200)
+
     async def test_registration_capacity_is_transactional(self):
         self.config.max_users=1
         def run(name):

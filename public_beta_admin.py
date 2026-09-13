@@ -15,7 +15,9 @@ def main():
         store=GatewayStore(BetaConfig.from_env());supervisor=Supervisor(store)
         if args.action=='users':
             with store.db() as db:
-                values=[dict(r) for r in db.execute('SELECT u.username,u.status,i.status AS instance_status,u.created_at,u.last_login_at FROM users u JOIN instances i ON u.id=i.user_id ORDER BY u.created_at')]
+                db.execute('BEGIN')
+                values=store.capacity(db)
+                values['users']=[dict(r) for r in db.execute('SELECT u.username,u.status,i.status AS instance_status,u.created_at,u.last_login_at FROM users u JOIN instances i ON u.id=i.user_id ORDER BY u.created_at')]
         else:
             if not args.username: raise BetaError('需要用户名')
             name=store.username(args.username)
@@ -34,7 +36,10 @@ def main():
             else:
                 values={k:instance[k] for k in ('username','instance_id','status','assigned_port','data_root','pid','last_started_at')}
         print(json.dumps(values,ensure_ascii=False,indent=2));return 0
-    except (BetaError,ValueError,RuntimeError,OSError):
+    except BetaError as exc:
+        # BetaError messages are server-owned constants, never raw request errors.
+        print(exc.message);return 1
+    except (ValueError,RuntimeError,OSError):
         print('管理操作未完成；请检查用户与本机配置。');return 1
 
 

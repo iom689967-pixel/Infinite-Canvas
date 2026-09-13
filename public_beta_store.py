@@ -19,6 +19,8 @@ from instance_auth import password_hash, verify_password
 # Public registration has a stronger creation policy than legacy local accounts.
 # Login continues to verify existing hashes without changing existing passwords.
 REGISTRATION_PASSWORD_MIN_LENGTH = 12
+USER_STATUSES = frozenset({'active', 'provisioning', 'disabled'})
+SEAT_STATUSES = frozenset({'active', 'provisioning'})
 
 
 class BetaError(Exception):
@@ -215,12 +217,37 @@ class GatewayStore:
                 raise BetaError('尝试过于频繁，请稍后再试',429)
             db.execute('INSERT INTO attempts VALUES (?,?,1) ON CONFLICT(bucket) DO UPDATE SET count=count+1',(bucket,now))
 
+    def capacity(self, db=None):
+        if db is None:
+            with self.db() as db: return self.capacity(db)
+        counts=dict(db.execute('SELECT status,COUNT(*) FROM users GROUP BY status'))
+        if set(counts)-USER_STATUSES:
+            # A future/invalid lifecycle state must never silently release capacity.
+            raise BetaError('账号状态待管理员检查，暂不能分配注册名额。',503)
+        seats=sum(counts.get(state,0) for state in SEAT_STATUSES)
+        return {'total_users':sum(counts.values()), 'active_users':counts.get('active',0),
+                'provisioning_users':counts.get('provisioning',0), 'active_seats':seats,
+                'disabled_users':counts.get('disabled',0), 'max_public_users':self.config.max_users,
+                'remaining_registration_slots':max(0,self.config.max_users-seats)}
+
+    def set_enabled(self, uid, enabled):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT status FROM users WHERE id=?',(uid,)).fetchone()
+            if not row: raise BetaError('用户不存在',404)
+            if row['status'] not in {'active','disabled'}:
+                raise BetaError('用户注册尚未完成或状态不可管理。',409)
+            if enabled and row['status']=='disabled' and self.capacity(db)['active_seats']>=self.config.max_users:
+                raise BetaError('Public Beta 名额已满，无法启用该用户。',409)
+            db.execute('UPDATE users SET status=? WHERE id=?',('active' if enabled else 'disabled',uid))
+            db.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
+
     def reserve(self, username, encoded, port):
         uid, iid = uuid.uuid4().hex, uuid.uuid4().hex
         root = self.config.instances_root / iid
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT count(*) FROM users').fetchone()[0] >= self.config.max_users:
+            if self.capacity(db)['active_seats'] >= self.config.max_users:
                 raise BetaError('当前 Mio Canvas Beta 名额已满。',409)
             if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
                 raise BetaError('用户名已被使用',409)

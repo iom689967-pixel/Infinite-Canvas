@@ -12,12 +12,18 @@ Public Beta 新注册密码至少 12 字符，确认密码使用相同规则，�
 新注册实例独占创建空 Prompt 库，避免第一次打开工作台时复制程序随附模板；
 已有账号的 Prompt 库不做清空或迁移。
 
-容量保持 20 个注册记录、5 GiB/用户、50 MiB/文件、2 个生成并发/用户、
+容量保持 20 个占用名额、5 GiB/用户、50 MiB/文件、2 个生成并发/用户、
 4 个同时运行实例、10 GiB 磁盘余量。`open` 不要求邀请码。
 测试账号只用合成图片和不联网的 mock Provider 配置，不调用模型或获取模型接口。
 验收后使用 `public_beta_admin.py disable` 撤销会话并停止测试实例；数据保留在私有目录。
-当前容量统计包含 disabled 用户，禁用不会释放名额，不应悄悄扩大上限或直接删除数据库行。
+当时部署的 `00f9bc5` 仍把 disabled 用户计入名额。本次开发修正后，active 与 provisioning
+占名额，disabled 不占；记录和数据仍保留，不扩大上限或直接删除数据库行。
 下文首次部署 closed / invite 步骤是历史部署流程，当前正式目标是保持 `open`。
+
+### 名额和 Gateway 重启可靠性审计
+
+见 [审计与验收记录](beta-capacity-restarts.md)。名额修复与重启方案分开验收。
+不得把 Uvicorn 支持继承 fd 当成 Gateway/用户实例生命周期已经支持无中断更新。
 
 VPS 使用独立 `beta` 分支，并在每次部署记录精确 commit。现有 `stable` 保持 owner
 自动更新通道的含义，不承载 public registration / Gateway 的发布节奏。流程为：

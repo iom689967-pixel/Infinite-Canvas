@@ -192,38 +192,41 @@ class Supervisor:
 
     def stop(self, uid):
         with self.locked():
-            instance=self.store.instance(uid);pid=instance['pid']
-            if pid and self.process_start(pid)==instance['process_started']:
-                # PID + OS creation time + marked per-instance process record; never a port-only kill.
-                root=self.root(instance)
-                try: record=json.loads((root/'.runtime/process.json').read_text())
-                except (OSError,ValueError): raise BetaError('进程身份无法确认，未发送停止信号',503) from None
-                if record.get('pid')!=pid or record.get('instance_id')!=instance['instance_id']:
-                    raise BetaError('进程身份不匹配，未发送停止信号',503)
-                os.kill(pid,signal.SIGTERM)
-                child=self.children.get(uid)
-                if child:
-                    try: child.wait(timeout=8)
-                    except subprocess.TimeoutExpired: raise BetaError('实例仍在停止中，请稍后检查',503) from None
-            with self.store.db() as db: db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(uid,))
-            self.store.event('stopped',uid)
+            self._stop_locked(uid)
+
+    def _stop_locked(self, uid):
+        instance=self.store.instance(uid);pid=instance['pid']
+        if pid and self.process_start(pid)==instance['process_started']:
+            # PID + OS creation time + marked per-instance process record; never a port-only kill.
+            root=self.root(instance)
+            try: record=json.loads((root/'.runtime/process.json').read_text())
+            except (OSError,ValueError): raise BetaError('进程身份无法确认，未发送停止信号',503) from None
+            if record.get('pid')!=pid or record.get('instance_id')!=instance['instance_id']:
+                raise BetaError('进程身份不匹配，未发送停止信号',503)
+            os.kill(pid,signal.SIGTERM)
+            child=self.children.get(uid)
+            if child:
+                try: child.wait(timeout=8)
+                except subprocess.TimeoutExpired: raise BetaError('实例仍在停止中，请稍后检查',503) from None
+        with self.store.db() as db: db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(uid,))
+        self.store.event('stopped',uid)
 
     def account_status(self, username, enabled):
         name=self.store.username(username)
-        with self.store.db() as db:
-            row=db.execute('SELECT id FROM users WHERE username=?',(name,)).fetchone()
-        if not row: raise BetaError('用户不存在',404)
-        uid=row[0];instance=self.store.instance(uid);root=self.root(instance)
-        # Revoke the central sessions before any stop operation can fail.
-        with self.store.db() as db:
-            db.execute('UPDATE users SET status=? WHERE id=?',('active' if enabled else 'disabled',uid))
-            db.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
-        auth=AuthStore(root,instance['instance_id'])
-        with auth.connect() as db:
-            db.execute('UPDATE accounts SET enabled=?,revision=revision+1',(int(enabled),))
-            db.execute('DELETE FROM sessions')
-        if not enabled: self.stop(uid)
-        self.store.event('enabled' if enabled else 'disabled',uid)
+        # Serialize the complete transition with registration/start/stop, including
+        # instance auth changes. Seat checks additionally hold SQLite's write lock.
+        with self.locked():
+            with self.store.db() as db:
+                row=db.execute('SELECT id FROM users WHERE username=?',(name,)).fetchone()
+            if not row: raise BetaError('用户不存在',404)
+            uid=row[0];instance=self.store.instance(uid);root=self.root(instance)
+            self.store.set_enabled(uid,enabled)
+            auth=AuthStore(root,instance['instance_id'])
+            with auth.connect() as db:
+                db.execute('UPDATE accounts SET enabled=?,revision=revision+1',(int(enabled),))
+                db.execute('DELETE FROM sessions')
+            if not enabled: self._stop_locked(uid)
+            self.store.event('enabled' if enabled else 'disabled',uid)
 
     def close(self):
         for uid,child in list(self.children.items()):
