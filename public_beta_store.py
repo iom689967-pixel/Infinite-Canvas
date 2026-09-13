@@ -66,6 +66,8 @@ class BetaConfig:
     max_running_instances: int = 4
     backup_root: Path = None
     backup_retention: int = 7
+    supervisor_socket: str = ''
+    idle_seconds: int = 0
 
     def __post_init__(self):
         self.root = private_directory(self.root)
@@ -89,6 +91,10 @@ class BetaConfig:
             raise ValueError('会话或并发配置无效')
         if self.registration_mode not in {'open','closed','invite'}:
             raise ValueError('注册模式必须为 open、closed 或 invite')
+        if self.supervisor_socket and (not Path(self.supervisor_socket).is_absolute() or '..' in Path(self.supervisor_socket).parts):
+            raise ValueError('Supervisor socket 必须为绝对路径')
+        if type(self.idle_seconds) is not int or self.idle_seconds < 0:
+            raise ValueError('Idle timeout 必须是非负整数')
         if self.registration_mode == 'invite' and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
             raise ValueError('邀请码模式需要 SHA-256 摘要')
         if self.invite_hash and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
@@ -136,6 +142,8 @@ class BetaConfig:
     @classmethod
     def from_env(cls):
         env = os.environ
+        supervisor_socket=env.get('PUBLIC_BETA_SUPERVISOR_SOCKET','/run/mio-canvas/supervisor.sock')
+        if not supervisor_socket:raise ValueError('运行 Gateway 必须配置独立 Supervisor socket')
         names = {'port':'GATEWAY_PORT', 'port_start':'INSTANCE_PORT_START', 'port_end':'INSTANCE_PORT_END',
                  'max_users':'MAX_PUBLIC_USERS', 'storage_quota':'INSTANCE_STORAGE_QUOTA',
                  'max_upload':'MAX_UPLOAD_BYTES', 'concurrency':'MAX_CONCURRENT_GENERATIONS',
@@ -149,6 +157,8 @@ class BetaConfig:
                    trusted_proxies=tuple(filter(None,(v.strip() for v in env.get('PUBLIC_BETA_TRUSTED_PROXIES','').split(',')))),
                    registration_mode=env.get('PUBLIC_BETA_REGISTRATION_MODE','open').strip().lower(),
                    invite_hash=env.get('PUBLIC_BETA_INVITE_CODE_HASH','').strip().lower(),
+                   supervisor_socket=supervisor_socket,
+                   idle_seconds=int(env.get('PUBLIC_BETA_IDLE_SECONDS','0')),
                    backup_root=Path(env.get('PUBLIC_BETA_BACKUP_ROOT','~/.infinite-canvas/backups')).expanduser(), **values)
 
 
@@ -177,6 +187,7 @@ class GatewayStore:
             CREATE TABLE IF NOT EXISTS sessions (digest TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires REAL NOT NULL, csrf TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS attempts (bucket TEXT PRIMARY KEY, started REAL, count INTEGER);
             CREATE TABLE IF NOT EXISTS security_events (id INTEGER PRIMARY KEY, event TEXT, user_id TEXT, created_at REAL);
+            CREATE TABLE IF NOT EXISTS instance_activity (instance_id TEXT PRIMARY KEY, last_seen REAL NOT NULL);
             ''')
         os.chmod(self.path, 0o600)
         # CLI does not hash a dummy password; the web login path creates it lazily.
@@ -200,7 +211,7 @@ class GatewayStore:
 
     def event(self, event, user_id=''):
         # Caller-selected enum only, never request content/IP/password/raw exception.
-        if event not in {'registered','registration_failed','login','login_failed','disabled','enabled','started','stopped','start_failed'}:
+        if event not in {'registered','registration_failed','login','login_failed','disabled','enabled','started','stopped','start_failed','supervisor_reconcile_required'}:
             raise ValueError('Unknown security event')
         with self.db() as db:
             db.execute('INSERT INTO security_events(event,user_id,created_at) VALUES (?,?,?)',(event,user_id,time.time()))

@@ -3,7 +3,7 @@ import argparse
 import json
 from instance_storage_quota import StorageQuota
 from public_beta_store import BetaConfig, GatewayStore, BetaError
-from public_beta_supervisor import Supervisor
+from public_beta_ipc import gateway_supervisor
 
 
 def main():
@@ -12,7 +12,7 @@ def main():
     parser.add_argument('username',nargs='?')
     args=parser.parse_args()
     try:
-        store=GatewayStore(BetaConfig.from_env());supervisor=Supervisor(store)
+        store=GatewayStore(BetaConfig.from_env());supervisor=gateway_supervisor(store)
         if args.action=='users':
             with store.db() as db:
                 db.execute('BEGIN')

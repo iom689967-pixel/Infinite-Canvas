@@ -275,6 +275,7 @@
         }
     </style>
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.04.1785292588">
+    <script src="/static/js/workspace-socket.js"></script>
 </head>
 
 <body class="selection:bg-black selection:text-white">
@@ -1349,8 +1350,8 @@
         // WebSocket for real-time updates (optional but good for multi-tab sync)
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${window.location.host}/ws/stats?client_id=${CLIENT_ID}`;
-        const socket = new WebSocket(wsUrl);
-        socket.onopen = () => {
+        const socket = new MioWorkspaceSocket(wsUrl);
+        {
             setInterval(() => {
                 if (socket.readyState === WebSocket.OPEN) socket.send("ping");
             }, 30000);

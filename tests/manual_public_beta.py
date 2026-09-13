@@ -1,6 +1,6 @@
 """Real-browser fixture for Public Beta. Only loopback mock, no paid calls.
 
-stdin commands: status, disable-alice, finish. Password/mock key stay in private files.
+stdin commands: status, restart-gateway, disable-alice, finish. Credentials stay private.
 """
 import hashlib
 from http.server import ThreadingHTTPServer
@@ -20,6 +20,8 @@ from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from test_instance_models import ModelMock
 from test_instance_isolation import free_port
+from public_beta_store import BetaConfig, GatewayStore
+from public_beta_ipc import SupervisorClient
 
 program=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
@@ -36,10 +38,14 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
     (root/'reference.png').write_bytes(mock.image)
     env={'PATH':os.environ.get('PATH',os.defpath),'PUBLIC_BETA_ROOT':str(root/'gateway'),
          'PUBLIC_BETA_INSTANCES_ROOT':str(root/'instances'),'GATEWAY_PORT':str(port),
-         'PUBLIC_BETA_MOCK_UPSTREAMS':f'127.0.0.1:{mock.server_port}','PYTHONDONTWRITEBYTECODE':'1'}
+         'PUBLIC_BETA_MOCK_UPSTREAMS':f'127.0.0.1:{mock.server_port}','PYTHONDONTWRITEBYTECODE':'1',
+         'PUBLIC_BETA_SUPERVISOR_SOCKET':str(root/'gateway/ctl.sock'),
+         'PUBLIC_BETA_BACKUP_ROOT':str(root/'backups')}
     record={'root':str(root),'origin':f'http://127.0.0.1:{port}','mock_origin':mock.origin}
     marker=Path('/private/tmp/mio-beta-browser-current.json');marker.write_text(json.dumps(record));marker.chmod(0o600)
     with open(root/'gateway.log','w') as log:
+        daemon=subprocess.Popen([sys.executable,str(program/'public_beta_daemon.py')],cwd=program,env=env,stdout=log,stderr=log)
+        subprocess.run([sys.executable,str(program/'public_beta_daemon.py'),'ready'],cwd=program,env=env,check=True)
         proc=subprocess.Popen([sys.executable,str(program/'public_beta.py')],cwd=program,env=env,stdout=log,stderr=log)
         try:
             for _ in range(100):
@@ -50,6 +56,10 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
             for line in sys.stdin:
                 command=line.strip()
                 if command=='finish':break
+                if command=='restart-gateway':
+                    proc.terminate();proc.wait(timeout=15)
+                    proc=subprocess.Popen([sys.executable,str(program/'public_beta.py')],cwd=program,env=env,stdout=log,stderr=log)
+                    print(json.dumps({'gateway_restarted':True}),flush=True)
                 if command=='disable-alice':
                     result=subprocess.run([sys.executable,str(program/'public_beta_admin.py'),'disable','alice'],cwd=program,env=env,capture_output=True)
                     print(json.dumps({'disabled':result.returncode==0}),flush=True)
@@ -64,4 +74,8 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
             proc.terminate()
             try:proc.wait(timeout=20)
             except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
+            cfg=BetaConfig(root/'gateway',root/'instances',backup_root=root/'backups',supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'])
+            control=SupervisorClient(GatewayStore(cfg))
+            for item in control.call('list_running')['instances']:control.stop(item['user_id'])
+            daemon.terminate();daemon.wait(timeout=15)
             mock.shutdown();mock.server_close();thread.join(timeout=3)

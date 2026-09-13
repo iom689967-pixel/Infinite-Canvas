@@ -6025,34 +6025,14 @@ function connectAssetLibrarySyncSocket(){
     if(!host) return;
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     const clientId = smartClientId;
-    let socket;
-    let retryTimer = null;
-    const connect = () => {
+    const socket = new MioWorkspaceSocket(`${protocol}://${host}/ws/stats?client_id=${clientId}`);
+    socket.onmessage = event => {
         try {
-            socket = new WebSocket(`${protocol}://${host}/ws/stats?client_id=${clientId}`);
-        } catch(e) {
-            retryTimer = setTimeout(connect, 3000);
-            return;
-        }
-        socket.onmessage = event => {
-            try {
-                const data = JSON.parse(event.data);
-                if(data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(data);
-                if(data?.type === 'canvas_updated') handleCanvasUpdatedMessage(data);
-            } catch(e) {}
-        };
-        socket.onclose = () => {
-            retryTimer = setTimeout(connect, 3000);
-        };
-        socket.onerror = () => {
-            try { socket.close(); } catch(e) {}
-        };
+            const data = JSON.parse(event.data);
+            if(data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(data);
+            if(data?.type === 'canvas_updated') handleCanvasUpdatedMessage(data);
+        } catch(e) {}
     };
-    window.addEventListener('beforeunload', () => {
-        clearTimeout(retryTimer);
-        try { socket?.close(); } catch(e) {}
-    });
-    connect();
 }
 function setAssetLibraryFromResponse(data, options={}){
     assetLibrary = data.library || assetLibrary;

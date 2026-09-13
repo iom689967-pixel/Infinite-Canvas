@@ -1,10 +1,7 @@
 [Unit]
-Description=Mio Canvas Public Beta Gateway
-After=network-online.target mio-canvas-instance-supervisor.service
+Description=Mio Canvas instance lifecycle authority
+After=network-online.target
 Wants=network-online.target
-Wants=mio-canvas-instance-supervisor.service
-Requires=mio-canvas-gateway.socket
-After=mio-canvas-gateway.socket
 
 [Service]
 Slice=mio-canvas.slice
@@ -14,13 +11,18 @@ Group=mio-canvas
 WorkingDirectory=/opt/mio-canvas/app
 EnvironmentFile=/opt/mio-canvas/config/public-beta.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=PYTHONUNBUFFERED=1
 Environment=PUBLIC_BETA_SUPERVISOR_SOCKET=/run/mio-canvas/supervisor.sock
-ExecStart=/opt/mio-canvas/venv/bin/python /opt/mio-canvas/app/public_beta.py
+ExecStart=/opt/mio-canvas/venv/bin/python /opt/mio-canvas/app/public_beta_daemon.py
+ExecStartPost=/opt/mio-canvas/venv/bin/python /opt/mio-canvas/app/public_beta_daemon.py ready
 Restart=on-failure
-RestartSec=5
-TimeoutStopSec=45
-Sockets=mio-canvas-gateway.socket
+RestartSec=2
+# Workers survive daemon restart. Startup adopts only verified durable identities.
+# Explicit per-instance stop is the shutdown operation; never cgroup-wide stop-all.
+KillMode=process
+TimeoutStopSec=60
+RuntimeDirectory=mio-canvas
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
@@ -38,8 +40,8 @@ MemoryHigh=900M
 MemoryMax=1200M
 CPUQuota=180%
 ReadWritePaths=/opt/mio-canvas/public-beta /opt/mio-canvas/instances /opt/mio-canvas/logs /opt/mio-canvas/runtime /opt/mio-canvas/backups
-StandardOutput=append:/opt/mio-canvas/logs/gateway.log
-StandardError=append:/opt/mio-canvas/logs/gateway.log
+StandardOutput=append:/opt/mio-canvas/logs/supervisor.log
+StandardError=append:/opt/mio-canvas/logs/supervisor.log
 
 [Install]
 WantedBy=multi-user.target

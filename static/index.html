@@ -1308,6 +1308,7 @@
             max-width: 42px;
         }
     </style>
+    <script src="/static/js/workspace-socket.js"></script>
 </head>
 
 <body>
@@ -1764,7 +1765,7 @@
         const host = window.location.host;
         if (host) {
             const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-            const ws = new WebSocket(`${protocol}://${host}/ws/stats?client_id=${CID}`);
+            const ws = new MioWorkspaceSocket(`${protocol}://${host}/ws/stats?client_id=${CID}`);
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 if (data.type === 'stats') {

@@ -30,7 +30,7 @@ Gateway 负责身份、注册目录、实例映射和转发；Canvas、Prompt、
 | security_events | allowlist event、内部 user_id、时间；不存请求内容或原始异常 |
 
 注册字段仅用户名、密码、确认密码；不收集邮箱。用户名 3–32 位 ASCII 字母、数字、
-下划线或连字符，首字符必须字母或数字，统一小写。密码 6–1024 字符，沿用 scrypt。
+下划线或连字符，首字符必须字母或数字，统一小写。公开注册密码 12–1024 字符，沿用 scrypt。
 用户名不作为路径。数据根为 `~/.infinite-canvas/instances/<random_uuid>/`，初始化
 `data/`、`assets/`、`output/`、`workflows/custom/`、`runtime/`、`.auth/`，不复制 owner 内容。
 
@@ -48,7 +48,9 @@ Gateway 负责身份、注册目录、实例映射和转发；Canvas、Prompt、
 | GATEWAY_HOST | `127.0.0.1`（不能改为公网监听） |
 | GATEWAY_PORT | 32100 |
 | INSTANCE_PORT_START / INSTANCE_PORT_END | 32000 / 32999 |
-| MAX_PUBLIC_USERS | 20（包括禁用账号，已有用户不受注册满额影响） |
+| MAX_PUBLIC_USERS | 20（active/provisioning 占名额，disabled 不占） |
+| PUBLIC_BETA_SUPERVISOR_SOCKET | `/run/mio-canvas/supervisor.sock`；本地需指定私有目录 |
+| PUBLIC_BETA_IDLE_SECONDS | 0（保留不自动休眠策略） |
 | INSTANCE_STORAGE_QUOTA | 5368709120 bytes，即 5 GiB |
 | MAX_UPLOAD_BYTES | 52428800 bytes，即 50 MiB |
 | MAX_CONCURRENT_GENERATIONS | 2（只限制生成任务，不限制浏览编辑） |
@@ -107,10 +109,14 @@ VPS 的发行、systemd、Caddy、备份和生产安全设计见 `docs/public-be
    export PUBLIC_BETA_INSTANCES_ROOT="$HOME/.infinite-canvas/instances"
    export GATEWAY_PORT=32100
    export MAX_PUBLIC_USERS=20
+   export PUBLIC_BETA_SUPERVISOR_SOCKET="$PUBLIC_BETA_ROOT/supervisor.sock"
+   python public_beta_daemon.py &
+   python public_beta_daemon.py ready
    python public_beta.py
    ```
 
    成功标志：`http://127.0.0.1:32100/` 显示 Mio Canvas 注册/登录页。
+   Gateway 退出不再停止用户实例；退出整个本地实验前，逐个执行管理员 `stop`，再结束 daemon。
 2. 访问 `/register`，输入用户名及至少 12 字符的密码。
    成功标志：显示“正在启动你的工作区…”后自动进入完整正式 UI，无第二次密码登录。
 3. 在 API 设置填写自己的 Provider。Key 只保存到个人实例，不回显、不进入 Canvas 或 localStorage。

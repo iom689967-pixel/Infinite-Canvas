@@ -1,0 +1,7 @@
+[Unit]
+Description=Mio Canvas aggregate resource boundary
+
+[Slice]
+MemoryHigh=900M
+MemoryMax=1200M
+CPUQuota=180%

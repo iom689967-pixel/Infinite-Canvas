@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -57,7 +58,7 @@ class Supervisor:
             if port not in used|{self.config.port,3000} and self.available(port): return port
         raise BetaError('暂时没有可用工作区资源，请稍后再试',503)
 
-    def register(self, username, password, confirmation, peer):
+    def registration_input(self, username, password, confirmation, peer):
         self.store.limit('registration-ip',peer,self.config.register_limit)
         name=self.store.username(username)
         self.store.limit('registration-name',name,3)
@@ -70,7 +71,19 @@ class Supervisor:
             encoded=password_hash(password)
         except (ValueError,TypeError):
             raise BetaError(f'密码长度必须为 {REGISTRATION_PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 个字符') from None
+        return name,encoded
+
+    def register(self, username, password, confirmation, peer):
+        name,encoded=self.registration_input(username,password,confirmation,peer)
+        uid=self.provision(name,encoded)
+        return self.store.session(uid)
+
+    def provision(self, name, encoded):
+        if self.store.username(name)!=name or not isinstance(encoded,str) or not re.fullmatch(r'scrypt\$131072\$8\$1\$[0-9a-f]{64}\$[0-9a-f]{128}',encoded):
+            raise BetaError('注册预留字段不正确')
         with self.locked():
+            if shutil.disk_usage(self.config.instances_root).free < self.config.min_free_disk:
+                raise BetaError('服务器存储资源不足，暂时停止新注册',503)
             instance=self.store.reserve(name,encoded,self.allocate())
             root=self.root(instance); created=False
             try:
@@ -103,7 +116,7 @@ class Supervisor:
                 if created and root.is_dir() and not root.is_symlink(): shutil.rmtree(root)
                 self.store.rollback(instance['user_id'])
                 raise BetaError('工作区初始化失败，本次注册已撤销，请稍后再试',503) from None
-        return self.store.session(instance['user_id'])
+        return instance['user_id']
 
     def recover_incomplete(self):
         with self.locked():
@@ -148,6 +161,69 @@ class Supervisor:
                     db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(row['user_id'],))
         return live
 
+    def verify_process(self, instance):
+        """Never adopt or signal by port or PID alone, including after daemon restart."""
+        root=self.root(instance)
+        path=root/'.runtime/process.json'
+        if path.is_symlink(): raise BetaError('工作区进程身份待管理员确认',503)
+        try: record=json.loads(path.read_text())
+        except (OSError,ValueError): raise BetaError('工作区进程身份待管理员确认',503) from None
+        pid=instance['pid']
+        if record!={'instance_id':instance['instance_id'],'pid':pid,'host':'127.0.0.1','port':instance['assigned_port']}:
+            raise BetaError('工作区进程身份不匹配',503)
+        if not pid or self.process_start(pid)!=instance['process_started']:
+            raise BetaError('工作区进程身份不匹配',503)
+        owner=subprocess.run(['ps','-p',str(pid),'-o','uid='],capture_output=True,text=True,timeout=3)
+        if owner.returncode or owner.stdout.strip()!=str(os.getuid()):
+            raise BetaError('工作区进程用户不匹配',503)
+        return True
+
+    def reconcile(self):
+        with self.locked():
+            for uid,child in list(self.children.items()):
+                if child.poll() is not None:self.children.pop(uid,None)
+            with self.store.db() as db: rows=[dict(r) for r in db.execute('SELECT user_id FROM instances')]
+            for row in rows:
+                instance=self.store.instance(row['user_id']);root=self.root(instance)
+                live=instance['pid'] and self.process_start(instance['pid'])==instance['process_started']
+                if live:
+                    self.verify_process(instance)
+                    if instance['user_status']=='disabled':
+                        self._stop_locked(instance['user_id']);continue
+                    if instance['user_status']!='active':
+                        raise BetaError('存活工作区与用户状态不一致，需管理员检查',503)
+                    if instance['status'] not in {'running','starting'} or not self.health(instance):
+                        raise BetaError('存活工作区与注册状态不一致，需管理员检查',503)
+                    with self.store.db() as db:db.execute("UPDATE instances SET status='running' WHERE user_id=?",(instance['user_id'],))
+                else:
+                    # A crash between spawn and registry commit must not produce a duplicate.
+                    # A live port/worker without complete durable identity is quarantined.
+                    if not self.available(instance['assigned_port']):
+                        raise BetaError('未登记进程占用工作区端口，需管理员检查',503)
+                    with self.store.db() as db:db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(instance['user_id'],))
+            known={self.store.instance(r['user_id'])['instance_id'] for r in rows}
+            for root in self.config.instances_root.iterdir():
+                if root.name not in known and (root/'.runtime/process.json').exists():
+                    raise BetaError('发现未登记工作区，需管理员检查',503)
+        return self.list_running()
+
+    def list_running(self):
+        with self.store.db() as db:
+            return [dict(r) for r in db.execute("SELECT instance_id,user_id,pid,process_started,assigned_port,status FROM instances WHERE status='running'")]
+
+    def touch(self, iid):
+        now=time.time()
+        interval=min(5,self.config.idle_seconds/3) if self.config.idle_seconds else 5
+        with self.store.db() as db:
+            db.execute('INSERT INTO instance_activity VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET last_seen=excluded.last_seen WHERE instance_activity.last_seen<?',(iid,now,now-interval))
+
+    def stop_idle(self):
+        if not self.config.idle_seconds:return
+        with self.locked():
+            with self.store.db() as db:
+                rows=list(db.execute("SELECT i.user_id FROM instances i JOIN instance_activity a USING(instance_id) WHERE i.status='running' AND a.last_seen<?",(time.time()-self.config.idle_seconds,)))
+            for row in rows:self._stop_locked(row[0])
+
     def start(self, uid):
         with self.locked():
             instance=self.store.instance(uid)
@@ -155,6 +231,8 @@ class Supervisor:
             root=self.root(instance)
             if self.health(instance):
                 if instance['pid'] and self.process_start(instance['pid'])==instance['process_started']:
+                    self.verify_process(instance)
+                    self.touch(instance['instance_id'])
                     return instance
                 raise BetaError('工作区进程状态待管理员确认',503)
             if instance['pid'] and self.process_start(instance['pid'])==instance['process_started']:
@@ -177,6 +255,7 @@ class Supervisor:
                 if self.health(instance):
                     with self.store.db() as db: db.execute("UPDATE instances SET status='running' WHERE user_id=?",(uid,))
                     self.store.event('started',uid)
+                    self.touch(instance['instance_id'])
                     return self.store.instance(uid)
                 time.sleep(.1)
             if child.poll() is None:
@@ -198,16 +277,21 @@ class Supervisor:
         instance=self.store.instance(uid);pid=instance['pid']
         if pid and self.process_start(pid)==instance['process_started']:
             # PID + OS creation time + marked per-instance process record; never a port-only kill.
-            root=self.root(instance)
-            try: record=json.loads((root/'.runtime/process.json').read_text())
-            except (OSError,ValueError): raise BetaError('进程身份无法确认，未发送停止信号',503) from None
-            if record.get('pid')!=pid or record.get('instance_id')!=instance['instance_id']:
-                raise BetaError('进程身份不匹配，未发送停止信号',503)
+            self.verify_process(instance)
             os.kill(pid,signal.SIGTERM)
             child=self.children.get(uid)
             if child:
                 try: child.wait(timeout=8)
                 except subprocess.TimeoutExpired: raise BetaError('实例仍在停止中，请稍后检查',503) from None
+            else:
+                deadline=time.monotonic()+8
+                while self.process_start(pid)==instance['process_started'] and time.monotonic()<deadline:
+                    state=subprocess.run(['ps','-p',str(pid),'-o','stat='],capture_output=True,text=True,timeout=3).stdout.strip()
+                    if state.startswith('Z'):break
+                    time.sleep(.05)
+                else:
+                    if self.process_start(pid)==instance['process_started']:
+                        raise BetaError('实例仍在停止中，请稍后检查',503)
         with self.store.db() as db: db.execute("UPDATE instances SET status='stopped',pid=NULL,process_started=NULL WHERE user_id=?",(uid,))
         self.store.event('stopped',uid)
 

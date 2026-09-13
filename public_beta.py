@@ -13,7 +13,7 @@ from starlette.background import BackgroundTask
 
 from instance_auth import PASSWORD_MAX_LENGTH
 from public_beta_store import BetaConfig, GatewayStore, BetaError, REGISTRATION_PASSWORD_MIN_LENGTH
-from public_beta_supervisor import Supervisor
+from public_beta_ipc import gateway_supervisor
 from workspace_assets import program_assets, PRIVATE_CACHE
 
 COOKIE='mio_beta_session'
@@ -47,7 +47,7 @@ def page(kind, config):
 
 
 def create_app(config):
-    store=GatewayStore(config);supervisor=Supervisor(store)
+    store=GatewayStore(config);supervisor=gateway_supervisor(store)
     @asynccontextmanager
     async def lifespan(app):
         await asyncio.to_thread(supervisor.recover_incomplete)
@@ -70,7 +70,8 @@ def create_app(config):
             if headers.get('host')!=config.public_host or headers.get('x-forwarded-proto')!=expected_scheme:
                 return ''
             return forwarded
-        if headers.get('host')!=config.public_host or scope.get('scheme')!='http': return ''
+        expected_scheme='ws' if scope.get('type')=='websocket' else 'http'
+        if headers.get('host')!=config.public_host or scope.get('scheme')!=expected_scheme: return ''
         return peer
 
     @app.middleware('http')
@@ -190,7 +191,9 @@ def create_app(config):
                         if isinstance(message,str):await socket.send_text(message)
                         else:await socket.send_bytes(message)
                 async def revoked():
-                    while store.principal(token):await asyncio.sleep(1)
+                    while store.principal(token):
+                        supervisor.touch(instance['instance_id'])
+                        await asyncio.sleep(1)
                 tasks=[asyncio.create_task(coro()) for coro in (inbound,outbound,revoked)]
                 await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
         except Exception:
@@ -224,6 +227,7 @@ def create_app(config):
     async def forward(request,principal):
         instance=store.instance(principal['id'])
         if instance['status']!='running': raise BetaError('工作区尚未启动，请返回首页',503)
+        supervisor.touch(instance['instance_id'])
         origin=f'http://127.0.0.1:{instance["assigned_port"]}'
         headers={k:v for k,v in request.headers.items() if k.lower() in {'accept','content-type','range','if-range','if-none-match','if-modified-since','x-csrf-token','accept-encoding'}}
         headers['host']=f'127.0.0.1:{instance["assigned_port"]}'
@@ -274,9 +278,12 @@ def create_app(config):
 
 
 def main():
+    import os
     import uvicorn
     config=BetaConfig.from_env()
-    uvicorn.run(create_app(config),host=config.host,port=config.port,proxy_headers=False,access_log=False,log_level='warning')
+    inherited=os.environ.get('LISTEN_PID')==str(os.getpid()) and os.environ.get('LISTEN_FDS')=='1'
+    uvicorn.run(create_app(config),host=config.host,port=config.port,fd=3 if inherited else None,
+                proxy_headers=False,access_log=False,log_level='warning',timeout_graceful_shutdown=25)
 
 
 if __name__=='__main__': main()

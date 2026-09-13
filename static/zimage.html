@@ -176,6 +176,7 @@
         }
     </style>
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.04.1785292588">
+    <script src="/static/js/workspace-socket.js"></script>
 </head>
 
 <body class="antialiased">
@@ -319,7 +320,7 @@
         let isLoading = false;
 
         // WebSocket 
-        const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stats?client_id=${encodeURIComponent(CLIENT_ID)}`);
+        const socket = new MioWorkspaceSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stats?client_id=${encodeURIComponent(CLIENT_ID)}`);
         socket.onmessage = (e) => {
             try {
                 const msg = JSON.parse(e.data);

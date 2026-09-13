@@ -1,0 +1,11 @@
+[Unit]
+Description=Mio Canvas Gateway persistent listener
+
+[Socket]
+ListenStream=127.0.0.1:38000
+Backlog=1024
+NoDelay=true
+Service=mio-canvas-gateway.service
+
+[Install]
+WantedBy=sockets.target
