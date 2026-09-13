@@ -16,6 +16,10 @@ import uuid
 
 from instance_auth import password_hash, verify_password
 
+# Public registration has a stronger creation policy than legacy local accounts.
+# Login continues to verify existing hashes without changing existing passwords.
+REGISTRATION_PASSWORD_MIN_LENGTH = 12
+
 
 class BetaError(Exception):
     def __init__(self, message, status=400):

@@ -70,13 +70,25 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         await self.register()
         r=await self.client.post('/api/beta/register',json={'username':'ALICE','password':PASSWORD,'confirmation':PASSWORD})
         self.assertEqual(r.status_code,409)
-        for name,pw in [('bad/name',PASSWORD),('a',PASSWORD),('bob','12345')]:
+        for name,pw in [('bad/name',PASSWORD),('a',PASSWORD),('bob','12345'),('six','123456'),('eleven','12345678901')]:
             r=await self.client.post('/api/beta/register',json={'username':name,'password':pw,'confirmation':pw})
             self.assertEqual(r.status_code,400)
         page=(await self.client.get('/register')).text
-        self.assertIn('minlength="6"',page);self.assertNotIn('minlength="12"',page)
-        r=await self.client.post('/api/beta/register',json={'username':'six','password':'123456','confirmation':'123456'})
+        self.assertEqual(page.count('minlength="12"'),2);self.assertNotIn('minlength="6"',page)
+        self.assertIn('API 由用户自行配置',page);self.assertIn('当前开放少量测试名额',page)
+        self.assertNotIn('invite_code',page)
+        r=await self.client.post('/api/beta/register',json={'username':'twelve','password':'123456789012','confirmation':'123456789012'})
         self.assertEqual(r.status_code,200)
+
+    async def test_existing_account_login_survives_stronger_registration_policy(self):
+        from instance_auth import password_hash
+        principal=await self.register()
+        with self.store.db() as db:
+            db.execute('UPDATE users SET password_hash=? WHERE id=?',(password_hash('123456'),principal['id']))
+        page=(await self.client.get('/login')).text
+        self.assertNotIn('minlength="12"',page);self.assertNotIn('minlength="6"',page)
+        response=await self.client.post('/api/beta/login',json={'username':'alice','password':'123456'})
+        self.assertEqual(response.status_code,200)
 
     async def test_program_cache_headers_do_not_cache_private_html_api_or_media(self):
         import re

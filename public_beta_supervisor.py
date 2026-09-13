@@ -15,9 +15,9 @@ import sys
 import time
 
 import httpx
-from instance_auth import AuthStore, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, password_hash
+from instance_auth import AuthStore, PASSWORD_MAX_LENGTH, password_hash
 from public_beta_handoff import instance_key, sign_ticket
-from public_beta_store import BetaError
+from public_beta_store import BetaError, REGISTRATION_PASSWORD_MIN_LENGTH
 
 
 class Supervisor:
@@ -64,9 +64,12 @@ class Supervisor:
         if password!=confirmation: raise BetaError('两次密码输入不一致')
         if shutil.disk_usage(self.config.instances_root).free < self.config.min_free_disk:
             raise BetaError('服务器存储资源不足，暂时停止新注册',503)
-        try: encoded=password_hash(password)
+        try:
+            if not isinstance(password,str) or len(password)<REGISTRATION_PASSWORD_MIN_LENGTH:
+                raise ValueError()
+            encoded=password_hash(password)
         except (ValueError,TypeError):
-            raise BetaError(f'密码长度必须为 {PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 个字符') from None
+            raise BetaError(f'密码长度必须为 {REGISTRATION_PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 个字符') from None
         with self.locked():
             instance=self.store.reserve(name,encoded,self.allocate())
             root=self.root(instance); created=False
