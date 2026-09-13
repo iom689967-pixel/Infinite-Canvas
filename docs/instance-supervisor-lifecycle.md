@@ -107,6 +107,8 @@ Gateway socket 独立持有监听 fd；只在 LISTEN_PID 为本进程且 LISTEN_
 - 最终代码再次通过独立 Caddy 代理连续三轮受控 Gateway restart：124 请求全部 200，
   500/502/503/连接异常均 0，最大请求等待 1761.8 ms。PID、Session 和 daemon 接管均再次通过。
   测试 Caddy 使用 admin off 和独立 loopback 端口，配置先 validate；未修改/重载生产 Caddy。
+- 提交内脚本保留虚拟环境解释器入口后复测：三轮 restart 的 124 请求全部 200，最大等待
+  1735.3 ms；PID、Session、Canvas、Provider、WS 和 Supervisor 接管全部通过。
 - 完整浏览器：注册合成账号进入完整 UI，保存画布；Gateway restart 后观测到自动 WS 101，
   未重新登录即可打开个人 API 设置，刷新画布仍存在。实例 PID 未变，logout 回到登录页，
   新匿名 Canvas/Provider 请求 401；mock createTask=0、真实模型调用=0。
