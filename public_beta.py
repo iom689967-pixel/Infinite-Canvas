@@ -14,6 +14,7 @@ from starlette.background import BackgroundTask
 from instance_auth import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
 from public_beta_store import BetaConfig, GatewayStore, BetaError
 from public_beta_supervisor import Supervisor
+from workspace_assets import program_assets, PRIVATE_CACHE
 
 COOKIE='mio_beta_session'
 
@@ -51,6 +52,7 @@ def create_app(config):
         await asyncio.to_thread(supervisor.close)
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.store=store;app.state.supervisor=supervisor
+    assets = program_assets(str(supervisor.program / 'static'))
 
     def connection(scope, headers):
         peer=str((scope.get('client') or ('',0))[0])
@@ -79,8 +81,13 @@ def create_app(config):
         try: response=await call_next(request)
         except BetaError as exc: response=JSONResponse({'detail':exc.message},exc.status)
         except Exception: response=JSONResponse({'detail':'服务暂时不可用，请稍后再试'},503)
-        response.headers.update({'Cache-Control':'no-store, private','Referrer-Policy':'no-referrer',
+        cache = assets.cache_control(request.url.path, request.url.query, request.method,
+                                     response.status_code, 'set-cookie' in response.headers)
+        response.headers.update({'Cache-Control':cache,'Referrer-Policy':'no-referrer',
                                  'X-Content-Type-Options':'nosniff','X-Frame-Options':'SAMEORIGIN'})
+        if cache != PRIVATE_CACHE:
+            for name in ('pragma', 'x-instance-namespace'):
+                if name in response.headers: del response.headers[name]
         return response
 
     async def body(request):
@@ -215,7 +222,7 @@ def create_app(config):
         instance=store.instance(principal['id'])
         if instance['status']!='running': raise BetaError('工作区尚未启动，请返回首页',503)
         origin=f'http://127.0.0.1:{instance["assigned_port"]}'
-        headers={k:v for k,v in request.headers.items() if k.lower() in {'accept','content-type','range','if-range','x-csrf-token','accept-encoding'}}
+        headers={k:v for k,v in request.headers.items() if k.lower() in {'accept','content-type','range','if-range','if-none-match','if-modified-since','x-csrf-token','accept-encoding'}}
         headers['host']=f'127.0.0.1:{instance["assigned_port"]}'
         if request.headers.get('origin'): headers['origin']=origin
         cookie=instance_cookie(instance)
@@ -234,7 +241,7 @@ def create_app(config):
             await client.aclose();raise
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             store.revoke(request.cookies.get(COOKIE,''))
-        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy'}}
+        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified'}}
         location=upstream.headers.get('location')
         if location:
             if location.startswith('/') and not location.startswith('//'): copied['location']=location

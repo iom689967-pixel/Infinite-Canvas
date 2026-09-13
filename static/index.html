@@ -171,13 +171,13 @@
             zoom: var(--studio-ui-scale, 1);
         }
 
-        /* 首次加载时与 iframe 的 0.5s 淡入同步播放，避免侧栏"焊死"在原地造成视觉断层 */
+        /* Ready iframes switch immediately; keep the shell entrance brief. */
         @keyframes sidebar-enter {
             from { opacity: 0; transform: translateX(-6px); }
             to { opacity: 1; transform: translateX(0); }
         }
         html:not(.studio-route-booting) .sidebar {
-            animation: sidebar-enter 0.5s var(--fluid-ease);
+            animation: sidebar-enter 0.12s var(--fluid-ease);
         }
 
         .logo-ring {
@@ -403,18 +403,20 @@
             height: 100%;
             border: none;
             opacity: 0;
-            transform: scale(1.02);
-            filter: blur(4px);
-            transition: all 0.5s var(--fluid-ease);
+            visibility: hidden;
             pointer-events: none;
         }
 
         iframe.active {
             opacity: 1;
-            transform: scale(1);
-            filter: blur(0);
+            visibility: visible;
             pointer-events: auto;
         }
+        #workspace-opening {
+            position: absolute; inset: 0; z-index: 2; display: grid; place-items: center;
+            background: var(--bg, #f7f7f5); color: var(--text, #252525); font-size: 14px;
+        }
+        #workspace-opening[hidden] { display: none; }
 
         /* 左下角监视器 */
         .nano-monitor {
@@ -1479,6 +1481,7 @@
         </script>
 
         <main class="stage">
+            <div id="workspace-opening" role="status" aria-live="polite" hidden>正在打开…</div>
             <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.08.04.1785891163" class="active" scrolling="yes"></iframe>
             <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.08.04.1785891163" scrolling="yes"></iframe>
             <iframe id="frame-klein" data-src="/static/klein.html?v=2026.08.04.1785891163" scrolling="yes"></iframe>
@@ -1493,6 +1496,7 @@
         </main>
     </div>
 
+    <script src="/static/js/workspace-loading.js"></script>
     <div id="project-update-modal" class="studio-modal" hidden role="dialog" aria-modal="true" aria-labelledby="project-update-title">
         <div class="studio-modal-panel">
             <div class="studio-modal-head">
@@ -1684,7 +1688,8 @@
             document.querySelectorAll('iframe').forEach(f => f.classList.remove('active'));
             const target = document.getElementById('frame-' + id);
             target.classList.add('active');
-            if (!target.src) target.src = target.dataset.src;
+            if (window.WorkspaceLoading) window.WorkspaceLoading.activate(id);
+            else if (!target.src) target.src = target.dataset.src;
             if(!options.skipRemember) localStorage.setItem(ACTIVE_PAGE_KEY, id);
             // sync theme to newly activated iframe
             syncThemeToFrame(target);

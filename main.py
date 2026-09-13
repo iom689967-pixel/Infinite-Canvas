@@ -1687,6 +1687,21 @@ class VersionedStaticFiles(StaticFiles):
     """Serve HTML with cache tokens rewritten in memory, never on disk."""
 
     async def get_response(self, path, scope):
+        if PATHS.explicit:
+            from workspace_assets import program_assets
+            assets = program_assets(str(STATIC_DIR))
+            url = '/static/' + str(path)
+            if url in assets.files and scope.get('method') in {'GET', 'HEAD'}:
+                data, etag = assets.representation(url)
+                headers = dict(scope.get('headers', []))
+                validators = {value.strip().removeprefix(b'W/') for value in headers.get(b'if-none-match', b'').split(b',')}
+                status = 304 if etag.encode() in validators or b'*' in validators else 200
+                cache_headers = {'ETag': etag, 'Cache-Control': assets.cache_control(
+                    url, scope.get('query_string', b''), scope['method'], status)}
+                if status == 200: cache_headers['Content-Length'] = str(len(data))
+                return Response(data if status == 200 and scope['method'] == 'GET' else b'',
+                                status_code=status, media_type=mimetypes.guess_type(path)[0],
+                                headers=cache_headers)
         response = await super().get_response(path, scope)
         if (
             scope.get("method") == "GET"
@@ -1822,7 +1837,7 @@ def fetch_release_update_notes(version: str, timeout: float = 3.0) -> Dict[str, 
 def versioned_static_html(html: str) -> str:
     if PATHS.explicit:
         from instance_frontend import authenticated_html
-        html = authenticated_html(html, PATHS, PRINCIPAL.get())
+        return authenticated_html(html, PATHS, PRINCIPAL.get())
     version = current_app_version()
     if not version:
         return html

@@ -172,6 +172,7 @@ ROUTE_ACCESS = {
 }
 
 WORKBENCH_STATIC = frozenset([
+    '/static/js/workspace-loading.js',
     '/static/angle.html',
     '/static/comfyui-settings.html',
     '/static/css/instance-ui.css',

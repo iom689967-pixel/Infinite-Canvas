@@ -28,4 +28,8 @@ def authenticated_html(html, paths, principal):
                  '<script src="/static/js/instance-session.js"></script>'
                  '<script src="/static/js/instance-ui.js" defer></script>'
                  '<link rel="stylesheet" href="/static/css/instance-ui.css">')
-    return re.sub(r'<head(?:\s[^>]*)?>', lambda m: m.group(0)+bootstrap, html, count=1, flags=re.I)
+    html = re.sub(r'<head(?:\s[^>]*)?>', lambda m: m.group(0)+bootstrap, html, count=1, flags=re.I)
+    if getattr(paths, 'program_root', None):
+        from workspace_assets import program_assets
+        html = program_assets(str(paths.program_root / 'static')).html(html)
+    return html

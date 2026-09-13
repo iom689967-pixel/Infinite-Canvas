@@ -254,12 +254,19 @@ class InstanceAuthMiddleware:
                     return await self.reply(scope, receive, send, JSONResponse({'detail':ingress_error},413))
                 started = True
                 failed = message["status"] >= 500
+                from workspace_assets import program_assets, PRIVATE_CACHE
+                cache = program_assets(str(self.paths.program_root / 'static')).cache_control(
+                    path, scope.get('query_string', b''), method, message['status'],
+                    any(k.lower() == b'set-cookie' for k, _ in message.get('headers', [])))
                 message["headers"] = [(k, v) for k, v in message.get("headers", [])
-                                      if k.lower() not in {b"cache-control", b"pragma", b"content-length", b"x-instance-namespace"}]
-                message["headers"] += [(b"cache-control", b"no-store, private"), (b"pragma", b"no-cache"),
+                                      if k.lower() not in {b"cache-control", b"pragma", b"x-instance-namespace"}
+                                      and not (failed and k.lower() == b'content-length')]
+                message["headers"] += [(b"cache-control", cache.encode()),
                                        (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
-                                       (b"x-frame-options", b"SAMEORIGIN"),
-                                       (b"x-instance-namespace", frontend_context(self.paths, principal)['storage_namespace'].encode())]
+                                       (b"x-frame-options", b"SAMEORIGIN")]
+                if cache == PRIVATE_CACHE:
+                    message['headers'] += [(b'pragma', b'no-cache'),
+                        (b'x-instance-namespace', scope['_instance_namespace'].encode())]
                 if path.startswith(("/assets/", "/output/", "/api/storage-files/")) or path == "/api/download-output":
                     # Uploaded HTML/SVG must not execute as an authenticated application page.
                     message["headers"].append((b"content-security-policy", b"sandbox; default-src 'none'"))

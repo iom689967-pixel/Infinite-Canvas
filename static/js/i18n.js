@@ -1,5 +1,5 @@
 (function(){
-    const VERSION = '2026.09.01.run-intent.1';
+    const VERSION = document.querySelector('meta[name="mio-asset-version"]')?.content || '2026.09.01.run-intent.1';
     const scripts = [
         '/static/js/i18n-core.js',
         '/static/js/i18n/common.js',

@@ -78,6 +78,50 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.post('/api/beta/register',json={'username':'six','password':'123456','confirmation':'123456'})
         self.assertEqual(r.status_code,200)
 
+    async def test_program_cache_headers_do_not_cache_private_html_api_or_media(self):
+        import re
+        await self.register();await self.enter()
+        html=(await self.client.get('/')).text
+        url=re.search(r'src="(/static/js/instance-session.js\?v=[^"]+)"',html)[1]
+        script=await self.client.get(url)
+        self.assertEqual(script.status_code,200)
+        self.assertEqual(script.headers['cache-control'],'public, max-age=31536000, immutable')
+        self.assertNotIn('x-instance-namespace',script.headers)
+        self.assertNotIn('set-cookie',script.headers)
+        cached=await self.client.get(url,headers={'If-None-Match':script.headers['etag']})
+        self.assertEqual(cached.status_code,304);self.assertEqual(cached.content,b'')
+        weak=await self.client.get(url,headers={'If-None-Match':'W/'+script.headers['etag']})
+        self.assertEqual(weak.status_code,304)
+        head=await self.client.head(url)
+        self.assertEqual(head.status_code,200);self.assertEqual(head.content,b'')
+        self.assertEqual(head.headers['content-length'],str(len(script.content)))
+        unversioned=await self.client.get('/static/js/instance-session.js')
+        self.assertEqual(unversioned.headers['cache-control'],'public, max-age=300, must-revalidate')
+        for path in ('/','/static/canvas.html','/static/smart-canvas.html','/static/api-settings.html',
+                     '/api/auth/me','/api/beta/me','/api/canvases','/api/instance/provider-settings',
+                     '/api/history','/api/projects','/api/conversations','/assets/unknown.png'):
+            response=await self.client.get(path)
+            self.assertEqual(response.headers['cache-control'],'no-store, private',path)
+        await self.client.post('/api/auth/logout')
+        for path in (url,'/api/canvases','/api/instance/provider-settings','/assets/unknown.png'):
+            response=await self.client.get(path)
+            self.assertEqual(response.status_code,401)
+            self.assertEqual(response.headers['cache-control'],'no-store, private')
+
+    async def test_public_code_reused_across_users_but_html_namespaces_are_distinct(self):
+        await self.register();a=await self.enter()
+        html_a=await self.client.get('/')
+        script_a=await self.client.get('/static/js/instance-session.js')
+        await self.register('bob');b=await self.enter()
+        html_b=await self.client.get('/')
+        script_b=await self.client.get('/static/js/instance-session.js')
+        self.assertEqual(script_a.content,script_b.content)
+        self.assertEqual(script_a.headers['etag'],script_b.headers['etag'])
+        self.assertNotEqual(a['storage_namespace'],b['storage_namespace'])
+        self.assertIn(a['storage_namespace'],html_a.text)
+        self.assertNotIn(a['storage_namespace'],html_b.text)
+        self.assertEqual(html_b.headers['cache-control'],'no-store, private')
+
     async def test_capacity_existing_login_still_works(self):
         self.config.max_users=1;await self.register()
         r=await self.client.post('/api/beta/register',json={'username':'bob','password':PASSWORD,'confirmation':PASSWORD})
