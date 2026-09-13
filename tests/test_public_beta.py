@@ -63,6 +63,9 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         for secret in (str(root),str(instance['assigned_port']),PASSWORD): self.assertNotIn(secret,html)
         self.assertEqual((await self.client.get('/api/canvases')).json()['canvases'],[])
         self.assertEqual((await self.client.get('/api/history')).json(),[])
+        libraries=(await self.client.get('/api/prompt-libraries')).json()['library']['libraries']
+        self.assertTrue(libraries)
+        self.assertTrue(all(not library['items'] for library in libraries))
         self.assertEqual((await self.client.get('/api/instance/providers')).json()['providers'],[])
         self.assertEqual((await self.client.get('/api/auth/login')).status_code,403)
 
