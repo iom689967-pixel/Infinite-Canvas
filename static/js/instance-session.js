@@ -14,6 +14,9 @@
         if (broadcast) channel?.postMessage({type: 'logout'});
         window.InstanceStorage?.deactivate();
         document.documentElement.style.visibility = 'hidden';
+        // Embedded pages share one top-level navigation. Concurrent 401/logout
+        // broadcasts must not repeatedly replace a newly loaded login document.
+        if (parentSession) { parentSession.invalidate(broadcast); return; }
         window.top.location.replace('/login');
     }
     channel?.addEventListener('message', event => { if (event.data?.type === 'logout') loginRequired(); });
@@ -23,7 +26,8 @@
             parentSession = window.parent.InstanceSession;
         }
     } catch (_) { /* Standalone or cross-origin embed: bootstrap independently. */ }
-    const bootstrap = parentSession ? parentSession.ready : originalFetch('/api/auth/me', {credentials: 'same-origin', cache: 'no-store'})
+    const startup = window.WorkspaceStartup || (parentSession ? window.parent.WorkspaceStartup : null);
+    const bootstrap = parentSession ? parentSession.ready : startup ? startup.ready : originalFetch('/api/auth/me', {credentials: 'same-origin', cache: 'no-store'})
         .then(async response => {
             if (!response.ok) { loginRequired(); throw new Error('请先登录'); }
             return response.json();
@@ -40,11 +44,11 @@
         const url = new URL(input instanceof Request ? input.url : String(input), location.href);
         if (url.origin !== location.origin) return originalFetch(input, options);
         const method = String(options.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
-        if (!['GET', 'HEAD'].includes(method)) await ready;
+        const programResource = url.pathname.startsWith('/static/') && /\.(js|css|woff2?|ttf|ico|png|jpe?g|gif|svg|webp)$/.test(url.pathname);
+        if ((startup && !programResource) || !['GET', 'HEAD'].includes(method)) await ready;
         if (loggedOut) throw new Error('请先登录');
         const headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
         if (!['GET', 'HEAD'].includes(method)) headers.set('X-CSRF-Token', session.csrf);
-        const programResource = url.pathname.startsWith('/static/') && /\.(js|css|woff2?|ttf|ico|png|jpe?g|gif|svg|webp)$/.test(url.pathname);
         const response = await originalFetch(input, {...options, headers, credentials: 'same-origin',
             cache: programResource ? (options.cache || 'default') : 'no-store'});
         const namespace = response.headers.get('X-Instance-Namespace');
@@ -53,15 +57,18 @@
         }
         return response;
     };
-    window.InstanceSession = Object.freeze({identity, ready,
-        can: capability => identity.capabilities[capability] === true,
+    window.InstanceSession = Object.freeze({identity, ready, invalidate: loginRequired,
+        can: capability => (session || identity).capabilities[capability] === true,
         async logout() {
-            try { await window.fetch('/api/auth/logout', {method: 'POST'}); }
+            try {
+                if (startup && startup.state !== 'ready') await startup.logout();
+                else await window.fetch('/api/auth/logout', {method: 'POST'});
+            }
             finally { loginRequired(true); }
         }});
     window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
     if (!parentSession) setInterval(() => {
-        if (document.hidden || loggedOut) return;
+        if (document.hidden || loggedOut || (startup && startup.state !== 'ready')) return;
         originalFetch('/api/auth/me', {credentials: 'same-origin', cache: 'no-store'})
             .then(async response => {
                 if (response.status === 401) return loginRequired(true);

@@ -174,6 +174,7 @@ ROUTE_ACCESS = {
 WORKBENCH_STATIC = frozenset([
     "/static/js/workspace-socket.js",
     '/static/js/workspace-loading.js',
+    '/static/js/workspace-startup.js',
     '/static/angle.html',
     '/static/comfyui-settings.html',
     '/static/css/instance-ui.css',

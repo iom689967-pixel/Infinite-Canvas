@@ -10,3 +10,14 @@
 
 #instance-storage-usage { display: none; font-size: 11px; line-height: 1.5; color: var(--muted, #777); padding-top: 8px; }
 .sidebar:hover #instance-storage-usage, .sidebar.is-pinned #instance-storage-usage { display: block; }
+[data-instance-loading] #boardEmptyHint, [data-instance-loading] #boardCanvasCount { visibility: hidden; }
+
+#workspace-startup { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
+    gap: 10px; color: var(--muted, #777); font: inherit; font-size: 13px; }
+#workspace-startup[hidden], #workspace-startup [hidden] { display: none; }
+.workspace-startup-spinner { width: 16px; height: 16px; border: 2px solid currentColor;
+    border-right-color: transparent; border-radius: 50%; animation: workspace-startup-spin .8s linear infinite; }
+#workspace-startup[data-state="failed"] .workspace-startup-spinner { display: none; }
+#workspace-startup-retry { font: inherit; color: inherit; background: transparent; border: 1px solid currentColor;
+    padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+@keyframes workspace-startup-spin { to { transform: rotate(360deg); } }

@@ -198,7 +198,9 @@ class SupervisorIPCTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_live_port_cannot_be_adopted(self):
         a=await self.register(enter=False)
         with socket.socket() as occupied:
+            occupied.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
             occupied.bind(('127.0.0.1',a['assigned_port']))
+            occupied.listen()
             with self.assertRaises(BetaError):await asyncio.to_thread(self.server.supervisor.reconcile)
             with self.assertRaises(BetaError):await asyncio.to_thread(self.app.state.supervisor.start,a['user_id'])
 

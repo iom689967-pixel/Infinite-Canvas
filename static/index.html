@@ -1482,6 +1482,11 @@
         </script>
 
         <main class="stage">
+            <div id="workspace-startup" role="status" aria-live="polite" hidden>
+                <span class="workspace-startup-spinner" aria-label="加载画布"></span>
+                <span id="workspace-startup-message" hidden>工作区启动失败，请重试</span>
+                <button id="workspace-startup-retry" type="button" hidden>重试</button>
+            </div>
             <div id="workspace-opening" role="status" aria-live="polite" hidden>正在打开…</div>
             <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.08.04.1785891163" class="active" scrolling="yes"></iframe>
             <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.08.04.1785891163" scrolling="yes"></iframe>
@@ -1742,6 +1747,7 @@
         document.addEventListener('DOMContentLoaded', restoreActivePage, { once:true });
 
         async function syncStatus() {
+            if (window.WorkspaceStartup && window.WorkspaceStartup.state !== 'ready') return;
             try {
                 const res = await fetch(`/api/queue_status?client_id=${CID}`);
                 const data = await res.json();

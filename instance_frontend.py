@@ -17,7 +17,7 @@ def frontend_context(paths, principal):
                              'legacy_online_generation': False}}
 
 
-def authenticated_html(html, paths, principal):
+def authenticated_html(html, paths, principal, *, gateway_workspace=False):
     if 'id="instance-context"' in html:
         return html
     context = json.dumps(frontend_context(paths, principal), ensure_ascii=True).replace('<', '\\u003c')
@@ -25,6 +25,7 @@ def authenticated_html(html, paths, principal):
     html = re.sub(r'<script\s+src=["\']/static/js/instance-session\.js[^"\']*["\']\s*></script>', '', html)
     bootstrap = ('<script type="application/json" id="instance-context">'+context+'</script>'
                  '<script src="/static/js/instance-storage.js"></script>'
+                 + ('<script src="/static/js/workspace-startup.js"></script>' if gateway_workspace else '') +
                  '<script src="/static/js/instance-session.js"></script>'
                  '<script src="/static/js/instance-ui.js" defer></script>'
                  '<link rel="stylesheet" href="/static/css/instance-ui.css">')

@@ -17,8 +17,17 @@
     }, true);
     hide('#github-entry-btn,#update-now-btn,#project-update-modal,#project-update-confirm-modal');
     if (!session.can('manage_own_providers')) hide('[onclick*="api-settings"]');
+    session.ready.then(() => {
+        if (!session.can('manage_own_providers')) hide('[onclick*="api-settings"]');
+    }).catch(() => {});
     // Machine-local execution stays visibly unavailable, with the original navigation retained.
     const page = location.pathname.split('/').pop();
+    if (page === 'canvas-list.html') {
+        // An early framework is not evidence of an empty account. Keep only the
+        // program layout visible until its own authenticated session is ready.
+        document.documentElement.setAttribute('data-instance-loading', '');
+        session.ready.then(() => document.documentElement.removeAttribute('data-instance-loading')).catch(() => {});
+    }
     if (['zimage.html','enhance.html','klein.html','angle.html','online.html'].includes(page)) {
         deny('#mainGenBtn,#genBtn,input[type="file"]');
         const button = document.querySelector('#mainGenBtn,#genBtn');

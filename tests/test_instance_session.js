@@ -61,4 +61,15 @@ function boot({delayAuth=false, parent=null}={}) {
     await assert.rejects(early.context.fetch('/api/canvases'));assert.deepEqual(early.redirects,['/login']);
     early.releaseAuth();await early.context.InstanceSession.ready;
     await assert.rejects(early.context.fetch('/api/canvases',{method:'POST'}));
+    const pending=boot({delayAuth:true});pending.context.WorkspaceStartup={state:'starting'};
+    const canvas=boot({parent:pending.context});const privateRead=canvas.context.fetch('/api/canvases');
+    await Promise.resolve();assert.equal(canvas.calls.length,0);
+    await canvas.context.fetch('/static/js/i18n.js');assert.equal(canvas.calls.length,1);
+    pending.context.WorkspaceStartup.state='ready';pending.releaseAuth();await privateRead;
+    assert.equal(canvas.calls.at(-1).input,'/api/canvases');
+    const root=boot();await root.context.InstanceSession.ready;
+    const left=boot({parent:root.context}),right=boot({parent:root.context});
+    await Promise.all([left.context.InstanceSession.ready,right.context.InstanceSession.ready]);
+    left.context.InstanceSession.invalidate(true);right.context.InstanceSession.invalidate(true);
+    assert.deepEqual(root.redirects,['/login']);assert.deepEqual(left.redirects,[]);assert.deepEqual(right.redirects,[]);
 })().catch(error => { console.error(error); process.exitCode = 1; });

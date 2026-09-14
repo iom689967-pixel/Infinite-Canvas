@@ -48,7 +48,11 @@ class Supervisor:
     @staticmethod
     def available(port):
         try:
-            with socket.socket() as sock: sock.bind(('127.0.0.1',port))
+            with socket.socket() as sock:
+                # Match Uvicorn's bind semantics: a stopped worker may leave
+                # TIME_WAIT sockets. A live listener still rejects this bind.
+                sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                sock.bind(('127.0.0.1',port))
             return True
         except OSError: return False
 

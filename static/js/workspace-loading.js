@@ -15,12 +15,14 @@
     function showLoading() {
         clearTimeout(indicator);
         if (spinner) spinner.hidden = true;
+        if (window.WorkspaceStartup && window.WorkspaceStartup.state !== 'ready') return;
         if (current?.status === 'loading') indicator = setTimeout(() => {
             if (spinner && current?.status === 'loading') spinner.hidden = false;
         }, 150);
     }
     function schedule() {
         cancelSchedule();
+        if (window.WorkspaceStartup && window.WorkspaceStartup.state !== 'ready') return;
         if (document.hidden || background || !current || current.status !== 'ready') return;
         timer = setTimeout(() => {
             timer = null;
@@ -37,6 +39,7 @@
     }
     function load(state) {
         if (state.status !== 'idle') return;
+        if (window.WorkspaceStartup && window.WorkspaceStartup.state !== 'ready' && state.id !== 'canvas') return;
         state.status = 'loading'; state.frame.dataset.loadState = 'loading';
         state.frame.setAttribute('aria-busy', 'true');
         if (!state.frame.src) state.frame.src = state.frame.dataset.src;
@@ -56,6 +59,9 @@
         });
     }
     document.addEventListener('visibilitychange', schedule);
+    window.WorkspaceStartup?.ready.then(() => {
+        if (current) { load(current); showLoading(); schedule(); }
+    });
     window.WorkspaceLoading = Object.freeze({
         activate(id) {
             cancelSchedule(); current = states.get(id);

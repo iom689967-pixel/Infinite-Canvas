@@ -4,11 +4,14 @@ from contextlib import asynccontextmanager
 import hmac
 import ipaddress
 import json
+import mimetypes
 import secrets
+from types import SimpleNamespace
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 from starlette.background import BackgroundTask
 
 from instance_auth import PASSWORD_MAX_LENGTH
@@ -20,12 +23,10 @@ COOKIE='mio_beta_session'
 
 
 def page(kind, config):
-    title={'home':'Mio Canvas','login':'登录 Mio Canvas','register':'注册 Mio Canvas','starting':'正在启动你的工作区…'}[kind]
+    title={'home':'Mio Canvas','login':'登录 Mio Canvas','register':'注册 Mio Canvas'}[kind]
     if kind=='home':
         register='<a href="/register">注册</a>' if config.registration_mode != 'closed' else ''
         body='<p>Public Beta · 免费使用 · API 由用户自行配置</p><nav><a href="/login">登录</a>'+register+'</nav>'
-    elif kind=='starting':
-        body='<p>请稍候，工作区健康后会自动打开。</p><button id="retry">重试</button><p><a href="/login">返回登录</a></p>'
     elif kind=='register' and config.registration_mode == 'closed':
         body='<p>当前 Mio Canvas Public Beta 暂未开放注册。</p><p><a href="/login">已有账号，登录</a></p>'
     else:
@@ -40,9 +41,7 @@ def page(kind, config):
         body=introduction+'<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" '+password_bounds+' autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+invite+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form>'+alternative
     script=''
     if kind in {'login','register'} and not (kind=='register' and config.registration_mode=='closed'):
-        script="""document.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const values=Object.fromEntries(new FormData(e.target));const r=await fetch('/api/beta/"""+kind+"""',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});const d=await r.json();if(!r.ok)throw new Error(d.detail);e.target.reset();location.replace('/workspace');}catch(e){document.querySelector('#message').textContent=e.message||'请求失败';}finally{b.disabled=false;}});"""
-    elif kind=='starting':
-        script="""async function enter(){const b=document.querySelector('#retry');b.disabled=true;try{const m=await fetch('/api/beta/me').then(r=>r.json());const r=await fetch('/api/beta/enter',{method:'POST',headers:{'X-CSRF-Token':m.csrf}});const d=await r.json();if(!r.ok)throw new Error(d.detail);location.replace('/');}catch(e){document.querySelector('#message').textContent=e.message||'暂时无法启动';}finally{b.disabled=false;}}document.querySelector('#retry').onclick=enter;enter();"""
+        script="""document.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const values=Object.fromEntries(new FormData(e.target));const r=await fetch('/api/beta/"""+kind+"""',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});const d=await r.json();if(!r.ok)throw new Error(d.detail);e.target.reset();location.replace('/');}catch(e){document.querySelector('#message').textContent=e.message||'请求失败';}finally{b.disabled=false;}});"""
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+title+'</title><style>body{margin:0;background:#f7f7f5;color:#252525;font:16px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}main{width:min(380px,85vw);padding:36px;background:white;border:1px solid #ddd;border-radius:20px}h1{font-size:28px}p{line-height:1.6;color:#666}label{display:block;margin:18px 0}input{display:block;box-sizing:border-box;width:100%;padding:12px;margin-top:8px;border:1px solid #bbb;border-radius:8px;font:inherit}button,nav a{display:inline-block;padding:12px 20px;background:#252525;color:white;border:0;border-radius:9px;font:inherit;cursor:pointer}button:disabled{opacity:.5}a{color:inherit;margin-right:12px}#message{color:#a32c2c}</style></head><body><main><h1>'+title+'</h1>'+body+'<p id="message" role="status"></p></main><script>'+script+'</script></body></html>'
 
 
@@ -205,23 +204,51 @@ def create_app(config):
             try: await socket.close(code=1008)
             except RuntimeError: pass
 
+    def workspace_shell(principal, document='index.html'):
+        from instance_frontend import authenticated_html
+        instance=store.instance(principal['id'])
+        # Program HTML and presentation context only. Private content still requires
+        # the worker session; the Gateway never reads Provider or user content files.
+        paths=SimpleNamespace(data_root=Path(instance['data_root']),instance_id=instance['instance_id'],
+                              public_beta=True,program_root=supervisor.program)
+        presentation={'username':principal['username'],'permissions':['manage_own_providers']}
+        html=(supervisor.program/'static'/document).read_text()
+        return HTMLResponse(authenticated_html(html,paths,presentation,gateway_workspace=document=='index.html'))
+
     @app.get('/workspace')
-    async def starting(request:Request):
-        current(request)
-        return HTMLResponse(page('starting',config))
+    async def workspace_alias(request:Request):
+        return workspace_shell(current(request))
+
+    @app.post('/api/beta/logout')
+    async def logout_before_ready(request:Request):
+        principal=current(request);csrf(request,principal)
+        instance=store.instance(principal['id'])
+        store.revoke(request.cookies.get(COOKIE,''))
+        response=JSONResponse({'ok':True})
+        for name in (COOKIE,instance_cookie(instance)):
+            response.delete_cookie(name,path='/',httponly=True,secure=config.secure,samesite='strict')
+        return response
 
     @app.post('/api/beta/enter')
     async def enter(request:Request):
         principal=current(request);csrf(request,principal)
         instance=await asyncio.to_thread(supervisor.start,principal['id'])
         origin=f'http://127.0.0.1:{instance["assigned_port"]}'
+        reply=None
         async with httpx.AsyncClient(trust_env=False,timeout=5) as client:
-            reply=await client.post(origin+'/__mio/handoff',headers={'Origin':origin},json={'ticket':supervisor.ticket(instance)})
-        if reply.status_code!=200: raise BetaError('工作区登录交接失败，请重试',503)
+            cookie=instance_cookie(instance)
+            existing=request.cookies.get(cookie,'')
+            me=await client.get(origin+'/api/auth/me',headers={'Cookie':cookie+'='+existing}) if existing else None
+            if me is None or me.status_code!=200:
+                reply=await client.post(origin+'/__mio/handoff',headers={'Origin':origin},json={'ticket':supervisor.ticket(instance)})
+                if reply.status_code!=200: raise BetaError('工作区登录交接失败，请重试',503)
+                me=await client.get(origin+'/api/auth/me')
+        if me.status_code!=200: raise BetaError('工作区登录交接失败，请重试',503)
         # Disable/session revocation can race a slow start; never issue a usable central session after it.
         current(request)
-        response=JSONResponse({'ok':True})
-        for cookie in reply.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(cookie))
+        response=JSONResponse({'ok':True,'session':me.json()})
+        if reply is not None:
+            for cookie in reply.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(cookie))
         return response
 
     async def forward(request,principal):
@@ -269,9 +296,23 @@ def create_app(config):
             if request.method=='GET' and 'text/html' in request.headers.get('accept','') and (path.endswith('.html') or not path):
                 return RedirectResponse('/login',303)
             raise BetaError('请先登录',401)
-        instance=store.instance(principal['id'])
-        if not path and request.method=='GET' and (instance['status']!='running' or not request.cookies.get(instance_cookie(instance))):
-            return HTMLResponse(page('starting',config))
+        if path in {'','static/index.html'} and request.method=='GET':
+            return workspace_shell(principal)
+        if path=='static/canvas-list.html' and request.method=='GET' and request.headers.get('sec-fetch-dest')=='iframe':
+            # The same Canvas framework can render early. Its session bootstrap
+            # inherits the parent handoff before making any private API request.
+            return workspace_shell(principal,'canvas-list.html')
+        # These exact program resources are shared, credential-free bytes. Serving
+        # them here lets the authenticated shell render while its worker is cold.
+        url='/'+path
+        if url in assets.files and request.method in {'GET','HEAD'}:
+            data,etag=assets.representation(url)
+            validators={v.strip().removeprefix('W/') for v in request.headers.get('if-none-match','').split(',')}
+            status=304 if etag in validators or '*' in validators else 200
+            headers={'ETag':etag}
+            if status==200: headers['Content-Length']=str(len(data))
+            return Response(data if status==200 and request.method=='GET' else b'',status_code=status,
+                            media_type=mimetypes.guess_type(url)[0],headers=headers)
         return await forward(request,principal)
 
     return app

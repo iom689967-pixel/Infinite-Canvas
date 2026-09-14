@@ -1,0 +1,35 @@
+{
+  "registered": {
+    "shell_ms": 741,
+    "canvas_ms": 1227
+  },
+  "warm": {
+    "shell_ms": 463,
+    "canvas_ms": 515
+  },
+  "cold": {
+    "shell_ms": 281,
+    "canvas_ms": 1882,
+    "fixture_delay_ms": 1200,
+    "shell_before_ready": true
+  },
+  "full_ui": true,
+  "no_startup_navigation": true,
+  "warm_pid_unchanged": true,
+  "multitab_no_duplicate_start": true,
+  "failure_retry_in_canvas": true,
+  "gateway_restart_preserved_instance_and_session": true,
+  "websocket_reconnected": true,
+  "ab_isolation": {
+    "list": 0,
+    "direct": 404,
+    "providers": 0
+  },
+  "logout_401": {
+    "/api/beta/me": 401,
+    "/api/auth/me": 401,
+    "/api/canvases": 401,
+    "/api/instance/providers": 401
+  },
+  "real_model_calls": 0
+}

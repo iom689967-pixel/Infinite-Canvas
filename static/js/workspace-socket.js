@@ -20,6 +20,7 @@
         }
         function connect() {
             if (stopped) return;
+            if (global.WorkspaceStartup && global.WorkspaceStartup.state !== 'ready') return;
             try { socket = new WebSocket(url); } catch (_) { retry(); return; }
             socket.onopen = event => { attempt = 0; if (client.onopen) client.onopen(event); };
             socket.onmessage = event => { if (client.onmessage) client.onmessage(event); };
@@ -35,7 +36,8 @@
         }
         global.addEventListener('online', online);
         global.addEventListener('pagehide', () => client.close(), {once: true});
-        connect();
+        if (global.WorkspaceStartup) global.WorkspaceStartup.ready.then(connect);
+        else connect();
         return client;
     };
 })(window);
