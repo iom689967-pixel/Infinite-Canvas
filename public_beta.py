@@ -13,39 +13,21 @@ import httpx
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 from starlette.background import BackgroundTask
+from starlette.websockets import WebSocketDisconnect
 
 from instance_auth import PASSWORD_MAX_LENGTH
 from public_beta_store import BetaConfig, GatewayStore, BetaError, REGISTRATION_PASSWORD_MIN_LENGTH
 from public_beta_ipc import gateway_supervisor
 from workspace_assets import program_assets, PRIVATE_CACHE
+from public_beta_pages import page
+from public_beta_email import EmailRegistration
+from public_beta_mail import mailer_for
 
 COOKIE='mio_beta_session'
 
 
-def page(kind, config):
-    title={'home':'Mio Canvas','login':'登录 Mio Canvas','register':'注册 Mio Canvas'}[kind]
-    if kind=='home':
-        register='<a href="/register">注册</a>' if config.registration_mode != 'closed' else ''
-        body='<p>Public Beta · 免费使用 · API 由用户自行配置</p><nav><a href="/login">登录</a>'+register+'</nav>'
-    elif kind=='register' and config.registration_mode == 'closed':
-        body='<p>当前 Mio Canvas Public Beta 暂未开放注册。</p><p><a href="/login">已有账号，登录</a></p>'
-    else:
-        # Existing accounts may predate the public registration password policy.
-        password_bounds=f'maxlength="{PASSWORD_MAX_LENGTH}"'
-        if kind=='register': password_bounds=f'minlength="{REGISTRATION_PASSWORD_MIN_LENGTH}" '+password_bounds
-        confirm='<label>确认密码<input name="confirmation" type="password" '+password_bounds+' autocomplete="new-password" required></label>' if kind=='register' else ''
-        invite='<label>测试邀请码<input name="invite_code" type="password" maxlength="1024" autocomplete="one-time-code" required></label>' if kind=='register' and config.registration_mode=='invite' else ''
-        register_link='<p><a href="/register">注册账号</a></p>' if kind=='login' and config.registration_mode!='closed' else ''
-        alternative='<p><a href="/login">已有账号，登录</a></p>' if kind=='register' else register_link
-        introduction='<p>Public Beta · 免费使用<br>API 由用户自行配置</p><p>Public Beta 当前开放少量测试名额。</p>' if kind=='register' else ''
-        body=introduction+'<form><label>用户名<input name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="username" required></label><label>密码<input name="password" type="password" '+password_bounds+' autocomplete="'+('new-password' if kind=='register' else 'current-password')+'" required></label>'+confirm+invite+'<button type="submit">'+('注册并进入' if kind=='register' else '登录')+'</button></form>'+alternative
-    script=''
-    if kind in {'login','register'} and not (kind=='register' and config.registration_mode=='closed'):
-        script="""document.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const values=Object.fromEntries(new FormData(e.target));const r=await fetch('/api/beta/"""+kind+"""',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});const d=await r.json();if(!r.ok)throw new Error(d.detail);e.target.reset();location.replace('/');}catch(e){document.querySelector('#message').textContent=e.message||'请求失败';}finally{b.disabled=false;}});"""
-    return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+title+'</title><style>body{margin:0;background:#f7f7f5;color:#252525;font:16px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}main{width:min(380px,85vw);padding:36px;background:white;border:1px solid #ddd;border-radius:20px}h1{font-size:28px}p{line-height:1.6;color:#666}label{display:block;margin:18px 0}input{display:block;box-sizing:border-box;width:100%;padding:12px;margin-top:8px;border:1px solid #bbb;border-radius:8px;font:inherit}button,nav a{display:inline-block;padding:12px 20px;background:#252525;color:white;border:0;border-radius:9px;font:inherit;cursor:pointer}button:disabled{opacity:.5}a{color:inherit;margin-right:12px}#message{color:#a32c2c}</style></head><body><main><h1>'+title+'</h1>'+body+'<p id="message" role="status"></p></main><script>'+script+'</script></body></html>'
 
-
-def create_app(config):
+def create_app(config, *, mailer=None):
     store=GatewayStore(config);supervisor=gateway_supervisor(store)
     @asynccontextmanager
     async def lifespan(app):
@@ -54,6 +36,8 @@ def create_app(config):
         await asyncio.to_thread(supervisor.close)
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.store=store;app.state.supervisor=supervisor
+    emails=EmailRegistration(store,supervisor,mailer if mailer is not None else mailer_for(config))
+    app.state.emails=emails
     assets = program_assets(str(supervisor.program / 'static'))
 
     def connection(scope, headers):
@@ -131,24 +115,40 @@ def create_app(config):
     @app.get('/register')
     async def register_page(): return HTMLResponse(page('register',config))
 
+    @app.get('/verify-email')
+    async def verify_page(): return HTMLResponse(page('verify-email',config))
+
+    @app.get('/resend-verification')
+    async def resend_page(): return HTMLResponse(page('resend-verification',config))
+
+    @app.post('/api/beta/verify-email')
+    async def verify_email(request:Request):
+        values=await body(request)
+        if set(values)!={'token'}: raise BetaError('验证字段不正确')
+        return await asyncio.to_thread(emails.verify,values['token'],request.state.beta_client_ip)
+
+    @app.post('/api/beta/resend-verification')
+    async def resend_email(request:Request):
+        values=await body(request)
+        if set(values)!={'email'}: raise BetaError('验证字段不正确')
+        return await asyncio.to_thread(emails.resend,values['email'],request.state.beta_client_ip)
+
     @app.post('/api/beta/register')
     async def register(request:Request):
         if config.registration_mode=='closed': raise BetaError('当前 Mio Canvas Public Beta 暂未开放注册。',403)
         values=await body(request)
-        expected={'username','password','confirmation'} | ({'invite_code'} if config.registration_mode=='invite' else set())
+        expected={'email','username','password','confirmation'} | ({'invite_code'} if config.registration_mode=='invite' else set())
         if set(values)!=expected: raise BetaError('注册字段不正确')
         if config.registration_mode=='invite':
             store.limit('registration-invite',request.state.beta_client_ip,config.register_limit)
         if not config.invite_valid(values.pop('invite_code','')): raise BetaError('邀请码无效',403)
-        token=await asyncio.to_thread(supervisor.register,values['username'],values['password'],values['confirmation'],request.state.beta_client_ip)
-        store.revoke(request.cookies.get(COOKIE,''))
-        return signed_in(token)
+        return await asyncio.to_thread(emails.register,values['email'],values['username'],values['password'],values['confirmation'],request.state.beta_client_ip)
 
     @app.post('/api/beta/login')
     async def login(request:Request):
         values=await body(request)
-        if set(values)!={'username','password'}: raise BetaError('登录字段不正确')
-        token=await asyncio.to_thread(store.login,values['username'],values['password'],request.state.beta_client_ip)
+        if set(values) not in ({'identifier','password'},{'username','password'}): raise BetaError('登录字段不正确')
+        token=await asyncio.to_thread(store.login,values.get('identifier',values.get('username')),values['password'],request.state.beta_client_ip)
         store.revoke(request.cookies.get(COOKIE,''))
         return signed_in(token)
 
@@ -202,7 +202,7 @@ def create_app(config):
             await asyncio.gather(*tasks,return_exceptions=True)
             websocket_counts[uid]-=1
             try: await socket.close(code=1008)
-            except RuntimeError: pass
+            except (RuntimeError, WebSocketDisconnect): pass
 
     def workspace_shell(principal, document='index.html'):
         from instance_frontend import authenticated_html

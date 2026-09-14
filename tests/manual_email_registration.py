@@ -1,0 +1,93 @@
+"""Loopback-only browser acceptance with an in-memory mock inbox. Never use in production.
+Run with stdin open; send `status` or `finish`. No credentials/tokens are printed.
+"""
+import asyncio
+from contextlib import asynccontextmanager
+from html import escape
+import json
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import httpx
+import uvicorn
+from starlette.responses import HTMLResponse,JSONResponse
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from public_beta import create_app
+from public_beta_store import BetaConfig,GatewayStore
+from public_beta_ipc import SupervisorClient
+from public_beta_mail import MockMailer
+from instance_auth import password_hash
+from test_instance_isolation import free_port
+
+
+def main():
+    program=Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(prefix='mio-email-browser-') as temporary:
+        root=Path(temporary);port=free_port();password=secrets.token_urlsafe(24)
+        secret=root/'password.txt';secret.write_text(password);secret.chmod(0o600)
+        env={'PATH':os.environ.get('PATH',os.defpath),'PUBLIC_BETA_ROOT':str(root/'gateway'),
+             'PUBLIC_BETA_INSTANCES_ROOT':str(root/'instances'),'PUBLIC_BETA_BACKUP_ROOT':str(root/'backups'),
+             'PUBLIC_BETA_SUPERVISOR_SOCKET':str(root/'gateway/ctl.sock'),'GATEWAY_PORT':str(port),
+             'MIO_MAIL_MODE':'mock','MIN_FREE_DISK_BYTES':'0','PYTHONDONTWRITEBYTECODE':'1'}
+        cfg=BetaConfig(root/'gateway',root/'instances',port=port,backup_root=root/'backups',
+                       supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'],mail_mode='mock',min_free_disk=0,
+                       register_limit=100,login_limit=100)
+        marker=Path('/private/tmp/mio-email-browser-current.json')
+        marker.write_text(json.dumps({'root':str(root),'origin':cfg.origin}));marker.chmod(0o600)
+        with open(root/'fixture.log','w') as log:
+            daemon=subprocess.Popen([sys.executable,str(program/'public_beta_daemon.py')],cwd=program,env=env,stdout=log,stderr=log)
+            control=None;server=None;thread=None
+            try:
+                subprocess.run([sys.executable,str(program/'public_beta_daemon.py'),'ready'],cwd=program,env=env,stdout=log,stderr=log,check=True)
+                store=GatewayStore(cfg);control=SupervisorClient(store)
+                control.call('provision',username='legacy',password_hash=password_hash(password))
+                mail=MockMailer();app=create_app(cfg,mailer=mail)
+                async def inbox(request):
+                    user=request.path_params['username']
+                    if user not in {'alice','bob'}:return JSONResponse({},404)
+                    exists=any(m['recipient']==user+'@example.test' for m in mail.messages)
+                    if not exists:return HTMLResponse('<p>暂无测试邮件</p>')
+                    # Token is never rendered in page text/DOM/URL observed by test tooling.
+                    return HTMLResponse('<h1>Mock 邮件</h1><p>验证你的 Mio Canvas 邮箱</p><button id="verify">验证邮箱</button><script>document.querySelector("#verify").onclick=async()=>{const r=await fetch("/__test/mail-token/'+user+'");const d=await r.json();location.href=d.link;};</script>')
+                async def token(request):
+                    user=request.path_params['username']
+                    if user not in {'alice','bob'}:return JSONResponse({},404)
+                    message=next((m for m in reversed(mail.messages) if m['recipient']==user+'@example.test'),None)
+                    return JSONResponse({'link':message['link']} if message else {},status_code=200 if message else 404,headers={'Cache-Control':'no-store'})
+                from starlette.routing import Route
+                app.router.routes[0:0]=[Route('/__test/inbox/{username}',inbox),Route('/__test/mail-token/{username}',token)]
+                log_config={'version':1,'disable_existing_loggers':False,
+                    'handlers':{'fixture':{'class':'logging.StreamHandler','stream':log}},
+                    'loggers':{'uvicorn.error':{'handlers':['fixture'],'level':'WARNING','propagate':False},
+                               'uvicorn.access':{'handlers':[],'level':'CRITICAL','propagate':False}}}
+                server=uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=port,proxy_headers=False,access_log=False,log_level='warning',log_config=log_config))
+                thread=threading.Thread(target=server.run,daemon=True);thread.start()
+                for _ in range(100):
+                    try:
+                        if httpx.get(cfg.origin+'/healthz',trust_env=False).status_code==200:break
+                    except httpx.HTTPError:time.sleep(.1)
+                print(json.dumps({'origin':cfg.origin,'mail_mode':'mock','real_smtp_calls':0,'real_model_calls':0}),flush=True)
+                for line in sys.stdin:
+                    if line.strip()=='finish':break
+                    if line.strip()=='status':
+                        with store.db() as db:
+                            users=[dict(r) for r in db.execute('SELECT username,status,email_status FROM users ORDER BY username')]
+                            count=db.execute('SELECT COUNT(*) FROM instances').fetchone()[0]
+                        secrets_to_check=[password]+[m['link'].split('token=')[-1] for m in mail.messages]
+                        print(json.dumps({'users':users,'instance_count':count,'messages':len(mail.messages),'real_smtp_calls':0,'real_model_calls':0,
+                                          'log_secret_free':not any(value in (root/'fixture.log').read_text() for value in secrets_to_check)}),flush=True)
+            finally:
+                if server:server.should_exit=True
+                if thread:thread.join(timeout=15)
+                if control:
+                    for row in control.call('list_running')['instances']:control.stop(row['user_id'])
+                daemon.terminate();daemon.wait(timeout=15)
+                marker.unlink(missing_ok=True)
+
+
+if __name__=='__main__':main()

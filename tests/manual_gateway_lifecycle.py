@@ -41,6 +41,15 @@ ctl('daemon-reload')
 
 async def measure():
     origin=f'http://127.0.0.1:{port}';proxy_origin=f'http://127.0.0.1:{proxy_port}';password=secrets.token_urlsafe(24)
+    # Lifecycle acceptance uses explicitly provisioned legacy fixture accounts;
+    # verified public registration has its own mock-mail browser harness.
+    sys.path.insert(0,str(program))
+    from public_beta_store import BetaConfig,GatewayStore
+    from public_beta_ipc import SupervisorClient
+    from instance_auth import password_hash
+    registry=GatewayStore(BetaConfig(root/'g',root/'i',port=port,backup_root=root/'b',
+                          supervisor_socket=str(root/'g/ctl.sock')))
+    control=SupervisorClient(registry)
     clients=[]
     async def ready(c):
         for _ in range(150):
@@ -53,7 +62,8 @@ async def measure():
         for name in ['restart-a','restart-b']:
             c=httpx.AsyncClient(base_url=proxy_origin,trust_env=False,timeout=8,headers={'Origin':origin});clients.append(c)
             await ready(c)
-            assert (await c.post('/api/beta/register',json={'username':name,'password':password,'confirmation':password})).status_code==200
+            await asyncio.to_thread(control.call,'provision',username=name,password_hash=password_hash(password))
+            assert (await c.post('/api/beta/login',json={'username':name,'password':password})).status_code==200
             csrf=(await c.get('/api/beta/me')).json()['csrf']
             assert (await c.post('/api/beta/enter',headers={'X-CSRF-Token':csrf})).status_code==200
             c.headers['X-CSRF-Token']=(await c.get('/api/auth/me')).json()['csrf']

@@ -17,6 +17,7 @@ from unittest.mock import patch
 import zipfile
 
 import httpx
+from email_helpers import complete_registration, latest_token
 from PIL import Image
 from public_beta import create_app
 from public_beta_store import BetaConfig, BetaError
@@ -32,7 +33,7 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='mio-beta-test-');self.root=Path(self.temp.name).resolve()
         self.config=BetaConfig(self.root/'gateway',self.root/'instances',port=free_port(),max_users=3,
-                              register_limit=100,login_limit=100,max_upload=4096,storage_quota=1024**2)
+                              mail_mode='mock',register_limit=100,login_limit=100,max_upload=4096,storage_quota=1024**2)
         self.app=create_app(self.config);self.store=self.app.state.store;self.supervisor=self.app.state.supervisor
         self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url=self.config.origin,headers={'Origin':self.config.origin})
         image=BytesIO();Image.new('RGB',(16,16),'blue').save(image,'PNG');self.image=image.getvalue()
@@ -41,7 +42,7 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose();await asyncio.to_thread(self.supervisor.close);self.temp.cleanup()
 
     async def register(self,name='alice'):
-        r=await self.client.post('/api/beta/register',json={'username':name,'password':PASSWORD,'confirmation':PASSWORD})
+        r=await complete_registration(self.client,self.app,name,PASSWORD)
         self.assertEqual(r.status_code,200,r.text)
         return self.store.principal(self.client.cookies.get('mio_beta_session'))
 
@@ -71,21 +72,22 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_case_and_minimum_password(self):
         await self.register()
-        r=await self.client.post('/api/beta/register',json={'username':'ALICE','password':PASSWORD,'confirmation':PASSWORD})
+        r=await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'ALICE','password':PASSWORD,'confirmation':PASSWORD})
         self.assertEqual(r.status_code,409)
         for name,pw in [('bad/name',PASSWORD),('a',PASSWORD),('bob','12345'),('six','123456'),('eleven','12345678901')]:
-            r=await self.client.post('/api/beta/register',json={'username':name,'password':pw,'confirmation':pw})
+            r=await self.client.post('/api/beta/register',json={'email':name.lower()+'@example.org','username':name,'password':pw,'confirmation':pw})
             self.assertEqual(r.status_code,400)
         page=(await self.client.get('/register')).text
         self.assertEqual(page.count('minlength="12"'),2);self.assertNotIn('minlength="6"',page)
         self.assertIn('API 由用户自行配置',page);self.assertIn('当前开放少量测试名额',page)
         self.assertNotIn('invite_code',page)
-        r=await self.client.post('/api/beta/register',json={'username':'twelve','password':'123456789012','confirmation':'123456789012'})
+        r=await self.client.post('/api/beta/register',json={'email':'twelve@example.org','username':'twelve','password':'123456789012','confirmation':'123456789012'})
         self.assertEqual(r.status_code,200)
 
     async def test_existing_account_login_survives_stronger_registration_policy(self):
         from instance_auth import password_hash
-        principal=await self.register()
+        token=await asyncio.to_thread(self.supervisor.register,'alice',PASSWORD,PASSWORD,'legacy-fixture')
+        principal=self.store.principal(token)
         with self.store.db() as db:
             db.execute('UPDATE users SET password_hash=? WHERE id=?',(password_hash('123456'),principal['id']))
         page=(await self.client.get('/login')).text
@@ -139,21 +141,23 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capacity_existing_login_still_works(self):
         self.config.max_users=1;await self.register()
-        r=await self.client.post('/api/beta/register',json={'username':'bob','password':PASSWORD,'confirmation':PASSWORD})
-        self.assertEqual(r.status_code,409);self.assertIn('名额已满',r.text)
-        r=await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})
+        r=await self.client.post('/api/beta/register',json={'email':'bob@example.org','username':'bob','password':PASSWORD,'confirmation':PASSWORD})
+        self.assertEqual(r.status_code,200)
+        verified=await self.client.post('/api/beta/verify-email',json={'token':latest_token(self.app)})
+        self.assertEqual(verified.json()['status'],'full');self.assertIn('名额已满',verified.text)
+        r=await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})
         self.assertEqual(r.status_code,200)
 
     async def test_ip_limit_ignores_forwarded_headers(self):
         self.config.register_limit=1;await self.register()
-        r=await self.client.post('/api/beta/register',headers={'X-Forwarded-For':'203.0.113.9'},json={'username':'bob','password':PASSWORD,'confirmation':PASSWORD})
+        r=await self.client.post('/api/beta/register',headers={'X-Forwarded-For':'203.0.113.9'},json={'email':'bob@example.org','username':'bob','password':PASSWORD,'confirmation':PASSWORD})
         self.assertEqual(r.status_code,429)
 
     async def test_username_conflict_limit(self):
         await self.register()
         for _ in range(2):
-            self.assertEqual((await self.client.post('/api/beta/register',json={'username':'alice','password':PASSWORD,'confirmation':PASSWORD})).status_code,409)
-        self.assertEqual((await self.client.post('/api/beta/register',json={'username':'alice','password':PASSWORD,'confirmation':PASSWORD})).status_code,429)
+            self.assertEqual((await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD})).status_code,409)
+        self.assertEqual((await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD})).status_code,429)
 
     async def test_login_failure_limit_and_disable(self):
         principal=await self.register();await self.enter()
@@ -161,15 +165,19 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/auth/me')).status_code,401)
         self.assertTrue(Path(self.store.instance(principal['id'])['data_root']).exists())
         self.config.login_limit=2
-        for _ in range(2): self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,401)
-        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,429)
+        for _ in range(2): self.assertEqual((await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})).status_code,401)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})).status_code,429)
 
     async def test_init_failure_rolls_back_only_new_root(self):
         untouched=self.config.instances_root/'existing';untouched.mkdir();(untouched/'keep').write_text('keep')
+        r=await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD})
+        self.assertEqual(r.status_code,200)
         with patch('public_beta_supervisor.subprocess.run',side_effect=OSError()):
-            r=await self.client.post('/api/beta/register',json={'username':'alice','password':PASSWORD,'confirmation':PASSWORD})
-        self.assertEqual(r.status_code,503)
-        with self.store.db() as db: self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
+            verified=await self.client.post('/api/beta/verify-email',json={'token':latest_token(self.app)})
+        self.assertEqual(verified.json()['status'],'waiting')
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT status FROM users').fetchone()[0],'verified_waiting')
+            self.assertEqual(db.execute('SELECT count(*) FROM instances').fetchone()[0],0)
         self.assertEqual(list(self.config.instances_root.iterdir()),[untouched])
 
     async def test_two_workers_namespace_canvas_media_provider_isolation(self):
@@ -346,7 +354,7 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(self.supervisor.account_status,'alice',False)
         await asyncio.to_thread(self.supervisor.account_status,'alice',True)
         self.assertEqual((await self.client.get('/api/auth/me')).status_code,401)
-        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,200)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})).status_code,200)
         await self.enter();self.assertEqual((await self.client.get('/api/canvases/'+canvas['id'])).status_code,200)
 
     async def test_disable_releases_capacity_revokes_sessions_and_retains_private_files(self):
@@ -360,12 +368,12 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.instance(p['id'])['status'],'stopped')
         self.assertTrue(root.is_dir())
         self.assertEqual((await self.client.get(ref)).status_code,401)
-        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,401)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})).status_code,401)
         await self.register('bob')
         with self.assertRaises(BetaError):await asyncio.to_thread(self.supervisor.account_status,'alice',True)
         await asyncio.to_thread(self.supervisor.account_status,'bob',False)
         await asyncio.to_thread(self.supervisor.account_status,'alice',True)
-        self.assertEqual((await self.client.post('/api/beta/login',json={'username':'alice','password':PASSWORD})).status_code,200)
+        self.assertEqual((await self.client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})).status_code,200)
         await self.enter()
         self.assertEqual((await self.client.get(ref)).content,self.image)
         self.assertEqual((await self.client.get('/api/canvases/'+canvas['id'])).status_code,200)
@@ -383,9 +391,13 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         with socket.socket() as occupied:
             occupied.bind(('127.0.0.1',0));port=occupied.getsockname()[1]
             self.config.port_start=port;self.config.port_end=port
-            r=await self.client.post('/api/beta/register',json={'username':'alice','password':PASSWORD,'confirmation':PASSWORD})
-            self.assertEqual(r.status_code,503)
-        with self.store.db() as db:self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
+            r=await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD})
+            self.assertEqual(r.status_code,200)
+            verified=await self.client.post('/api/beta/verify-email',json={'token':latest_token(self.app)})
+            self.assertEqual(verified.json()['status'],'waiting')
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT status FROM users').fetchone()[0],'verified_waiting')
+            self.assertEqual(db.execute('SELECT count(*) FROM instances').fetchone()[0],0)
 
     async def test_gateway_restart_cleans_incomplete_registration(self):
         from instance_auth import password_hash
@@ -397,7 +409,7 @@ class PublicBetaTests(unittest.IsolatedAsyncioTestCase):
         with self.store.db() as db:self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
 
     async def test_paths_ports_and_owner_options_are_not_browser_inputs(self):
-        r=await self.client.post('/api/beta/register',json={'username':'alice','password':PASSWORD,'confirmation':PASSWORD,'port':3000})
+        r=await self.client.post('/api/beta/register',json={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD,'port':3000})
         self.assertEqual(r.status_code,400)
         await self.register();await self.enter()
         self.assertEqual((await self.client.post('/__mio/handoff',json={'ticket':'fake'})).status_code,404)

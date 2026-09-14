@@ -31,7 +31,8 @@ class BetaCapacityTests(unittest.TestCase):
     def test_active_and_provisioning_reserve_seats(self):
         self.reserve('active');self.reserve('reserved','provisioning')
         self.assertEqual(self.store.capacity(),{'total_users':2,'active_users':1,'provisioning_users':1,
-                         'active_seats':2,'disabled_users':0,'max_public_users':2,'remaining_registration_slots':0})
+                         'active_seats':2,'disabled_users':0,'max_public_users':2,'remaining_registration_slots':0,
+                         'pending_verification_users':0,'verified_waiting_users':0})
         with self.assertRaises(BetaError):self.reserve('third')
 
     def test_disabled_records_remain_but_release_seats(self):

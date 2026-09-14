@@ -11,8 +11,10 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+from email_helpers import complete_registration, latest_token
 
 from public_beta import create_app
+from public_beta_mail import MockMailer
 from public_beta_backup import snapshot
 from public_beta_store import BetaConfig
 from instance_storage_quota import StorageQuota
@@ -40,7 +42,7 @@ class ProductionGatewayTests(unittest.IsolatedAsyncioTestCase):
                           **(defaults|values))
 
     def client(self, config, peer='127.0.0.1'):
-        app=create_app(config)
+        app=create_app(config,mailer=MockMailer())
         client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app,client=(peer,42000)),
             base_url=config.origin,headers={'Host':'mio-canvas.eu.cc','Origin':config.origin,
                                             'X-Forwarded-Proto':'https','X-Forwarded-For':'203.0.113.7'})
@@ -51,7 +53,7 @@ class ProductionGatewayTests(unittest.IsolatedAsyncioTestCase):
         config=self.config(registration_mode='closed');_,client=self.client(config)
         self.assertNotIn('href="/register"',(await client.get('/')).text)
         self.assertIn('暂未开放注册',(await client.get('/register')).text)
-        payload={'username':'alice','password':PASSWORD,'confirmation':PASSWORD}
+        payload={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD}
         self.assertEqual((await client.post('/api/beta/register',json=payload)).status_code,403)
         _,outside=self.client(self.config(registration_mode='closed'),peer='203.0.113.9')
         self.assertEqual((await outside.get('/')).status_code,403)
@@ -61,13 +63,17 @@ class ProductionGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_invite_registration_secure_cookies_and_full_sso(self):
         invite=secrets.token_urlsafe(24)
         config=self.config(registration_mode='invite',invite_hash=hashlib.sha256(invite.encode()).hexdigest())
-        _,client=self.client(config)
-        payload={'username':'alice','password':PASSWORD,'confirmation':PASSWORD,'invite_code':'wrong'}
+        app,client=self.client(config)
+        payload={'email':'alice@example.org','username':'alice','password':PASSWORD,'confirmation':PASSWORD,'invite_code':'wrong'}
         self.assertEqual((await client.post('/api/beta/register',json=payload)).status_code,403)
         payload['invite_code']=invite
         registered=await client.post('/api/beta/register',json=payload)
         self.assertEqual(registered.status_code,200,registered.text)
-        self.assertIn('Secure',registered.headers['set-cookie'])
+        self.assertNotIn('set-cookie',registered.headers)
+        verified=await client.post('/api/beta/verify-email',json={'token':latest_token(app)})
+        self.assertEqual(verified.json()['status'],'verified')
+        signed_in=await client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})
+        self.assertIn('Secure',signed_in.headers['set-cookie'])
         csrf=(await client.get('/api/beta/me')).json()['csrf']
         entered=await client.post('/api/beta/enter',headers={'X-CSRF-Token':csrf})
         self.assertEqual(entered.status_code,200,entered.text)
@@ -91,7 +97,7 @@ class DeploymentResourceTests(unittest.IsolatedAsyncioTestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='mio-beta-resource-test-')
         root=Path(self.temp.name)
         self.config=BetaConfig(root/'gateway',root/'instances',port=free_port(),min_free_disk=0,
-                               max_running_instances=1,register_limit=100,login_limit=100)
+                               mail_mode='mock',max_running_instances=1,register_limit=100,login_limit=100)
         self.app=create_app(self.config)
         self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
             base_url=self.config.origin,headers={'Origin':self.config.origin})
@@ -102,8 +108,7 @@ class DeploymentResourceTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def register(self,name):
-        return await self.client.post('/api/beta/register',
-            json={'username':name,'password':PASSWORD,'confirmation':PASSWORD})
+        return await complete_registration(self.client,self.app,name,PASSWORD)
 
     async def enter(self):
         csrf=(await self.client.get('/api/beta/me')).json()['csrf']
@@ -143,7 +148,7 @@ class BackupTests(unittest.TestCase):
             root=Path(temporary)
             config=BetaConfig(root/'gateway',root/'instances',backup_root=root/'backups',
                               port=free_port(),min_free_disk=0,backup_retention=2)
-            app=create_app(config);store=app.state.store
+            app=create_app(config,mailer=MockMailer());store=app.state.store
             iid=secrets.token_hex(16);uid=secrets.token_hex(16);instance=config.instances_root/iid
             instance.mkdir();(instance/'data').mkdir()
             proof=instance/'data/proof.txt';proof.write_text('stable')
@@ -151,7 +156,7 @@ class BackupTests(unittest.TestCase):
                 db.execute('CREATE TABLE proof(value TEXT)')
                 db.execute("INSERT INTO proof VALUES ('ok')")
             with store.db() as db:
-                db.execute("INSERT INTO users VALUES (?,?,?,'active',0,NULL)",(uid,'alice','not-used'))
+                db.execute("INSERT INTO users(id,username,password_hash,status,created_at,last_login_at) VALUES (?,?,?,'active',0,NULL)",(uid,'alice','not-used'))
                 db.execute("INSERT INTO instances VALUES (?,?,?,?,?,'stopped',0,NULL,NULL,NULL)",
                            (iid,uid,iid,str(instance),free_port()))
             first=snapshot(config);second=snapshot(config)

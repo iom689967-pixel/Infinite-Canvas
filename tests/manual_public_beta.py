@@ -1,6 +1,8 @@
 """Real-browser fixture for Public Beta. Only loopback mock, no paid calls.
 
 stdin commands: status, restart-gateway, disable-alice, finish. Credentials stay private.
+Alice/Bob are explicitly provisioned legacy fixtures; use manual_email_registration.py
+for public email registration and verification acceptance.
 """
 import hashlib
 from http.server import ThreadingHTTPServer
@@ -22,6 +24,7 @@ from test_instance_models import ModelMock
 from test_instance_isolation import free_port
 from public_beta_store import BetaConfig, GatewayStore
 from public_beta_ipc import SupervisorClient
+from instance_auth import password_hash
 
 program=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
@@ -46,6 +49,9 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
     with open(root/'gateway.log','w') as log:
         daemon=subprocess.Popen([sys.executable,str(program/'public_beta_daemon.py')],cwd=program,env=env,stdout=log,stderr=log)
         subprocess.run([sys.executable,str(program/'public_beta_daemon.py'),'ready'],cwd=program,env=env,check=True)
+        cfg=BetaConfig(root/'gateway',root/'instances',port=port,backup_root=root/'backups',supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'])
+        control=SupervisorClient(GatewayStore(cfg))
+        for name in ('alice','bob'):control.call('provision',username=name,password_hash=password_hash(password))
         proc=subprocess.Popen([sys.executable,str(program/'public_beta.py')],cwd=program,env=env,stdout=log,stderr=log)
         try:
             for _ in range(100):

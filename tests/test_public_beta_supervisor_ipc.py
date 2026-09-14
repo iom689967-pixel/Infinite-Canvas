@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+from email_helpers import complete_registration, latest_token
 
 from public_beta import create_app
 from public_beta_daemon import daemon_server, dispatch
@@ -31,7 +32,7 @@ class SupervisorIPCTests(unittest.IsolatedAsyncioTestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='mio-ipc-',dir='/tmp')
         root=Path(self.temp.name)
         self.config=BetaConfig(root/'g',root/'i',port=free_port(),min_free_disk=0,
-                               register_limit=100,login_limit=100,supervisor_socket=str(root/'g'/'ctl.sock'))
+                               mail_mode='mock',register_limit=100,login_limit=100,supervisor_socket=str(root/'g'/'ctl.sock'))
         self.store=GatewayStore(self.config)
         self.context=daemon_server(self.config);self.server=self.context.__enter__()
         self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.02},daemon=True);self.thread.start()
@@ -53,7 +54,7 @@ class SupervisorIPCTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def register(self,name='alice',enter=True):
-        response=await self.client.post('/api/beta/register',json={'username':name,'password':PASSWORD,'confirmation':PASSWORD})
+        response=await complete_registration(self.client,self.app,name,PASSWORD)
         self.assertEqual(response.status_code,200,response.text)
         principal=self.store.principal(self.client.cookies.get('mio_beta_session'))
         if enter:

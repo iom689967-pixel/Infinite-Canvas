@@ -15,11 +15,13 @@ import urllib.parse
 import uuid
 
 from instance_auth import password_hash, verify_password
+from public_beta_migrations import migrate
+from public_beta_email_address import normalize_email
 
 # Public registration has a stronger creation policy than legacy local accounts.
 # Login continues to verify existing hashes without changing existing passwords.
 REGISTRATION_PASSWORD_MIN_LENGTH = 12
-USER_STATUSES = frozenset({'active', 'provisioning', 'disabled'})
+USER_STATUSES = frozenset({'active', 'provisioning', 'disabled', 'pending_verification', 'verified_waiting'})
 SEAT_STATUSES = frozenset({'active', 'provisioning'})
 
 
@@ -68,6 +70,12 @@ class BetaConfig:
     backup_retention: int = 7
     supervisor_socket: str = ''
     idle_seconds: int = 0
+    mail_mode: str = 'disabled'
+    max_pending_registrations: int = 100
+    verification_ttl: int = 3600
+    pending_ttl: int = 86400
+    resend_cooldown: int = 60
+    resend_limit: int = 3
 
     def __post_init__(self):
         self.root = private_directory(self.root)
@@ -95,6 +103,13 @@ class BetaConfig:
             raise ValueError('Supervisor socket 必须为绝对路径')
         if type(self.idle_seconds) is not int or self.idle_seconds < 0:
             raise ValueError('Idle timeout 必须是非负整数')
+        if self.mail_mode not in {'disabled', 'mock', 'smtp'}:
+            raise ValueError('邮件模式必须为 disabled、mock 或 smtp')
+        for value in (self.max_pending_registrations, self.verification_ttl, self.pending_ttl, self.resend_cooldown, self.resend_limit):
+            if type(value) is not int or value < 1:
+                raise ValueError('邮箱验证限制必须为正整数')
+        if not 300 <= self.verification_ttl <= 3600 or not self.verification_ttl <= self.pending_ttl <= 604800:
+            raise ValueError('验证链接须为 5–60 分钟，pending 有效期不超过 7 天')
         if self.registration_mode == 'invite' and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
             raise ValueError('邀请码模式需要 SHA-256 摘要')
         if self.invite_hash and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
@@ -148,7 +163,11 @@ class BetaConfig:
                  'max_users':'MAX_PUBLIC_USERS', 'storage_quota':'INSTANCE_STORAGE_QUOTA',
                  'max_upload':'MAX_UPLOAD_BYTES', 'concurrency':'MAX_CONCURRENT_GENERATIONS',
                  'min_free_disk':'MIN_FREE_DISK_BYTES','max_running_instances':'MAX_RUNNING_INSTANCES',
-                 'backup_retention':'PUBLIC_BETA_BACKUP_RETENTION'}
+                 'backup_retention':'PUBLIC_BETA_BACKUP_RETENTION',
+                 'max_pending_registrations':'MAX_PENDING_REGISTRATIONS',
+                 'verification_ttl':'MIO_EMAIL_VERIFICATION_TTL_SECONDS',
+                 'pending_ttl':'MIO_PENDING_TTL_SECONDS', 'resend_cooldown':'MIO_EMAIL_RESEND_COOLDOWN_SECONDS',
+                 'resend_limit':'MIO_EMAIL_RESEND_LIMIT'}
         values = {key:int(env[name]) for key,name in names.items() if name in env}
         return cls(Path(env.get('PUBLIC_BETA_ROOT', '~/.infinite-canvas/public-beta')).expanduser(),
                    Path(env.get('PUBLIC_BETA_INSTANCES_ROOT', '~/.infinite-canvas/instances')).expanduser(),
@@ -159,6 +178,7 @@ class BetaConfig:
                    invite_hash=env.get('PUBLIC_BETA_INVITE_CODE_HASH','').strip().lower(),
                    supervisor_socket=supervisor_socket,
                    idle_seconds=int(env.get('PUBLIC_BETA_IDLE_SECONDS','0')),
+                   mail_mode=env.get('MIO_MAIL_MODE','disabled').strip().lower(),
                    backup_root=Path(env.get('PUBLIC_BETA_BACKUP_ROOT','~/.infinite-canvas/backups')).expanduser(), **values)
 
 
@@ -189,6 +209,7 @@ class GatewayStore:
             CREATE TABLE IF NOT EXISTS security_events (id INTEGER PRIMARY KEY, event TEXT, user_id TEXT, created_at REAL);
             CREATE TABLE IF NOT EXISTS instance_activity (instance_id TEXT PRIMARY KEY, last_seen REAL NOT NULL);
             ''')
+            migrate(db)
         os.chmod(self.path, 0o600)
         # CLI does not hash a dummy password; the web login path creates it lazily.
         self.dummy = None
@@ -211,7 +232,8 @@ class GatewayStore:
 
     def event(self, event, user_id=''):
         # Caller-selected enum only, never request content/IP/password/raw exception.
-        if event not in {'registered','registration_failed','login','login_failed','disabled','enabled','started','stopped','start_failed','supervisor_reconcile_required'}:
+        if event not in {'registered','registration_failed','login','login_failed','disabled','enabled','started','stopped','start_failed','supervisor_reconcile_required',
+                         'email_verification_sent','email_verification_success','email_verification_expired','email_delivery_failed','email_pending_expired','email_bound','email_admin_verified'}:
             raise ValueError('Unknown security event')
         with self.db() as db:
             db.execute('INSERT INTO security_events(event,user_id,created_at) VALUES (?,?,?)',(event,user_id,time.time()))
@@ -239,6 +261,8 @@ class GatewayStore:
         return {'total_users':sum(counts.values()), 'active_users':counts.get('active',0),
                 'provisioning_users':counts.get('provisioning',0), 'active_seats':seats,
                 'disabled_users':counts.get('disabled',0), 'max_public_users':self.config.max_users,
+                'pending_verification_users':counts.get('pending_verification',0),
+                'verified_waiting_users':counts.get('verified_waiting',0),
                 'remaining_registration_slots':max(0,self.config.max_users-seats)}
 
     def set_enabled(self, uid, enabled):
@@ -260,9 +284,18 @@ class GatewayStore:
             db.execute('BEGIN IMMEDIATE')
             if self.capacity(db)['active_seats'] >= self.config.max_users:
                 raise BetaError('当前 Mio Canvas Beta 名额已满。',409)
-            if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
-                raise BetaError('用户名已被使用',409)
-            db.execute('INSERT INTO users VALUES (?,?,?, ?,?,NULL)',(uid,username,encoded,'provisioning',time.time()))
+            existing=db.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
+            if existing:
+                # Resume only a verified identity with its unchanged server-owned hash.
+                # This remains inside the same BEGIN IMMEDIATE seat reservation.
+                if (existing['status']!='verified_waiting' or existing['email_verified_at'] is None
+                        or not secrets.compare_digest(existing['password_hash'],encoded)):
+                    raise BetaError('用户名已被使用',409)
+                uid=existing['id']
+                db.execute("UPDATE users SET status='provisioning' WHERE id=?",(uid,))
+            else:
+                db.execute('INSERT INTO users(id,username,password_hash,status,created_at) VALUES (?,?,?,?,?)',
+                           (uid,username,encoded,'provisioning',time.time()))
             db.execute('INSERT INTO instances VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL)',(iid,uid,iid,str(root),port,'provisioning',time.time()))
         return self.instance(uid)
 
@@ -281,8 +314,13 @@ class GatewayStore:
     def rollback(self, uid):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute("SELECT 1 FROM users WHERE id=? AND status='provisioning'",(uid,)).fetchone():
-                db.execute('DELETE FROM instances WHERE user_id=?',(uid,));db.execute('DELETE FROM users WHERE id=?',(uid,))
+            row=db.execute("SELECT email_verified_at FROM users WHERE id=? AND status='provisioning'",(uid,)).fetchone()
+            if row:
+                db.execute('DELETE FROM instances WHERE user_id=?',(uid,))
+                if row['email_verified_at'] is not None:
+                    db.execute("UPDATE users SET status='verified_waiting' WHERE id=?",(uid,))
+                else:
+                    db.execute('DELETE FROM users WHERE id=?',(uid,))
         self.event('registration_failed')
 
     def session(self, uid):
@@ -308,13 +346,25 @@ class GatewayStore:
     def revoke(self, token):
         with self.db() as db: db.execute('DELETE FROM sessions WHERE digest=?',(self.digest(token or ''),))
 
-    def login(self, username, password, peer):
+    def login(self, identifier, password, peer):
         self.limit('login-ip',peer,self.config.login_limit)
-        name = str(username).lower() if isinstance(username,str) else ''
-        with self.db() as db: row = db.execute('SELECT * FROM users WHERE username=?',(name,)).fetchone()
+        name = identifier.strip().lower() if isinstance(identifier,str) and len(identifier)<=512 else ''
+        by_email='@' in name
+        if by_email:
+            try: _,name=normalize_email(name,testing=self.config.mail_mode=='mock' and not self.config.proxied)
+            except ValueError: name=''
+        with self.db() as db:
+            row=db.execute('SELECT * FROM users WHERE email_normalized=?' if by_email else
+                           'SELECT * FROM users WHERE username=? AND legacy_username_login=1',(name,)).fetchone()
         if self.dummy is None: self.dummy = password_hash(secrets.token_urlsafe(32))
-        if not verify_password(password, row['password_hash'] if row else self.dummy) or not row or row['status'] != 'active':
-            self.event('login_failed');raise BetaError('账号或密码不正确',401)
+        if not verify_password(password, row['password_hash'] if row else self.dummy) or not row:
+            self.event('login_failed');raise BetaError('邮箱/用户名或密码错误',401)
+        if by_email and row['email_verified_at'] is None and row['status'] in {'pending_verification','active'}:
+            self.event('login_failed');raise BetaError('请先完成邮箱验证。',403)
+        if row['status']=='verified_waiting':
+            raise BetaError('邮箱已验证，工作区名额或初始化待管理员处理。',403)
+        if row['status'] != 'active':
+            self.event('login_failed');raise BetaError('邮箱/用户名或密码错误',401)
         self.event('login',row['id'])
         with self.db() as db:
             db.execute('DELETE FROM attempts WHERE bucket=?',(hashlib.sha256(('login-ip:'+str(peer)).encode()).hexdigest(),))

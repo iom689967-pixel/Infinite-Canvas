@@ -34,7 +34,10 @@ class WorkspaceEntryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(page.headers['cache-control'],'no-store, private')
         for form in ('login','register'):
             page=(await f.client.get('/'+form)).text
-            self.assertIn("location.replace('/')",page)
+            if form=='login': self.assertIn("location.replace('/')",page)
+            else:
+                self.assertNotIn("location.replace('/')",page)
+                self.assertIn('masked_email',page)
             self.assertNotIn("location.replace('/workspace')",page)
         private=await f.client.get('/api/canvases')
         self.assertEqual(private.status_code,503)

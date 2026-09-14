@@ -29,5 +29,8 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Validate installed dependencies
+        run: python -m pip check
+
       - name: Run project checks
         run: ./scripts/check.sh
