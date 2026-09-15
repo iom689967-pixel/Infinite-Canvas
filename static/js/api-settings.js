@@ -80,8 +80,8 @@ const MS_BUILTIN_IMAGE_MODELS = [
 const MS_DEFAULT_BASE_URL = 'https://api-inference.modelscope.cn/v1';
 const RH_DEFAULT_BASE_URL = 'https://www.runninghub.ai';
 const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai';
-const KIE_IMAGE_MODELS = ['gpt-image-2', 'nano-banana-pro'];
-const KIE_MODEL_NAMES = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro'};
+const KIE_IMAGE_MODELS = ['gpt-image-2', 'nano-banana-pro', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'];
+const KIE_MODEL_NAMES = {'gpt-image-2':'GPT Image 2', 'nano-banana-pro':'Nano Banana Pro', 'gpt-image-2.5-flare':'GPT Image 2.5 Flare', 'gpt-image-2.5-sunburst':'GPT Image 2.5 Sunburst'};
 const LINGJING_DEFAULT_BASE_URL = 'https://apistudio.vip';
 const LINGJING_REGISTER_URL = 'https://apistudio.vip/register?aff=g1CT';
 const VIP_GPT_DEFAULT_BASE_URL = 'https://www.vip-gpt.net';
@@ -3344,7 +3344,7 @@ async function fetchModels(){
     if(!item) return;
     if(item.id === 'kie'){
         setFetchedModelState({all:[...KIE_IMAGE_MODELS], image_models:[...KIE_IMAGE_MODELS], model_names:{...KIE_MODEL_NAMES}});
-        setStatus(`Kie 固定使用 GPT Image 2 和 Nano Banana Pro · 可用模型：${KIE_IMAGE_MODELS.length}`);
+        setStatus(`Kie 图片模型 · 可用模型：${KIE_IMAGE_MODELS.length}`);
         return;
     }
     syncEditor();

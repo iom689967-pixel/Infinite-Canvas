@@ -226,7 +226,7 @@ const activeSmartGenerationRuns = new Map();
 const cancellingSmartGenerationIds = new Set();
 const activePromptLLMRuns = new Map();
 const kieCapabilityCache = new Map();
-const kieCapabilityLoading = new Set();
+const kieCapabilityLoading = new Map();
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -2580,23 +2580,20 @@ async function ensureKieCapability(providerId=settings.provider_id, model=settin
     if(!isKieProviderId(providerId) || !model) return null;
     const key = kieCapabilityKey(providerId, model);
     if(kieCapabilityCache.has(key)) return kieCapabilityCache.get(key);
-    if(kieCapabilityLoading.has(key)) return null;
-    kieCapabilityLoading.add(key);
-    try {
-        const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
-        if(!response.ok) throw new Error(await response.text());
-        const schema = await response.json();
+    if(kieCapabilityLoading.has(key)) return kieCapabilityLoading.get(key);
+    const pending = KieImageParams.load(providerId, model).then(schema => {
         kieCapabilityCache.set(key, schema);
         if(settings.provider_id === providerId && settings.model === model) normalizeKieSettings(schema, settings);
         scheduleDynamicParamsRefresh(0);
         return schema;
-    } catch(error){
-        toast((error?.message || 'Kie 参数加载失败').slice(0, 160));
+    }).catch(() => {
+        toast('Kie 参数加载失败，请重试');
         return null;
-    } finally {
-        kieCapabilityLoading.delete(key);
-    }
+    }).finally(() => kieCapabilityLoading.delete(key));
+    kieCapabilityLoading.set(key, pending);
+    return pending;
 }
+
 function volcengineProvider(){
     return (apiProviders || []).find(p => p.id === 'volcengine' && p.enabled !== false) || {
         id:'volcengine',
@@ -19847,7 +19844,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
-    const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
+    const kieSchema = isKieProviderId(runSettings.provider_id) ? (currentKieCapability(runSettings) || await ensureKieCapability(runSettings.provider_id, runSettings.model)) : null;
     if(isKieProviderId(runSettings.provider_id) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
     if(kieSchema) normalizeKieSettings(kieSchema, runSettings);
     const imageRefs = imageRefsOnly(refs);
@@ -19869,6 +19866,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         n:1,
         reference_images:imageRefs
     };
+    if(kieSchema) KieImageParams.validate(kieSchema, payload, imageRefs.length);
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw await ModelPromptLimits.responseError(r);
         return r.json();

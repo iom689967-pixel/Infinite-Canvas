@@ -9974,7 +9974,7 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", *, require_local=False):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
@@ -9998,6 +9998,12 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             response = await client.get(value)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
+            if require_local:
+                # A 200 HTML/error page is not a saved image. Validate the original
+                # bytes before writing; image_output_meta reads their real dimensions.
+                with Image.open(BytesIO(response.content)) as image:
+                    image.verify()
+                    content_type = Image.MIME.get(image.format, content_type)
             if "jpeg" in content_type or "jpg" in content_type:
                 filename = filename[:-4] + ".jpg"
                 path = output_path_for(filename, category)
@@ -10008,6 +10014,9 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 f.write(response.content)
             return output_url_for(filename, category)
     except Exception as e:
+        if require_local:
+            # Kie results expire: never mark a remote fallback as a saved result.
+            raise HTTPException(status_code=502, detail="图片已在上游生成，结果下载失败，请查询原任务恢复结果") from e
         print(f"保存上游图片失败: {e}; url={value}")
         return value
 
@@ -11781,6 +11790,11 @@ async def generate_kie_provider_image(
             )
 
     try:
+        # Validate before any reference upload, including the synchronous online endpoint.
+        build_kie_create_payload(
+            model, prompt, [ref["url"] for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")],
+            aspect_ratio=aspect_ratio, resolution=resolution, output_format=output_format,
+        )
         await report_status("preparing")
         ensure_not_cancelled()
         reference_urls, reference_audits = await kie_public_reference_urls(model, reference_images)
@@ -14091,7 +14105,7 @@ async def validate_kie_settings(payload: TestConnectionPayload, *, check_reachab
     base_url_ok = requested_base_url == KIE_BASE_URL
     api_key = provider_env_key_value("kie")
     key_configured = bool(api_key)
-    whitelist_ok = tuple(KIE_UI_MODELS) == ("gpt-image-2", "nano-banana-pro")
+    whitelist_ok = bool(KIE_UI_MODELS) and set(KIE_UI_MODELS) == set(KIE_MODEL_NAMES)
     if whitelist_ok:
         try:
             whitelist_ok = all(bool(build_kie_capability_schema(model)) for model in KIE_UI_MODELS)
@@ -14882,7 +14896,14 @@ async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event
         local_urls = []
         local_items = []
         for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+            try:
+                if is_kie_provider(provider):
+                    local_url = await save_ai_image_to_output(item, prefix="online_", require_local=True)
+                else:
+                    local_url = await save_ai_image_to_output(item, prefix="online_")
+            except HTTPException as exc:
+                setattr(exc, "upstream_task_id", extract_task_id(raw_item))
+                raise
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
@@ -15301,7 +15322,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
                 local_items = []
                 for remote_url in remote_urls:
                     source_item = {"type": "url", "value": remote_url}
-                    local_url = await save_ai_image_to_output(source_item, prefix="online_")
+                    local_url = await save_ai_image_to_output(source_item, prefix="online_", require_local=True)
                     if local_url:
                         local_urls.append(local_url)
                         local_items.append(image_output_meta(local_url, source_item))

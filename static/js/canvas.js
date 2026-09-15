@@ -1052,8 +1052,30 @@ function exceedsFourKStandard(width, height){
     if(!standard) return false;
     return Number(width) > standard.width || Number(height) > standard.height;
 }
+function isCanvasKieNode(node){
+    return KieImageParams.isKie((apiProviders || []).find(p => p.id === node?.apiProvider) || {id:node?.apiProvider});
+}
+function canvasKieValues(node){
+    return {
+        aspect_ratio:node.aspectRatio || API_RATIO_VALUES[node.ratio] || (node.ratio === 'custom' ? node.customRatio : '') || 'auto',
+        resolution:String(node.resolution || '1K').toUpperCase(),
+        output_format:node.outputFormat || ''
+    };
+}
+async function canvasKieRequestFields(node, referenceCount){
+    if(!isCanvasKieNode(node)) return {};
+    const schema = await KieImageParams.load(node.apiProvider, resolveImageModel(node.model));
+    const input = canvasKieValues(node);
+    // Missing fields in old JSON inherit defaults; explicit invalid combinations fail locally.
+    if(!input.output_format) input.output_format = KieImageParams.field(schema, 'output_format')?.default || '';
+    return KieImageParams.validate(schema, input, referenceCount);
+}
 function normalizeApiNodeSizeChoice(node){
     if(!node) return;
+    if(isCanvasKieNode(node)){
+        if(!node.resolution || node.resolution === 'auto') node.resolution = '1k';
+        return;
+    }
     const allowAuto = isGptImageAutoSizeModel(resolveImageModel(node.model));
     if(allowAuto && node._apiResolutionUserSet !== true && (!node.resolution || node.resolution === '1k' || node.resolution === 'auto')) node.resolution = defaultApiImageResolution(node.model);
     else if(!node.resolution) node.resolution = defaultApiImageResolution(node.model);
@@ -1090,7 +1112,8 @@ function imageModelOptions(selectedModel, providerId){
         return `<option value="" disabled selected>${tr('canvas.noImageModelsHint') || '暂无生图模型，请到 API 设置添加'}</option>`;
     }
     const selectedValue = resolveImageModel(selectedModel);
-    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    const names = (apiProviders || []).find(p => p.id === providerId)?.model_names || {};
+    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(names[model] || model)}</option>`).join('');
     const hasSelected = models.includes(selectedValue);
     return `${hasSelected || !selectedValue ? '' : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`}${options}`;
 }
@@ -8569,7 +8592,9 @@ function renderGeneratorBody(node){
         const providerModels = providerImageModels(node.apiProvider);
         if(!providerModels.includes(resolveImageModel(node.model))) node.model = providerModels[0] || '';
         node._apiResolutionUserSet = false;
-        node.resolution = defaultApiImageResolution(node.model);
+        node.resolution = isCanvasKieNode(node) ? '1k' : defaultApiImageResolution(node.model);
+        node.aspectRatio = '';
+        node.outputFormat = '';
         modelSelect.innerHTML = imageModelOptions(node.model, node.apiProvider);
         syncSizeControls();
         syncQualityControls();
@@ -8581,7 +8606,9 @@ function renderGeneratorBody(node){
         e.stopPropagation();
         node.model = e.target.value;
         node._apiResolutionUserSet = false;
-        if(node.resolution !== 'custom') node.resolution = defaultApiImageResolution(node.model);
+        if(node.resolution !== 'custom') node.resolution = isCanvasKieNode(node) ? '1k' : defaultApiImageResolution(node.model);
+        node.aspectRatio = '';
+        node.outputFormat = '';
         syncSizeControls();
         syncQualityControls();
         scheduleSave();
@@ -8589,6 +8616,17 @@ function renderGeneratorBody(node){
     const ratioSelect = wrap.querySelector('.ratio');
     const resolutionSelect = wrap.querySelector('.resolution');
     const qualitySelect = wrap.querySelector('.quality-select');
+    const formatSelect = document.createElement('select');
+    formatSelect.className = 'select-lite kie-output-format';
+    formatSelect.title = '输出格式';
+    formatSelect.hidden = true;
+    qualitySelect.before(formatSelect);
+    formatSelect.onchange = e => { e.stopPropagation(); node.outputFormat = e.target.value; scheduleSave(); };
+    const legacyRatioOptions = ratioSelect.innerHTML;
+    const legacyResolutionOptions = resolutionSelect.innerHTML;
+    let loadingKieKey = '';
+    let showingKieControls = false;
+
     const customRatioRow = wrap.querySelector('.custom-ratio-row');
     const customSizeRow = wrap.querySelector('.custom-size-row');
     const customRatioWInput = wrap.querySelector('.custom-ratio-w-input');
@@ -8598,6 +8636,7 @@ function renderGeneratorBody(node){
     const fitSizeBtn = wrap.querySelector('.fit-size-btn');
     const referenceImages = ordered.flatMap(src => src.refs || []);
     const syncQualityControls = () => {
+        qualitySelect.hidden = isCanvasKieNode(node);
         qualitySelect.disabled = false;
         if(!['auto','low','medium','high'].includes(String(node.quality || 'auto'))) node.quality = 'auto';
         qualitySelect.value = node.quality || 'auto';
@@ -8644,6 +8683,38 @@ function renderGeneratorBody(node){
         } catch(_) {}
     };
     const syncSizeControls = () => {
+        if(isCanvasKieNode(node)){
+            showingKieControls = true;
+            customRatioRow.style.display = 'none';
+            customSizeRow.style.display = 'none';
+            syncQualityControls();
+            const model = resolveImageModel(node.model);
+            const schema = KieImageParams.peek(node.apiProvider, model);
+            if(!schema){
+                ratioSelect.disabled = resolutionSelect.disabled = true;
+                const key = `${node.apiProvider}:${model}`;
+                if(loadingKieKey !== key){
+                    loadingKieKey = key;
+                    KieImageParams.load(node.apiProvider, model).then(() => {
+                        if(`${node.apiProvider}:${resolveImageModel(node.model)}` === key) syncSizeControls();
+                    }).catch(() => { ratioSelect.title = 'Kie 参数加载失败，生成时将重试'; })
+                        .finally(() => { if(loadingKieKey === key) loadingKieKey = ''; });
+                }
+                return;
+            }
+            const value = KieImageParams.normalize(schema, canvasKieValues(node));
+            node.aspectRatio = value.aspect_ratio;
+            node.resolution = value.resolution.toLowerCase();
+            node.outputFormat = value.output_format;
+            KieImageParams.syncSelects(schema, value, {aspect_ratio:ratioSelect, resolution:resolutionSelect, output_format:formatSelect});
+            return;
+        }
+        if(showingKieControls){
+            ratioSelect.innerHTML = legacyRatioOptions;
+            resolutionSelect.innerHTML = legacyResolutionOptions;
+            showingKieControls = false;
+        }
+        formatSelect.hidden = true;
         normalizeApiNodeSizeChoice(node);
         const autoOption = resolutionSelect.querySelector('option[value="auto"]');
         if(autoOption) autoOption.disabled = !isGptImageAutoSizeModel(resolveImageModel(node.model));
@@ -8679,6 +8750,10 @@ function renderGeneratorBody(node){
     ratioSelect.onclick = e => e.stopPropagation();
     ratioSelect.onchange = e => {
         e.stopPropagation();
+        if(isCanvasKieNode(node)){
+            node.aspectRatio = e.target.value;
+            syncSizeControls(); scheduleSave(); return;
+        }
         node.ratio = e.target.value;
         normalizeApiNodeSizeChoice(node);
         if(node.ratio !== 'custom' && node.ratio !== 'source') {
@@ -8697,7 +8772,7 @@ function renderGeneratorBody(node){
     resolutionSelect.onclick = e => e.stopPropagation();
     resolutionSelect.onchange = e => {
         e.stopPropagation();
-        node.resolution = e.target.value;
+        node.resolution = isCanvasKieNode(node) ? e.target.value.toLowerCase() : e.target.value;
         node._apiResolutionUserSet = true;
         if(node.resolution === 'custom') {
             node.ratio = '';
@@ -11996,6 +12071,12 @@ async function runGenerator(genId, opts={}){
         showErrorModal(error.message, '参考图超出上限');
         return;
     }
+    let kieFields;
+    try { kieFields = await canvasKieRequestFields(gen, refs.length); }
+    catch(error){
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, 'Kie 参数无效'); return;
+    }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
@@ -12006,6 +12087,7 @@ async function runGenerator(genId, opts={}){
         size:await generatorSizeForRun(gen, refs),
         aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
         resolution:gen.resolution || '',
+        ...kieFields,
         reference_images:refs
     };
     const quality = normalizedImageQuality(gen.quality);
@@ -12243,6 +12325,12 @@ async function runGeneratorLegacy(genId, opts={}){
     const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
     if(!await validateCanvasModelPrompt(gen, prompt, refs, opts)) return;
+    let kieFields;
+    try { kieFields = await canvasKieRequestFields(gen, refs.length); }
+    catch(error){
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, 'Kie 参数无效'); return;
+    }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const pendingIds = Array.from({length:count}, () => uid('p'));
@@ -12263,6 +12351,7 @@ async function runGeneratorLegacy(genId, opts={}){
             size:requestSize,
             aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
             resolution:['1k','2k','4k'].includes(gen.resolution) ? gen.resolution : '',
+            ...kieFields,
             reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
         };
         const quality = normalizedImageQuality(gen.quality);

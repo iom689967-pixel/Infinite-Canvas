@@ -1,6 +1,6 @@
 """Static Kie image-model whitelist and request adapters.
 
-Only the two UI model ids below are accepted from the application. Kie's
+Only the UI model ids below are accepted from the application. Kie's
 internal Market model ids are selected here and are never accepted directly
 from a browser request.
 """
@@ -13,11 +13,34 @@ KIE_BASE_URL = "https://api.kie.ai"
 
 GPT_IMAGE_2 = "gpt-image-2"
 NANO_BANANA_PRO = "nano-banana-pro"
-KIE_UI_MODELS = (GPT_IMAGE_2, NANO_BANANA_PRO)
+GPT_IMAGE_25_FLARE = "gpt-image-2.5-flare"
+GPT_IMAGE_25_SUNBURST = "gpt-image-2.5-sunburst"
+GPT_IMAGE_ROUTES = {
+    GPT_IMAGE_2: {
+        "text_to_image": "gpt-image-2-text-to-image",
+        "image_to_image": "gpt-image-2-image-to-image",
+    },
+    GPT_IMAGE_25_FLARE: {
+        "text_to_image": "gpt-image-2-5-flare-text-to-image",
+        "image_to_image": "gpt-image-2-5-flare-image-to-image",
+    },
+    GPT_IMAGE_25_SUNBURST: {
+        "text_to_image": "gpt-image-2-5-sunburst-text-to-image",
+        "image_to_image": "gpt-image-2-5-sunburst-image-to-image",
+    },
+}
+KIE_UI_MODELS = (GPT_IMAGE_2, NANO_BANANA_PRO, GPT_IMAGE_25_FLARE, GPT_IMAGE_25_SUNBURST)
 KIE_MODEL_NAMES = {
     GPT_IMAGE_2: "GPT Image 2",
     NANO_BANANA_PRO: "Nano Banana Pro",
+    GPT_IMAGE_25_FLARE: "GPT Image 2.5 Flare",
+    GPT_IMAGE_25_SUNBURST: "GPT Image 2.5 Sunburst",
 }
+GPT_IMAGE_25_RATIOS = (
+    "auto", "1:1", "3:2", "2:3", "16:9", "9:16", "4:3", "3:4",
+    "21:9", "27:16", "16:27", "9:8", "8:9",
+)
+GPT_IMAGE_25_1K_ONLY_RATIOS = ("27:16", "16:27", "9:8", "8:9")
 
 GPT_IMAGE_2_RATIOS = (
     "auto", "1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16",
@@ -62,6 +85,21 @@ _CAPABILITIES = {
         "resolution_ratio_exclusions": {},
     },
 }
+
+# Both 2.5 variants share parameters, but keep two stable user-facing identities.
+for _model in (GPT_IMAGE_25_FLARE, GPT_IMAGE_25_SUNBURST):
+    _CAPABILITIES[_model] = {
+        **deepcopy(_CAPABILITIES[GPT_IMAGE_2]),
+        "ui_model": _model,
+        "label": KIE_MODEL_NAMES[_model],
+        "aspect_ratios": GPT_IMAGE_25_RATIOS,
+        "backgrounds": ("auto", "opaque", "transparent"),
+        "default_background": "auto",
+        "resolution_ratio_exclusions": {
+            "2K": GPT_IMAGE_25_1K_ONLY_RATIOS,
+            "4K": GPT_IMAGE_25_1K_ONLY_RATIOS,
+        },
+    }
 
 
 class KieValidationError(ValueError):
@@ -126,25 +164,27 @@ def normalize_output_format(value, capability):
     return output_format
 
 
-def build_routed_model_input(kie_model, prompt, references, *, aspect_ratio, resolution, output_format=""):
+def build_routed_model_input(kie_model, prompt, references, *, aspect_ratio, resolution, output_format="", background="auto"):
     """Map each Kie Market route to its own documented reference-image field.
 
     GPT Image 1.5 remains an internal adapter route and is not added to the
     browser/UI whitelist.
     """
-    if kie_model in {"gpt-image-2-image-to-image", "gpt-image/1.5-image-to-image"}:
-        return {
-            "prompt": prompt,
-            "input_urls": list(references),
-            "aspect_ratio": aspect_ratio,
-            "resolution": resolution,
-        }
-    if kie_model == "gpt-image-2-text-to-image":
-        return {
+    for ui_model, routes in GPT_IMAGE_ROUTES.items():
+        if kie_model not in routes.values():
+            continue
+        model_input = {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
         }
+        if kie_model == routes["image_to_image"]:
+            model_input["input_urls"] = list(references)
+        if ui_model != GPT_IMAGE_2:
+            model_input["background"] = background
+        return model_input
+    if kie_model == "gpt-image/1.5-image-to-image":
+        return {"prompt": prompt, "input_urls": list(references), "aspect_ratio": aspect_ratio, "resolution": resolution}
     if kie_model == "nano-banana-pro":
         return {
             "prompt": prompt,
@@ -156,7 +196,8 @@ def build_routed_model_input(kie_model, prompt, references, *, aspect_ratio, res
     raise KieValidationError(f"未定义 Kie 模型路由字段：{kie_model}")
 
 
-def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", resolution="", output_format=""):
+def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", resolution="", output_format="", *, background="auto"):
+    model = str(model or "").strip()
     capability = capability_for(model)
     prompt = str(prompt or "").strip()
     if not prompt:
@@ -171,26 +212,15 @@ def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", re
     resolution = normalize_resolution(resolution, capability)
     validate_resolution_ratio(capability, resolution, ratio)
     output_format = normalize_output_format(output_format, capability)
+    if capability.get("backgrounds") and background not in capability["backgrounds"]:
+        raise KieValidationError("不支持的图片背景模式")
 
-    if model == GPT_IMAGE_2:
-        kie_model = "gpt-image-2-image-to-image" if references else "gpt-image-2-text-to-image"
-        model_input = build_routed_model_input(
-            kie_model,
-            prompt,
-            references,
-            aspect_ratio=ratio,
-            resolution=resolution,
-        )
-    else:
-        kie_model = "nano-banana-pro"
-        model_input = build_routed_model_input(
-            kie_model,
-            prompt,
-            references,
-            aspect_ratio=ratio,
-            resolution=resolution,
-            output_format=output_format,
-        )
+    routes = GPT_IMAGE_ROUTES.get(model)
+    kie_model = routes["image_to_image" if references else "text_to_image"] if routes else NANO_BANANA_PRO
+    model_input = build_routed_model_input(
+        kie_model, prompt, references, aspect_ratio=ratio, resolution=resolution,
+        output_format=output_format, background=background,
+    )
     validate_model_prompt("kie", kie_model, model_input["prompt"], len(references))
     return {
         "model": kie_model,
