@@ -38,6 +38,7 @@ def function_source(name):
 
 
 def run_node(source):
+    source = (ROOT / "static/js/model-prompt-limits.js").read_text() + "\n" + source
     completed = subprocess.run(
         ["node", "-e", source],
         cwd=ROOT,

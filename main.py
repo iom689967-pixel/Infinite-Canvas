@@ -38,6 +38,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from providers.prompt_limits import (
+    ModelPromptLimitError, public_prompt_capabilities, validate_model_prompt,
+    is_upstream_prompt_limit_error,
+)
 from providers.kie import (
     KIE_BASE_URL,
     KIE_MODEL_NAMES,
@@ -677,6 +681,14 @@ def validate_llm_message_content(value, field_path):
             validate_llm_text_length(value.get("text"), f"{field_path}.text")
         if "content" in value:
             validate_llm_message_content(value.get("content"), f"{field_path}.content")
+
+@app.get("/api/model-prompt-limits")
+async def model_prompt_limits():
+    return public_prompt_capabilities()
+
+@app.exception_handler(ModelPromptLimitError)
+async def model_prompt_limit_exception_handler(request: Request, exc: ModelPromptLimitError):
+    return JSONResponse(status_code=400, content={"detail": exc.details["message"], "validation": exc.details})
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -3367,8 +3379,8 @@ class PromptLibraryItemRequest(BaseModel):
     item_id: str = ""
     name: str = "提示词"
     category: str = "custom"
-    positive: str = ""
-    negative: str = ""
+    positive: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
+    negative: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
     scene: str = ""
 
 class PromptLibraryBatchDeleteRequest(BaseModel):
@@ -11751,6 +11763,8 @@ async def generate_kie_provider_image(
     cancel_event=None,
     status_callback=None,
 ):
+    reference_count = sum(bool(ref.get("url")) for ref in (reference_images or []) if isinstance(ref, dict))
+    validate_model_prompt("kie", model, prompt, reference_count)
     reference_audits = []
     async def report_status(status, raw=None):
         if status_callback is None:
@@ -11782,8 +11796,9 @@ async def generate_kie_provider_image(
         ensure_not_cancelled()
         print(json.dumps({
             "event": "kie_create_request",
-            "payload": create_payload,
-            "referenceAudits": reference_audits,
+            "model": create_payload["model"],
+            "prompt_characters": len(create_payload["input"]["prompt"]),
+            "reference_count": len(reference_urls),
         }, ensure_ascii=False), flush=True)
         client = KieClient(provider_env_key_value("kie"), base_url=KIE_BASE_URL)
         # 创建只调用一次；传输失败也不自动重试，避免上游已受理后重复扣费。
@@ -11823,6 +11838,8 @@ async def generate_kie_provider_image(
             setattr(error, "upstream_task_id", match.group(1))
         raise error from exc
     except KieTaskError as exc:
+        if is_upstream_prompt_limit_error(exc):
+            raise ModelPromptLimitError("kie", model, prompt, reference_count, upstream=True) from exc
         detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
         if reference_audits and any(token in str(exc).lower() for token in ("image info", "invalid image", "image format", "read image")):
             refs = "；".join(
@@ -11835,6 +11852,8 @@ async def generate_kie_provider_image(
         setattr(error, "upstream_task_id", exc.task_id)
         raise error from exc
     except KieAPIError as exc:
+        if is_upstream_prompt_limit_error(exc):
+            raise ModelPromptLimitError("kie", model, prompt, reference_count, upstream=True) from exc
         error_parts = [str(exc)]
         if exc.status_code:
             error_parts.append(f"HTTP {exc.status_code}")
@@ -14832,6 +14851,7 @@ async def fetch_upstream_models(provider_id: str):
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
 async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event=None, status_callback=None):
+    validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
@@ -15460,7 +15480,10 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
         raise
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        status_code = getattr(exc, "status_code", 500)
+        status_code = 400 if isinstance(exc, ModelPromptLimitError) else getattr(exc, "status_code", 500)
+        if isinstance(exc, ModelPromptLimitError):
+            with CANVAS_TASK_LOCK:
+                CANVAS_TASKS[task_id]["validation"] = exc.details
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
@@ -15476,6 +15499,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
     if payload.provider_id == "kie":
         try:
             # 在创建本地后台任务之前完成模型、比例、分辨率、格式和数量校验，

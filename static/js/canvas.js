@@ -11954,10 +11954,29 @@ function refreshGeneratorInputViews(){
         }
     });
 }
+async function validateCanvasModelPrompt(node, prompt, refs, opts={}){
+    try {
+        await ModelPromptLimits.validate({provider_id:resolveImageProviderId(node.apiProvider || 'comfly'), model:resolveImageModel(node.model), prompt:prompt || 'Edit the reference images.', reference_images:refs});
+        delete node.runValidation;
+        return true;
+    } catch(error){
+        node.runStatus = 'failed';
+        node.runError = error.message;
+        node.runValidation = ModelPromptLimits.details(error);
+        addGenerationLog({run:runSnapshot(node, '', []), error:error.message});
+        refreshRunNodes(node, null);
+        scheduleSave();
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, '输入校验失败');
+        return false;
+    }
+}
 async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    const preflightSources = orderedSources(gen, generatorSources(gen));
+    if(!await validateCanvasModelPrompt(gen, preflightSources.map(src => src.prompt).filter(Boolean).join('\n\n'), imageRefsOnly(preflightSources.flatMap(src => src.refs || [])), opts)) return;
     let canvasRefs = [];
     try {
         canvasRefs = await materializeCanvasReferenceEdges(gen.id);
@@ -12223,6 +12242,7 @@ async function runGeneratorLegacy(genId, opts={}){
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
     const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
+    if(!await validateCanvasModelPrompt(gen, prompt, refs, opts)) return;
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const pendingIds = Array.from({length:count}, () => uid('p'));
@@ -12247,11 +12267,12 @@ async function runGeneratorLegacy(genId, opts={}){
         };
         const quality = normalizedImageQuality(gen.quality);
         if(quality) payload.quality = quality;
+        await ModelPromptLimits.validate(payload);
         const results = await Promise.all(Array.from({length:count}, () => fetch('/api/online-image', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify(payload)
-        }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('canvas.generationFailed'))); return r.json(); })));
+        }).then(async r => { if(!r.ok) throw await ModelPromptLimits.responseError(r); return r.json(); })));
         const images = results.flatMap(result => result.images || []);
         const metas = collectRunMetas(out, pendingIds);
         run.request = results[0] ? requestMetaFromResult(results[0]) : {};
@@ -14136,6 +14157,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         runMs:Number(runMs || 0),
         error:error ? String(error) : '',
     };
+    ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
 }
 function renderCanvasLog(){
@@ -14170,13 +14192,13 @@ function renderCanvasLog(){
         return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''} ${deleting ? 'is-deleting' : ''}" data-canvas-log-id="${escapeAttr(log.id || '')}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.failureKind === 'validation' ? '输入校验失败' : log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${taskLabel ? `<span class="log-chip">${escapeHtml(taskLabel)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
-                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
+                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.errorMessage || log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
                 <div class="log-actions">
                     <button type="button" data-log-delete="record" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="list-x"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogRecordOnly'))}</span></button>
@@ -14313,12 +14335,13 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
+    await ModelPromptLimits.validate(payload);
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
     }, options);
-    if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
+    if(!res.ok) throw await ModelPromptLimits.responseError(res);
     return res.json();
 }
 async function createCanvasComfyTask(payload, options={}){
@@ -14448,7 +14471,8 @@ async function pollCanvasImageTask(taskId, options={}){
                 return 'succeeded';
             }
             if(data.status === 'failed'){
-                failCanvasImageTask(taskId, data.error || tr('canvas.generationFailed'), data);
+                const error = ModelPromptLimits.fromData(data);
+                failCanvasImageTask(taskId, error.message, data);
                 return 'failed';
             }
             await sleep(1800);
@@ -14474,7 +14498,7 @@ async function waitCanvasImageTaskResult(taskId, options={}){
         }
         const data = await res.json();
         if(data.status === 'succeeded') return data.result || {};
-        if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
+        if(data.status === 'failed') throw ModelPromptLimits.fromData(data);
         await sleep(1800);
     }
 }

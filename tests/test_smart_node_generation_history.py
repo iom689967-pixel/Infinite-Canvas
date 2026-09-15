@@ -114,6 +114,7 @@ applyNodeGenerationAttempt(node, oldItem, {{layout:nodeGenerationLayoutSnapshot(
 const adopted = {{current:node.currentGenerationId, image:node.images[0].url, history:node.generationHistory.length}};
 console.log(JSON.stringify({{during, afterFailure, afterSuccess, adopted}}));
 """
+        harness = (ROOT / "static/js/model-prompt-limits.js").read_text() + "\n" + harness
         completed = subprocess.run(["node", "-e", harness], cwd=ROOT, text=True, capture_output=True, check=True)
         result = json.loads(completed.stdout)
         self.assertEqual(result["during"], {"current": "v1", "image": "/old.png", "active": "generation-1000", "history": 2})

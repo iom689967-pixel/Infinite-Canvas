@@ -7930,6 +7930,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         runMs:Number(runMs || 0),
         error:error ? String(error) : ''
     };
+    ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
     if(!error && recoverStuckLoopOutputsFromLogs()) render();
     scheduleSave();
@@ -8123,13 +8124,13 @@ function renderSmartCanvasLog(){
         return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''} ${deleting ? 'is-deleting' : ''}" data-canvas-log-id="${escapeAttr(log.id || '')}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.failureKind === 'validation' ? '输入校验失败' : log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${log.model ? `<span class="log-chip">${escapeHtml(log.model)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
-                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
+                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.errorMessage || log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
                 <div class="log-actions">
                     <button type="button" data-log-delete="record" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="list-x"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogRecordOnly'))}</span></button>
@@ -9846,6 +9847,24 @@ function buildFocusEditRequest(targetNode, referenceElement, instruction, cropUr
     ].join('\n');
     return {targetImage, referenceElement:reference, instruction:String(instruction || '').trim(), prompt, refs};
 }
+async function validateSmartModelPrompt(node, prompt, refs, runSettings){
+    if(!isApiLikeEngine(runSettings.engine) || runSettings.apiKind === 'video') return true;
+    try {
+        await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
+        return true;
+    } catch(error){
+        if(ModelPromptLimits.details(error)){
+            const attempt = createNodeGenerationAttempt(node, {prompt:''}, runSettings, 'image');
+            if(attempt) finishNodeGenerationAttempt(node, 'failed', error.message, attempt.id);
+            addSmartGenerationLog({run:{nodeId:node.id, settings:runSettings}, error:error.message});
+            node.runValidation = ModelPromptLimits.details(error);
+            render();
+            scheduleSave();
+        }
+        toast(error.message);
+        return false;
+    }
+}
 async function runFocusEdit(){
     if(!focusEditActive() || focusEditSession.status === FOCUS_EDIT_RUNNING) return false;
     const target = focusEditTargetNode();
@@ -9854,6 +9873,8 @@ async function runFocusEdit(){
     if(!target || !reference || !instruction){ toast('请先选择参考元素并填写修改说明'); return false; }
     if(smartNodeInFlight(target)){ toast('目标节点正在执行其他任务'); return false; }
     const runSettings = smartSettingsForNode(target);
+    const preflight = buildFocusEditRequest(target, reference, instruction);
+    if(!await validateSmartModelPrompt(target, preflight.prompt, preflight.refs, runSettings)) return false;
     const cropUrl = await uploadFocusEditCrop(reference);
     if(!focusEditActive() || focusEditTargetNode()?.id !== target.id) return false;
     let request;
@@ -10027,7 +10048,7 @@ function renderNodeGenerationHistoryPanel(){
     const upstreamTaskIds = Array.from(new Set([selected.upstreamTaskId, ...(selected.upstreamTaskIds || [])].filter(Boolean)));
     const refs = selected.references || [];
     const details = [
-        ['状态', nodeGenerationHistoryStatusLabel(selected.status)],
+        ['状态', (selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status))],
         ['本地任务 ID', taskIds.join(' / ') || '未记录'],
         ['上游任务 ID', upstreamTaskIds.join(' / ') || '未记录'],
         ['Provider', selected.providerId || '未记录'],
@@ -10051,20 +10072,20 @@ function renderNodeGenerationHistoryPanel(){
             return `<button type="button" class="node-generation-history-card ${item.id === selected.id ? 'selected' : ''} ${adopted ? 'adopted' : ''}" data-generation-history-id="${escapeAttr(item.id)}">
                 <span class="node-generation-history-thumb">${preview ? smartPreviewImgHtml(preview.url, 240) : `<i data-lucide="${item.status === 'running' ? 'loader-2' : item.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i>`}</span>
                 <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}${item.mode === 'focus-edit' ? ' · 焦点编辑' : ''}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
-                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml(nodeGenerationHistoryStatusLabel(item.status))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml((item.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(item.status)))}</span>
             </button>`;
         }).join('')}</aside>
         <main class="node-generation-history-main">
             <div class="node-generation-history-preview">${nodeGenerationHistoryPreviewHtml(selected)}</div>
             <div class="node-generation-history-adopt-row">
-                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml(nodeGenerationHistoryStatusLabel(selected.status))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml((selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status)))}</span>
                 <button type="button" class="node-generation-history-adopt" data-node-id="${escapeAttr(node.id)}" data-generation-history-adopt="${escapeAttr(selected.id)}" ${selected.status === 'success' && !current ? '' : 'disabled'}>${current ? '当前版本' : '采纳到当前节点'}</button>
             </div>
             <dl class="node-generation-history-details">${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
             <section class="node-generation-history-section"><h3>当次提示词</h3><pre>${escapeHtml(selected.displayPrompt || selected.prompt || '未记录')}</pre></section>
             ${selected.mode === 'focus-edit' ? `<section class="node-generation-history-section"><h3>焦点编辑说明</h3><pre>${escapeHtml(selected.userInstruction || selected.displayPrompt || '未记录')}</pre></section>${nodeGenerationHistoryFocusElementHtml(selected.referenceElement)}` : ''}
             <section class="node-generation-history-section"><h3>参考素材 ${refs.length ? `(${refs.length})` : ''}</h3><div class="node-generation-history-refs">${refs.length ? refs.map(nodeGenerationHistoryReferenceHtml).join('') : '<span class="node-generation-history-missing">未记录</span>'}</div></section>
-            ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.error)}</pre></section>` : ''}
+            ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.errorMessage || selected.error)}</pre></section>` : ''}
         </main>
     </div>`;
     bindSmartPreviewImageFallbacks(content);
@@ -16648,6 +16669,7 @@ function finishNodeGenerationAttempt(node, status, error='', generationId=''){
     attempt.updatedAt = attempt.completedAt;
     if(attempt.status === 'cancelled') attempt.cancelledAt = attempt.completedAt;
     attempt.error = String(error || '').slice(0, 1200);
+    ModelPromptLimits.sanitizeHistory(attempt, error);
     clearNodeGenerationTerminalState(node, attempt.id);
     node.runFinishedAt = attempt.completedAt;
     if(!node.runStartedAt) node.runStartedAt = Number(attempt.createdAt || 0) || attempt.completedAt;
@@ -19460,6 +19482,8 @@ async function runGeneration(options={}){
     const initialRunSettings = smartSettingsForNode(node);
     const includeSelf = Boolean(options?.includeSelf) || smartRunSelfRequirement(node, initialRunSettings).required;
     setSmartRunIntent(includeSelf ? SMART_RUN_INTENT_CONTINUE_EDIT : SMART_RUN_INTENT_REGENERATE, node);
+    const preflightRequest = buildPromptRequest(node, null, false, smartLoopContext, {includeSelf});
+    if(!await validateSmartModelPrompt(node, preflightRequest.prompt, preflightRequest.refs, initialRunSettings)) return;
     try {
         await materializeSmartCanvasReferenceEdges(node.id, initialRunSettings);
     } catch(error){
@@ -19491,6 +19515,8 @@ async function runGeneration(options={}){
             customSize:`${outpaintSize.width}x${outpaintSize.height}`
         };
     }
+    if(!await validateSmartModelPrompt(node, prompt, refs, settings)){ settings = previousSettings; return; }
+    delete node.runValidation;
     const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs);
     const logKind = isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 'video' : 'image';
     const runLog = smartRunSnapshot(node, prompt, refs, logKind);
@@ -19633,7 +19659,7 @@ async function runGeneration(options={}){
                 scheduleSave();
                 return;
             }
-            if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
+            if(!(pendingNode.images || []).length) throw new Error(generationAttempt?.errorMessage || generationAttempt?.error || tr('smart.errNoOutImages'));
             if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
             addSmartGenerationLog({run:runLog, outputs:pendingNode.images || [], runMs:nowMs() - runLogStart});
@@ -19818,6 +19844,7 @@ function comfyFieldKind(field){
     return 'setting';
 }
 async function runApiGeneration(prompt, refs, runSettings=settings){
+    await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
@@ -19843,7 +19870,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         reference_images:imageRefs
     };
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw await ModelPromptLimits.responseError(r);
         return r.json();
     })));
     return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
@@ -20812,6 +20839,7 @@ async function pollSmartCanvasTask(taskId){
             if(task.status === 'canceled') throw new SmartTaskCancelledSignal();
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
+                if(task.validation) throw ModelPromptLimits.fromData(task);
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
                 if(recoverTaskId && !smartTaskHasTerminalFailure({status:task.upstream_status})){
                     throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
@@ -20920,7 +20948,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             node = liveNodeGenerationState(node);
             if(!node || node.id !== nodeId) return;
             const liveTask = smartPendingTasks(node).find(item => item.taskId === task.taskId);
-            if(!liveTask) return;
+            if(!liveTask){ if(ModelPromptLimits.details(e)) throw e; return; }
             if(e && e.smartTaskCancelled){
                 const attempt = nodeGenerationAttemptForTask(node, liveTask.taskId);
                 if(attempt?.status === 'running'){

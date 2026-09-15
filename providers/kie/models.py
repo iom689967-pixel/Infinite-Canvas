@@ -6,6 +6,7 @@ from a browser request.
 """
 
 from copy import deepcopy
+from providers.prompt_limits import validate_model_prompt
 
 
 KIE_BASE_URL = "https://api.kie.ai"
@@ -190,6 +191,7 @@ def build_create_payload(model, prompt, reference_urls=None, aspect_ratio="", re
             resolution=resolution,
             output_format=output_format,
         )
+    validate_model_prompt("kie", kie_model, model_input["prompt"], len(references))
     return {
         "model": kie_model,
         "input": model_input,

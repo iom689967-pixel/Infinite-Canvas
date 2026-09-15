@@ -87,6 +87,7 @@ finishNodeGenerationAttempt(node, 'cancelled', 'cancel', cancelled.id);
 const cancelledResult = {{status:cancelled.status, image:node.images[0].url, current:node.currentGenerationId}};
 console.log(JSON.stringify({{successResult, failedResult, cancelledResult}}));
 """
+        harness = (ROOT / "static/js/model-prompt-limits.js").read_text() + "\n" + harness
         completed = subprocess.run(["node", "-e", harness], cwd=ROOT, text=True, capture_output=True, check=True)
         cls.history_result = json.loads(completed.stdout)
 
