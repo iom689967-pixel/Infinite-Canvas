@@ -20,23 +20,26 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from public_beta import create_app
 from public_beta_store import BetaConfig,GatewayStore
 from public_beta_ipc import SupervisorClient
-from public_beta_mail import MockMailer
+from public_beta_mail import MockMailer,ResendMailer
 from instance_auth import password_hash
 from test_instance_isolation import free_port
 
 
 def main():
     program=Path(__file__).resolve().parents[1]
+    resend_mock='--resend-http-mock' in sys.argv
+    mode='resend' if resend_mock else 'mock'
+    address_domain='example.org' if resend_mock else 'example.test'
     with tempfile.TemporaryDirectory(prefix='mio-email-browser-') as temporary:
         root=Path(temporary);port=free_port();password=secrets.token_urlsafe(24)
         secret=root/'password.txt';secret.write_text(password);secret.chmod(0o600)
         env={'PATH':os.environ.get('PATH',os.defpath),'PUBLIC_BETA_ROOT':str(root/'gateway'),
              'PUBLIC_BETA_INSTANCES_ROOT':str(root/'instances'),'PUBLIC_BETA_BACKUP_ROOT':str(root/'backups'),
              'PUBLIC_BETA_SUPERVISOR_SOCKET':str(root/'gateway/ctl.sock'),'GATEWAY_PORT':str(port),
-             'MIO_MAIL_MODE':'mock','MIN_FREE_DISK_BYTES':'0','PYTHONDONTWRITEBYTECODE':'1'}
+             'MIO_MAIL_MODE':mode,'MIN_FREE_DISK_BYTES':'0','PYTHONDONTWRITEBYTECODE':'1'}
         cfg=BetaConfig(root/'gateway',root/'instances',port=port,backup_root=root/'backups',
-                       supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'],mail_mode='mock',min_free_disk=0,
-                       register_limit=100,login_limit=100)
+                       supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'],mail_mode=mode,min_free_disk=0,
+                       register_limit=100,login_limit=100,resend_cooldown=1)
         marker=Path('/private/tmp/mio-email-browser-current.json')
         marker.write_text(json.dumps({'root':str(root),'origin':cfg.origin}));marker.chmod(0o600)
         with open(root/'fixture.log','w') as log:
@@ -46,21 +49,41 @@ def main():
                 subprocess.run([sys.executable,str(program/'public_beta_daemon.py'),'ready'],cwd=program,env=env,stdout=log,stderr=log,check=True)
                 store=GatewayStore(cfg);control=SupervisorClient(store)
                 control.call('provision',username='legacy',password_hash=password_hash(password))
-                mail=MockMailer();app=create_app(cfg,mailer=mail)
+                mail=MockMailer();api_status={'status':202,'requests':0}
+                if resend_mock:
+                    messages=mail.messages
+                    async def resend_transport(request):
+                        if str(request.url)!='https://api.resend.com/emails':raise RuntimeError('unexpected test endpoint')
+                        api_status['requests']+=1
+                        if api_status['status']!=202:return httpx.Response(api_status['status'],json={'message':'synthetic upstream private error'})
+                        data=json.loads(request.content)
+                        link=next(line for line in data['text'].splitlines() if line.startswith(cfg.origin+'/verify-email#token='))
+                        messages.append({'recipient':data['to'][0],'link':link,'minutes':60})
+                        return httpx.Response(202,json={'id':'synthetic-message-id'})
+                    mail=ResendMailer({'MIO_RESEND_API_KEY':'synthetic-browser-key','MIO_MAIL_FROM':'Mio Canvas <noreply@mio-canvas.eu.cc>'},
+                                      sending_domain='mio-canvas.eu.cc',transport=httpx.MockTransport(resend_transport))
+                    mail.messages=messages
+                app=create_app(cfg,mailer=mail)
                 async def inbox(request):
                     user=request.path_params['username']
                     if user not in {'alice','bob'}:return JSONResponse({},404)
-                    exists=any(m['recipient']==user+'@example.test' for m in mail.messages)
+                    exists=any(m['recipient']==user+'@'+address_domain for m in mail.messages)
                     if not exists:return HTMLResponse('<p>暂无测试邮件</p>')
                     # Token is never rendered in page text/DOM/URL observed by test tooling.
                     return HTMLResponse('<h1>Mock 邮件</h1><p>验证你的 Mio Canvas 邮箱</p><button id="verify">验证邮箱</button><script>document.querySelector("#verify").onclick=async()=>{const r=await fetch("/__test/mail-token/'+user+'");const d=await r.json();location.href=d.link;};</script>')
                 async def token(request):
                     user=request.path_params['username']
                     if user not in {'alice','bob'}:return JSONResponse({},404)
-                    message=next((m for m in reversed(mail.messages) if m['recipient']==user+'@example.test'),None)
+                    message=next((m for m in reversed(mail.messages) if m['recipient']==user+'@'+address_domain),None)
                     return JSONResponse({'link':message['link']} if message else {},status_code=200 if message else 404,headers={'Cache-Control':'no-store'})
                 from starlette.routing import Route
                 app.router.routes[0:0]=[Route('/__test/inbox/{username}',inbox),Route('/__test/mail-token/{username}',token)]
+                if resend_mock:
+                    async def mail_status(request):
+                        value=request.path_params['status']
+                        if value not in {'202','500'}:return JSONResponse({},400)
+                        api_status['status']=int(value);return JSONResponse({'mock_http_status':int(value)})
+                    app.router.routes.insert(0,Route('/__test/mail-status/{status}',mail_status,methods=['POST']))
                 log_config={'version':1,'disable_existing_loggers':False,
                     'handlers':{'fixture':{'class':'logging.StreamHandler','stream':log}},
                     'loggers':{'uvicorn.error':{'handlers':['fixture'],'level':'WARNING','propagate':False},
@@ -71,15 +94,16 @@ def main():
                     try:
                         if httpx.get(cfg.origin+'/healthz',trust_env=False).status_code==200:break
                     except httpx.HTTPError:time.sleep(.1)
-                print(json.dumps({'origin':cfg.origin,'mail_mode':'mock','real_smtp_calls':0,'real_model_calls':0}),flush=True)
+                print(json.dumps({'origin':cfg.origin,'mail_mode':mode,'http_transport_mock':resend_mock,'real_mail_calls':0,'real_smtp_calls':0,'real_model_calls':0}),flush=True)
                 for line in sys.stdin:
                     if line.strip()=='finish':break
                     if line.strip()=='status':
                         with store.db() as db:
                             users=[dict(r) for r in db.execute('SELECT username,status,email_status FROM users ORDER BY username')]
                             count=db.execute('SELECT COUNT(*) FROM instances').fetchone()[0]
-                        secrets_to_check=[password]+[m['link'].split('token=')[-1] for m in mail.messages]
+                        secrets_to_check=[password,'synthetic-browser-key']+[m['link'].split('token=')[-1] for m in mail.messages]
                         print(json.dumps({'users':users,'instance_count':count,'messages':len(mail.messages),'real_smtp_calls':0,'real_model_calls':0,
+                                          'resend_mock_requests':api_status['requests'],'real_mail_calls':0,
                                           'log_secret_free':not any(value in (root/'fixture.log').read_text() for value in secrets_to_check)}),flush=True)
             finally:
                 if server:server.should_exit=True

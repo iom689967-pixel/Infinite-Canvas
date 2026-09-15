@@ -48,13 +48,14 @@
 
 ## 邮件及安全阀
 
-生产必须显式配置 SMTP；默认 disabled。公网 origin 下 mock 不接受注册。配置不完整时在创建 pending 前返回「邮件服务暂不可用，请稍后重试」。
+生产必须显式配置邮件后端；默认 disabled。现已新增 Resend HTTPS，配置和传输边界见 [Resend 邮件后端](resend-mail-backend.md)，通用 SMTP 仍保留。
+公网 origin 下 mock 不接受注册。配置不完整时在创建 pending 前返回「邮件服务暂不可用，请稍后重试」。
 SMTP 连接失败不会回显原错误；保留 bounded pending 供 resend/到期清理，并使此次 token 失效。
 SMTP 不自动重试，不开启协议 debug。凭证只从私有 env 读取，不写 SQLite、Instance、Provider、页面、日志。
 
 | 配置 | 默认值 |
 | --- | --- |
-| MIO_MAIL_MODE | disabled（生产 smtp，本地 mock） |
+| MIO_MAIL_MODE | disabled（生产 resend 或 smtp，本地 mock） |
 | MIO_SMTP_HOST / USERNAME / PASSWORD / FROM | 必须由管理员配置 |
 | MIO_SMTP_PORT | 587 |
 | MIO_SMTP_TLS | starttls（另支持 ssl，均校验证书） |

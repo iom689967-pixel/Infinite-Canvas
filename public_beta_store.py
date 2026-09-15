@@ -103,8 +103,8 @@ class BetaConfig:
             raise ValueError('Supervisor socket 必须为绝对路径')
         if type(self.idle_seconds) is not int or self.idle_seconds < 0:
             raise ValueError('Idle timeout 必须是非负整数')
-        if self.mail_mode not in {'disabled', 'mock', 'smtp'}:
-            raise ValueError('邮件模式必须为 disabled、mock 或 smtp')
+        if self.mail_mode not in {'disabled', 'mock', 'smtp', 'resend'}:
+            raise ValueError('邮件模式必须为 disabled、mock、smtp 或 resend')
         for value in (self.max_pending_registrations, self.verification_ttl, self.pending_ttl, self.resend_cooldown, self.resend_limit):
             if type(value) is not int or value < 1:
                 raise ValueError('邮箱验证限制必须为正整数')
