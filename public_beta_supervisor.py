@@ -86,6 +86,11 @@ class Supervisor:
         if self.store.username(name)!=name or not isinstance(encoded,str) or not re.fullmatch(r'scrypt\$131072\$8\$1\$[0-9a-f]{64}\$[0-9a-f]{128}',encoded):
             raise BetaError('注册预留字段不正确')
         with self.locked():
+            with self.store.db() as db:
+                existing=db.execute('''SELECT u.id,u.password_hash,i.status FROM users u JOIN email_code_pending p ON p.user_id=u.id
+                    JOIN instances i ON i.user_id=u.id WHERE u.username=? AND u.status='active' AND p.completed_at IS NOT NULL''',(name,)).fetchone()
+            if existing and secrets.compare_digest(existing['password_hash'],encoded) and existing['status'] in {'stopped','running','starting'}:
+                return existing['id']  # Concurrent first visits share the one server-owned instance.
             if shutil.disk_usage(self.config.instances_root).free < self.config.min_free_disk:
                 raise BetaError('服务器存储资源不足，暂时停止新注册',503)
             instance=self.store.reserve(name,encoded,self.allocate())
@@ -125,7 +130,7 @@ class Supervisor:
     def recover_incomplete(self):
         with self.locked():
             with self.store.db() as db:
-                rows=[dict(r) for r in db.execute("SELECT i.* FROM instances i JOIN users u ON i.user_id=u.id WHERE u.status='provisioning'")]
+                rows=[dict(r) for r in db.execute("SELECT i.* FROM instances i JOIN users u ON i.user_id=u.id WHERE u.status='provisioning' OR i.status IN ('provisioning','provisioning-owned')")]
             for instance in rows:
                 root=self.root(instance)
                 marker=root/'.instance.json'

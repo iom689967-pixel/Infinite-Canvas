@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from html import escape
 import json
+import re
 import os
 from pathlib import Path
 import secrets
@@ -13,6 +14,8 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 import httpx
 import uvicorn
 from starlette.responses import HTMLResponse,JSONResponse
@@ -39,7 +42,7 @@ def main():
              'MIO_MAIL_MODE':mode,'MIN_FREE_DISK_BYTES':'0','PYTHONDONTWRITEBYTECODE':'1'}
         cfg=BetaConfig(root/'gateway',root/'instances',port=port,backup_root=root/'backups',
                        supervisor_socket=env['PUBLIC_BETA_SUPERVISOR_SOCKET'],mail_mode=mode,min_free_disk=0,
-                       register_limit=100,login_limit=100,resend_cooldown=1)
+                       register_limit=100,login_limit=100)
         marker=Path('/private/tmp/mio-email-browser-current.json')
         marker.write_text(json.dumps({'root':str(root),'origin':cfg.origin}));marker.chmod(0o600)
         with open(root/'fixture.log','w') as log:
@@ -53,12 +56,13 @@ def main():
                 if resend_mock:
                     messages=mail.messages
                     async def resend_transport(request):
+                        if '--slow-mail' in sys.argv:await asyncio.sleep(.5)
                         if str(request.url)!='https://api.resend.com/emails':raise RuntimeError('unexpected test endpoint')
                         api_status['requests']+=1
                         if api_status['status']!=202:return httpx.Response(api_status['status'],json={'message':'synthetic upstream private error'})
                         data=json.loads(request.content)
-                        link=next(line for line in data['text'].splitlines() if line.startswith(cfg.origin+'/verify-email#token='))
-                        messages.append({'recipient':data['to'][0],'link':link,'minutes':60})
+                        code=re.search(r'^([0-9]{6})$',data['text'],re.MULTILINE).group(1)
+                        messages.append({'recipient':data['to'][0],'code':code,'minutes':10})
                         return httpx.Response(202,json={'id':'synthetic-message-id'})
                     mail=ResendMailer({'MIO_RESEND_API_KEY':'synthetic-browser-key','MIO_MAIL_FROM':'Mio Canvas <noreply@mio-canvas.eu.cc>'},
                                       sending_domain='mio-canvas.eu.cc',transport=httpx.MockTransport(resend_transport))
@@ -66,18 +70,30 @@ def main():
                 app=create_app(cfg,mailer=mail)
                 async def inbox(request):
                     user=request.path_params['username']
-                    if user not in {'alice','bob'}:return JSONResponse({},404)
+                    if user not in {'alice','bob','carol'}:return JSONResponse({},404)
                     exists=any(m['recipient']==user+'@'+address_domain for m in mail.messages)
                     if not exists:return HTMLResponse('<p>暂无测试邮件</p>')
-                    # Token is never rendered in page text/DOM/URL observed by test tooling.
-                    return HTMLResponse('<h1>Mock 邮件</h1><p>验证你的 Mio Canvas 邮箱</p><button id="verify">验证邮箱</button><script>document.querySelector("#verify").onclick=async()=>{const r=await fetch("/__test/mail-token/'+user+'");const d=await r.json();location.href=d.link;};</script>')
+                    return HTMLResponse('<h1>Mock 邮箱</h1><p>测试验证码已在内存收取。</p>',headers={'Cache-Control':'no-store'})
                 async def token(request):
                     user=request.path_params['username']
-                    if user not in {'alice','bob'}:return JSONResponse({},404)
+                    if user not in {'alice','bob','carol'}:return JSONResponse({},404)
                     message=next((m for m in reversed(mail.messages) if m['recipient']==user+'@'+address_domain),None)
-                    return JSONResponse({'link':message['link']} if message else {},status_code=200 if message else 404,headers={'Cache-Control':'no-store'})
+                    return JSONResponse({'code':message['code']} if message else {},status_code=200 if message else 404,headers={'Cache-Control':'no-store'})
                 from starlette.routing import Route
-                app.router.routes[0:0]=[Route('/__test/inbox/{username}',inbox),Route('/__test/mail-token/{username}',token)]
+                # Only this explicit loopback harness owns these routes. Nothing
+                # is wired into the production create_app or environment flags.
+                clock_offset={'seconds':0};real_time=time.time
+                # Advance only code deadlines, never the Gateway/worker SSO clock.
+                clock=patch('public_beta_email_codes.time',SimpleNamespace(time=lambda:real_time()+clock_offset['seconds']))
+                clock.start()
+                code_rng=patch('public_beta_email_codes.secrets.randbelow',side_effect=[38421,742813,918364,627183,435928,821637])
+                code_rng.start()
+                async def advance(request):
+                    data=await request.json()
+                    if set(data)!={'seconds'} or data['seconds'] not in {60,61,600}:return JSONResponse({},400)
+                    clock_offset['seconds']+=data['seconds'];return JSONResponse({'test_clock_advanced':True})
+                app.router.routes[0:0]=[Route('/__test/inbox/{username}',inbox),Route('/__test/mail-code/{username}',token),
+                                      Route('/__test/advance',advance,methods=['POST'])]
                 if resend_mock:
                     async def mail_status(request):
                         value=request.path_params['status']
@@ -101,11 +117,17 @@ def main():
                         with store.db() as db:
                             users=[dict(r) for r in db.execute('SELECT username,status,email_status FROM users ORDER BY username')]
                             count=db.execute('SELECT COUNT(*) FROM instances').fetchone()[0]
-                        secrets_to_check=[password,'synthetic-browser-key']+[m['link'].split('token=')[-1] for m in mail.messages]
+                        secrets_to_check=[password,'synthetic-browser-key']+[m['code'] for m in mail.messages]
+                        with store.db() as db:
+                            secrets_to_check += [r[0] for r in db.execute('SELECT code_hmac FROM email_code_pending WHERE code_hmac IS NOT NULL')]
+                            for row in db.execute('SELECT code_history FROM email_code_pending'):
+                                secrets_to_check += [entry[1] for entry in json.loads(row[0])]
                         print(json.dumps({'users':users,'instance_count':count,'messages':len(mail.messages),'real_smtp_calls':0,'real_model_calls':0,
                                           'resend_mock_requests':api_status['requests'],'real_mail_calls':0,
                                           'log_secret_free':not any(value in (root/'fixture.log').read_text() for value in secrets_to_check)}),flush=True)
             finally:
+                if 'clock' in locals():clock.stop()
+                if 'code_rng' in locals():code_rng.stop()
                 if server:server.should_exit=True
                 if thread:thread.join(timeout=15)
                 if control:

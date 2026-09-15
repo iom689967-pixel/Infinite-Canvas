@@ -76,6 +76,11 @@ class BetaConfig:
     pending_ttl: int = 86400
     resend_cooldown: int = 60
     resend_limit: int = 3
+    email_code_ttl: int = 600
+    email_code_max_attempts: int = 5
+    email_code_resend_seconds: int = 60
+    email_code_hourly_limit: int = 5
+    email_code_ip_hourly_limit: int = 20
 
     def __post_init__(self):
         self.root = private_directory(self.root)
@@ -110,6 +115,12 @@ class BetaConfig:
                 raise ValueError('邮箱验证限制必须为正整数')
         if not 300 <= self.verification_ttl <= 3600 or not self.verification_ttl <= self.pending_ttl <= 604800:
             raise ValueError('验证链接须为 5–60 分钟，pending 有效期不超过 7 天')
+        for value in (self.email_code_ttl,self.email_code_max_attempts,self.email_code_resend_seconds,
+                      self.email_code_hourly_limit,self.email_code_ip_hourly_limit):
+            if type(value) is not int or value < 1:
+                raise ValueError('邮箱验证码限制必须为正整数')
+        if not 60<=self.email_code_ttl<=3600 or self.email_code_ttl>self.pending_ttl or self.email_code_max_attempts>10:
+            raise ValueError('邮箱验证码有效期或尝试次数无效')
         if self.registration_mode == 'invite' and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
             raise ValueError('邀请码模式需要 SHA-256 摘要')
         if self.invite_hash and not re.fullmatch(r'[0-9a-f]{64}',self.invite_hash):
@@ -167,7 +178,12 @@ class BetaConfig:
                  'max_pending_registrations':'MAX_PENDING_REGISTRATIONS',
                  'verification_ttl':'MIO_EMAIL_VERIFICATION_TTL_SECONDS',
                  'pending_ttl':'MIO_PENDING_TTL_SECONDS', 'resend_cooldown':'MIO_EMAIL_RESEND_COOLDOWN_SECONDS',
-                 'resend_limit':'MIO_EMAIL_RESEND_LIMIT'}
+                 'resend_limit':'MIO_EMAIL_RESEND_LIMIT',
+                 'email_code_ttl':'MIO_EMAIL_CODE_TTL_SECONDS',
+                 'email_code_max_attempts':'MIO_EMAIL_CODE_MAX_ATTEMPTS',
+                 'email_code_resend_seconds':'MIO_EMAIL_CODE_RESEND_SECONDS',
+                 'email_code_hourly_limit':'MIO_EMAIL_CODE_HOURLY_LIMIT',
+                 'email_code_ip_hourly_limit':'MIO_EMAIL_CODE_IP_HOURLY_LIMIT'}
         values = {key:int(env[name]) for key,name in names.items() if name in env}
         return cls(Path(env.get('PUBLIC_BETA_ROOT', '~/.infinite-canvas/public-beta')).expanduser(),
                    Path(env.get('PUBLIC_BETA_INSTANCES_ROOT', '~/.infinite-canvas/instances')).expanduser(),
@@ -282,17 +298,23 @@ class GatewayStore:
         root = self.config.instances_root / iid
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            if self.capacity(db)['active_seats'] >= self.config.max_users:
-                raise BetaError('当前 Mio Canvas Beta 名额已满。',409)
             existing=db.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
+            code_verified=False
             if existing:
+                code_verified=(existing['status']=='active' and existing['email_verified_at'] is not None
+                               and db.execute('SELECT 1 FROM email_code_pending WHERE user_id=? AND completed_at IS NOT NULL',(existing['id'],)).fetchone())
                 # Resume only a verified identity with its unchanged server-owned hash.
                 # This remains inside the same BEGIN IMMEDIATE seat reservation.
-                if (existing['status']!='verified_waiting' or existing['email_verified_at'] is None
+                if ((existing['status']!='verified_waiting' and not code_verified) or existing['email_verified_at'] is None
                         or not secrets.compare_digest(existing['password_hash'],encoded)):
                     raise BetaError('用户名已被使用',409)
+            # Code verification already reserved this account's seat atomically.
+            # Local provisioning must not reserve it again at the capacity edge.
+            if not code_verified and self.capacity(db)['active_seats'] >= self.config.max_users:
+                raise BetaError('当前 Mio Canvas Beta 名额已满。',409)
+            if existing:
                 uid=existing['id']
-                db.execute("UPDATE users SET status='provisioning' WHERE id=?",(uid,))
+                if not code_verified: db.execute("UPDATE users SET status='provisioning' WHERE id=?",(uid,))
             else:
                 db.execute('INSERT INTO users(id,username,password_hash,status,created_at) VALUES (?,?,?,?,?)',
                            (uid,username,encoded,'provisioning',time.time()))
@@ -314,10 +336,15 @@ class GatewayStore:
     def rollback(self, uid):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row=db.execute("SELECT email_verified_at FROM users WHERE id=? AND status='provisioning'",(uid,)).fetchone()
+            row=db.execute("""SELECT email_verified_at,status FROM users WHERE id=? AND
+                (status='provisioning' OR (status='active'
+                AND EXISTS(SELECT 1 FROM email_code_pending WHERE user_id=users.id AND completed_at IS NOT NULL)
+                AND EXISTS(SELECT 1 FROM instances WHERE user_id=users.id AND status IN ('provisioning','provisioning-owned'))))""",(uid,)).fetchone()
             if row:
                 db.execute('DELETE FROM instances WHERE user_id=?',(uid,))
-                if row['email_verified_at'] is not None:
+                if row['status']=='active':
+                    pass  # A code-verified seat/session remains valid after local initialization failure.
+                elif row['email_verified_at'] is not None:
                     db.execute("UPDATE users SET status='verified_waiting' WHERE id=?",(uid,))
                 else:
                     db.execute('DELETE FROM users WHERE id=?',(uid,))

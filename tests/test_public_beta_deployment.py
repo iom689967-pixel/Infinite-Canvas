@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-from email_helpers import complete_registration, latest_token
+from email_helpers import complete_registration, verify_registration
 
 from public_beta import create_app
 from public_beta_mail import MockMailer
@@ -69,8 +69,8 @@ class ProductionGatewayTests(unittest.IsolatedAsyncioTestCase):
         payload['invite_code']=invite
         registered=await client.post('/api/beta/register',json=payload)
         self.assertEqual(registered.status_code,200,registered.text)
-        self.assertNotIn('set-cookie',registered.headers)
-        verified=await client.post('/api/beta/verify-email',json={'token':latest_token(app)})
+        self.assertNotIn('mio_beta_session',registered.headers['set-cookie'])
+        verified=await verify_registration(client,app)
         self.assertEqual(verified.json()['status'],'verified')
         signed_in=await client.post('/api/beta/login',json={'identifier':'alice@example.org','password':PASSWORD})
         self.assertIn('Secure',signed_in.headers['set-cookie'])

@@ -5,8 +5,8 @@ from email import policy
 from email.headerregistry import Address
 from email.message import EmailMessage
 from email.parser import HeaderParser
-from html import escape
 import os
+import re
 import smtplib
 import ssl
 from urllib.parse import urlsplit
@@ -47,11 +47,13 @@ def parse_sender(value, sending_domain=None):
     raise MailUnavailable(error_class='InvalidSender')
 
 
-def verification_content(link, minutes):
+def verification_content(code, minutes):
+    if not isinstance(code,str) or not re.fullmatch(r'[0-9]{6}',code):
+        raise MailUnavailable(error_class='InvalidVerificationCode')
     return {
-        'subject':'验证你的 Mio Canvas 邮箱',
-        'text':f'欢迎使用 Mio Canvas。\n\n点击下面的链接完成邮箱验证：\n{link}\n\n验证链接将在 {minutes} 分钟后失效。\n如果不是你本人操作，可以忽略这封邮件。',
-        'html':f'<p>欢迎使用 Mio Canvas。</p><p><a href="{escape(link, quote=True)}">验证邮箱</a></p><p>验证链接将在 {minutes} 分钟后失效。</p><p>如果不是你本人操作，可以忽略这封邮件。</p>',
+        'subject':'你的 Mio Canvas 验证码',
+        'text':f'Mio Canvas\n\n你的邮箱验证码是：\n{code}\n\n验证码将在 {minutes} 分钟后失效。\n如果不是你本人操作，请忽略这封邮件。',
+        'html':f'<h1>Mio Canvas</h1><p>你的邮箱验证码是：</p><p style="font:700 32px monospace;letter-spacing:8px">{code}</p><p>验证码将在 {minutes} 分钟后失效。</p><p>如果不是你本人操作，请忽略这封邮件。</p>',
     }
 
 
@@ -59,7 +61,7 @@ class UnavailableMailer:
     def ready(self):
         raise MailUnavailable()
 
-    def send(self, recipient, link, minutes):
+    def send(self, recipient, code, minutes):
         self.ready()
 
 
@@ -71,8 +73,9 @@ class MockMailer:
     def ready(self):
         pass
 
-    def send(self, recipient, link, minutes):
-        self.messages.append({'recipient': recipient, 'link': link, 'minutes': minutes})
+    def send(self, recipient, code, minutes):
+        verification_content(code,minutes)
+        self.messages.append({'recipient': recipient, 'code': code, 'minutes': minutes})
 
 
 class SMTPMailer:
@@ -96,10 +99,10 @@ class SMTPMailer:
         except (ValueError, TypeError):
             raise MailUnavailable() from None
 
-    def send(self, recipient, link, minutes):
+    def send(self, recipient, code, minutes):
         self.ready()
         sender,envelope=parse_sender(self.sender,self.sending_domain)
-        content=verification_content(link,minutes)
+        content=verification_content(code,minutes)
         message = EmailMessage()
         message['Subject'] = content['subject']
         message['From'] = sender
@@ -152,13 +155,13 @@ class ResendMailer:
                 # The response body and upstream message id are unnecessary. Never read/log them.
                 return response.status_code
 
-    async def asend(self, recipient, link, minutes):
+    async def asend(self, recipient, code, minutes):
         self.ready()
         sender,_=parse_sender(self.sender,self.sending_domain)
         error_class=None;status=None
         try:
             _,recipient=normalize_email(recipient)
-            payload={'from':sender,'to':[recipient],**verification_content(link,minutes)}
+            payload={'from':sender,'to':[recipient],**verification_content(code,minutes)}
             status=await asyncio.wait_for(self._request(payload),timeout=self.TIMEOUT_SECONDS)
         except Exception as exc:
             error_class=type(exc).__name__
@@ -168,13 +171,13 @@ class ResendMailer:
         if not 200<=status<300:
             raise MailUnavailable(provider='resend',status_code=status,error_class='HTTPStatusError')
 
-    def send(self, recipient, link, minutes):
+    def send(self, recipient, code, minutes):
         # Existing Gateway register/resend operations run in asyncio.to_thread; CLI is synchronous.
         # Keep their pending/token transaction logic unchanged while using async HTTPS internally.
         try: asyncio.get_running_loop()
         except RuntimeError: pass
         else: raise MailUnavailable(provider='resend',error_class='AsyncContextRequired')
-        asyncio.run(self.asend(recipient,link,minutes))
+        asyncio.run(self.asend(recipient,code,minutes))
 
 
 def mailer_for(config):

@@ -23,7 +23,7 @@ from public_beta_supervisor import Supervisor
 ENV={'MIO_RESEND_API_KEY':'synthetic-resend-key-only',
      'MIO_MAIL_FROM':'Mio Canvas <noreply@mio-canvas.eu.cc>'}
 DOMAIN='mio-canvas.eu.cc'
-LINK='https://mio-canvas.eu.cc/verify-email#token=synthetic-verification-token'
+LINK='038421'  # Synthetic verification content, now a code rather than a token URL.
 
 
 class SenderTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class SenderTests(unittest.TestCase):
 
     def test_existing_mock_backend_unchanged(self):
         mail=MockMailer();mail.send('alice@example.test',LINK,60)
-        self.assertEqual(mail.messages[-1]['link'],LINK)
+        self.assertEqual(mail.messages[-1]['code'],LINK)
 
     def test_new_mode_loaded_from_env_and_smtp_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,7 +118,8 @@ class ResendTests(unittest.IsolatedAsyncioTestCase):
             body=json.loads(request.content)
             self.assertEqual(set(body),{'from','to','subject','html','text'})
             self.assertEqual(body['from'],ENV['MIO_MAIL_FROM']);self.assertEqual(body['to'],['alice@example.org'])
-            self.assertIn(LINK,body['text']);self.assertIn('验证邮箱',body['html'])
+            self.assertIn(LINK,body['text']);self.assertIn(LINK,body['html'])
+            self.assertNotIn('token=',body['html']);self.assertEqual(body['subject'],'你的 Mio Canvas 验证码')
             return httpx.Response(202)
         mail=self.mail(handler,{**ENV,'MIO_RESEND_API_URL':'https://attacker.example.org'})
         await mail.asend('alice@example.org',LINK,60);self.assertEqual(len(requests),1)
@@ -247,7 +248,7 @@ class ResendGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code,503);self.assertEqual(result.json(),{'detail':MAIL_UNAVAILABLE})
         with app.state.store.db() as db:
             self.assertEqual(db.execute('SELECT status FROM users').fetchone()[0],'pending_verification')
-            self.assertIsNotNone(db.execute('SELECT invalidated_at FROM account_tokens').fetchone()[0])
+            self.assertIsNone(db.execute('SELECT code_hmac FROM email_code_pending').fetchone()[0])
             self.assertEqual(db.execute('SELECT COUNT(*) FROM instances').fetchone()[0],0)
             self.assertNotIn(ENV['MIO_RESEND_API_KEY'],str(list(db.execute('SELECT * FROM security_events'))))
 
@@ -267,7 +268,7 @@ class ResendGatewayTests(unittest.IsolatedAsyncioTestCase):
             finally:release.set()
             response=await registration
             self.assertEqual(response.json()['status'],'pending_verification')
-            self.assertNotIn('set-cookie',response.headers)
+            self.assertNotIn('mio_beta_session',response.headers['set-cookie'])
 
 
 if __name__=='__main__':unittest.main()

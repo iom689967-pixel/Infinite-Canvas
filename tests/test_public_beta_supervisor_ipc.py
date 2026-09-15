@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-from email_helpers import complete_registration, latest_token
+from email_helpers import complete_registration
 
 from public_beta import create_app
 from public_beta_daemon import daemon_server, dispatch

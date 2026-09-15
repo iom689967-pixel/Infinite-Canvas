@@ -23,6 +23,7 @@ from public_beta_email import EmailRegistration, RESEND_MESSAGE
 from public_beta_email_address import normalize_email
 from public_beta_mail import MockMailer, SMTPMailer, MailUnavailable, mailer_for
 from public_beta_store import GatewayStore, BetaConfig, BetaError
+from legacy_email_helpers import already_issued_link
 
 PASSWORD='Email-test-password-2026'
 
@@ -55,7 +56,9 @@ class EmailTests(unittest.TestCase):
 
     def register(self,name='alice',email=None):
         result=self.emails.register(email or name+'@example.test',name,PASSWORD,PASSWORD,'local')
-        return result,mail_token(self.mail)
+        # Preserve link-only migration coverage without generating production link mail.
+        token=already_issued_link(self.store,self.mail,self.user(name)['id'])
+        return result.data,token
 
     def user(self,name='alice'):
         with self.store.db() as db:return dict(db.execute('SELECT * FROM users WHERE username=?',(name,)).fetchone())
@@ -150,13 +153,13 @@ class EmailTests(unittest.TestCase):
         with self.store.db() as db:db.execute("UPDATE account_tokens SET purpose='reset_password'")
         self.assertEqual(self.verify(token)['status'],'invalid')
 
-    def test_resend_cooldown_and_old_token_invalidated(self):
+    def test_retired_resend_cannot_issue_new_legacy_links(self):
         _,old=self.register();response=self.emails.resend('alice@example.test','local')
         self.assertEqual(response,{'detail':RESEND_MESSAGE});self.assertEqual(len(self.mail.messages),1)
         with patch('public_beta_email.time.time',return_value=time.time()+self.cfg.resend_cooldown+1):
             self.emails.resend('alice@example.test','local')
-        fresh=mail_token(self.mail);self.assertNotEqual(old,fresh)
-        self.assertEqual(self.verify(old)['status'],'expired');self.assertEqual(self.verify(fresh)['status'],'verified')
+        self.assertEqual(len(self.mail.messages),1)
+        self.assertEqual(self.verify(old)['status'],'verified')
 
     def test_resend_unknown_invalid_verified_are_indistinguishable(self):
         _,token=self.register();self.verify(token)
@@ -225,7 +228,7 @@ class EmailTests(unittest.TestCase):
         uid=self.legacy();self.assertIsNone(self.user('legacy')['email'])
         result=self.emails.set_email(uid,'legacy@example.test')
         self.assertEqual(result,{'masked_email':'l***@example.test','email_status':'pending'})
-        self.emails.send(uid);old=mail_token(self.mail);self.emails.admin_verify(uid)
+        self.assertFalse(self.emails.send(uid));old=already_issued_link(self.store,self.mail,uid);self.emails.admin_verify(uid)
         self.assertEqual(self.verify(old)['status'],'expired')
 
     def test_provision_failure_keeps_verified_identity_and_releases_seat(self):
@@ -242,7 +245,7 @@ class EmailTests(unittest.TestCase):
             with self.assertRaises(BetaError) as e:self.register()
         self.assertEqual(e.exception.message,'邮件服务暂不可用，请稍后重试。')
         with self.store.db() as db:
-            self.assertIsNotNone(db.execute('SELECT invalidated_at FROM account_tokens').fetchone()[0])
+            self.assertIsNone(db.execute('SELECT code_hmac FROM email_code_pending').fetchone()[0])
             self.assertEqual(db.execute('SELECT COUNT(*) FROM instances').fetchone()[0],0)
 
     def test_missing_mail_configuration_fails_before_pending_creation(self):
@@ -283,7 +286,7 @@ class EmailTests(unittest.TestCase):
         for _ in range(2):
             migrated=GatewayStore(cfg);self.assertEqual(migrated.principal(token)['id'],uid)
             with migrated.db() as db:
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],1)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],2)
                 row=db.execute('SELECT * FROM users').fetchone()
                 self.assertEqual(row['password_hash'],encoded);self.assertIsNone(row['email']);self.assertEqual(row['legacy_username_login'],1)
                 instance=db.execute('SELECT * FROM instances').fetchone()
@@ -304,12 +307,12 @@ class EmailTests(unittest.TestCase):
         mail=SMTPMailer(env)
         with patch('public_beta_mail.smtplib.SMTP') as factory:
             client=factory.return_value.__enter__.return_value
-            mail.send('a@example.org','https://example.org/verify-email#token=synthetic-token',60)
+            mail.send('a@example.org','038421',10)
             client.starttls.assert_called_once();client.login.assert_called_once();client.set_debuglevel.assert_not_called()
             message=client.send_message.call_args.args[0]
             self.assertTrue(message.is_multipart());self.assertNotIn('synthetic-smtp-secret',message.as_string())
         with patch('public_beta_mail.smtplib.SMTP',side_effect=OSError('private-network-message')):
-            with self.assertRaises(MailUnavailable) as error:mail.send('a@example.org','https://example.org/',60)
+            with self.assertRaises(MailUnavailable) as error:mail.send('a@example.org','038421',10)
             self.assertEqual(str(error.exception),'')
 
 
@@ -321,11 +324,11 @@ class EmailAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):await self.client.aclose();self.tmp.cleanup()
 
-    async def test_new_register_requires_email_and_returns_no_cookie(self):
+    async def test_new_register_requires_email_and_returns_no_login_cookie(self):
         payload={'username':'alice','password':PASSWORD,'confirmation':PASSWORD}
         self.assertEqual((await self.client.post('/api/beta/register',json=payload)).status_code,400)
         response=await self.client.post('/api/beta/register',json={**payload,'email':'alice@example.test'})
-        self.assertEqual(response.status_code,200);self.assertNotIn('set-cookie',response.headers)
+        self.assertEqual(response.status_code,200);self.assertNotIn('mio_beta_session',response.headers['set-cookie'])
         for path in ('/api/beta/me','/api/canvases','/api/instance/provider-settings'):
             self.assertEqual((await self.client.get(path)).status_code,401)
 

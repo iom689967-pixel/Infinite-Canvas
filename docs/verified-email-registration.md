@@ -1,5 +1,7 @@
 # Public Beta 邮箱注册与登录
 
+> 此文记录邮箱链接 v1 的历史设计。当前注册已改为 [6 位邮箱验证码](email-verification-codes.md)；旧链接仅在迁移冻结的原 TTL 内兼容。
+
 此功能在 `codex/verified-email-auth` 开发。生产 `92e4f3e9` 不在本轮部署范围内。
 
 ## 身份与状态

@@ -1,21 +1,18 @@
-"""Verified registration orchestration; no worker lifecycle or session replacement."""
-import math
+"""Registration codes, with a bounded read-only transition for already issued links."""
 import re
-import secrets
 import sqlite3
 import time
-import uuid
 
-from instance_auth import PASSWORD_MAX_LENGTH, password_hash
 from public_beta_email_address import normalize_email, masked_email
 from public_beta_mail import MailUnavailable, MAIL_UNAVAILABLE
-from public_beta_store import BetaError, REGISTRATION_PASSWORD_MIN_LENGTH
+from public_beta_store import BetaError
+from public_beta_email_codes import HOURLY_WINDOW_SECONDS
 
-RESEND_MESSAGE = '如果该邮箱存在待验证账户，我们已经发送验证邮件。'
+RESEND_MESSAGE = '请返回注册页继续邮箱验证码验证。'
 RESULT_MESSAGES = {
     'verified': '邮箱验证成功，请登录进入 Mio Canvas。',
-    'used': '链接已使用，请登录或重新发送验证邮件。',
-    'expired': '链接已失效，请重新发送验证邮件。',
+    'used': '链接已使用，请登录。',
+    'expired': '链接已失效，请返回注册页获取验证码。',
     'invalid': '验证失败，链接无效。',
     'full': '邮箱验证成功，但当前 Beta 名额已满。',
     'waiting': '邮箱已验证，工作区初始化待管理员处理。',
@@ -25,6 +22,8 @@ RESULT_MESSAGES = {
 class EmailRegistration:
     def __init__(self, store, supervisor, mailer):
         self.store, self.config, self.supervisor, self.mailer = store, store.config, supervisor, mailer
+        from public_beta_email_codes import EmailCodes
+        self.codes=EmailCodes(self)
 
     def address(self, value):
         try:
@@ -43,76 +42,26 @@ class EmailRegistration:
             AND NOT EXISTS(SELECT 1 FROM instances WHERE user_id=users.id)""",(now,)).fetchall()
         for row in rows:
             db.execute('DELETE FROM account_tokens WHERE user_id=?',(row['id'],))
+            db.execute('DELETE FROM email_code_pending WHERE user_id=?',(row['id'],))
             db.execute('DELETE FROM users WHERE id=?',(row['id'],))
         db.execute('DELETE FROM account_tokens WHERE expires_at<?',(now-self.config.pending_ttl,))
+        db.execute('DELETE FROM email_code_limits WHERE started_at<=?',(now-HOURLY_WINDOW_SECONDS,))
         return len(rows)
 
     def register(self, email, username, password, confirmation, peer):
-        self.store.limit('registration-ip',peer,self.config.register_limit)
-        name=self.store.username(username)
-        self.store.limit('registration-name',name,3)
-        display,normalized=self.address(email)
-        if not isinstance(password,str) or not REGISTRATION_PASSWORD_MIN_LENGTH<=len(password)<=PASSWORD_MAX_LENGTH:
-            raise BetaError(f'密码长度必须为 {REGISTRATION_PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 个字符')
-        if password!=confirmation: raise BetaError('两次密码输入不一致')
-        self.ready()
-        # Preserve the existing disk safety valve even though no instance is created yet.
-        import shutil
-        if shutil.disk_usage(self.config.instances_root).free < self.config.min_free_disk:
-            raise BetaError('服务器存储资源不足，暂时停止新注册',503)
-        encoded=password_hash(password);now=time.time();uid=uuid.uuid4().hex
-        with self.store.db() as db:
-            db.execute('BEGIN IMMEDIATE');self.cleanup(db,now)
-            if db.execute('SELECT 1 FROM users WHERE username=? OR email_normalized=?',(name,normalized)).fetchone():
-                raise BetaError('邮箱或用户名已被使用，请登录或重新发送验证邮件。',409)
-            count=db.execute("SELECT COUNT(*) FROM users WHERE status IN ('pending_verification','verified_waiting')").fetchone()[0]
-            if count>=self.config.max_pending_registrations:
-                raise BetaError('待验证注册数量已达上限，请稍后重试。',429)
-            db.execute('''INSERT INTO users(id,username,password_hash,status,created_at,email,email_normalized,
-                email_status,legacy_username_login,pending_expires_at) VALUES (?,?,?,'pending_verification',?,?,?,'pending',0,?)''',
-                (uid,name,encoded,now,display,normalized,now+self.config.pending_ttl))
-        self.send(uid)
-        return {'status':'pending_verification','detail':'验证邮件已发送，请检查邮箱。','masked_email':masked_email(display)}
+        return self.codes.register(email,username,password,confirmation,peer)
 
     def send(self, uid):
-        self.ready();now=time.time();raw=secrets.token_urlsafe(32);digest=self.store.digest(raw)
         with self.store.db() as db:
-            db.execute('BEGIN IMMEDIATE')
-            user=db.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone()
-            if (not user or not user['email'] or user['email_verified_at'] is not None
-                    or user['status'] not in {'pending_verification','active'}): return False
-            if user['pending_expires_at'] is not None and user['pending_expires_at']<=now: return False
-            latest=db.execute("SELECT MAX(created_at) FROM account_tokens WHERE user_id=? AND purpose='verify_email'",(uid,)).fetchone()[0]
-            if latest is not None and now-latest<self.config.resend_cooldown: return False
-            db.execute("UPDATE account_tokens SET invalidated_at=? WHERE user_id=? AND purpose='verify_email' AND used_at IS NULL AND invalidated_at IS NULL",(now,uid))
-            expires=min(now+self.config.verification_ttl,user['pending_expires_at'] or float('inf'))
-            db.execute('INSERT INTO account_tokens VALUES (?,?,?, ?,?,NULL,NULL)',(digest,uid,'verify_email',now,expires))
-            recipient=user['email']
-        # Fragment never reaches reverse-proxy/access logs. The page removes it before POST.
-        link=self.config.origin+'/verify-email#token='+raw
-        try: self.mailer.send(recipient,link,math.ceil(self.config.verification_ttl/60))
-        except MailUnavailable:
-            with self.store.db() as db:
-                db.execute('UPDATE account_tokens SET invalidated_at=? WHERE digest=?',(time.time(),digest))
-            self.store.event('email_delivery_failed',uid)
-            raise BetaError(MAIL_UNAVAILABLE,503) from None
-        self.store.event('email_verification_sent',uid)
+            row=db.execute('SELECT pending_digest FROM email_code_pending WHERE user_id=? AND completed_at IS NULL',(uid,)).fetchone()
+        if not row: return False  # No new legacy verification links, including operator sends.
+        self.codes.send(row['pending_digest'],'local-operator')
         return True
 
     def resend(self, email, peer):
         self.store.limit('resend-ip',peer,self.config.register_limit)
-        self.ready()
-        try: _,normalized=self.address(email)
-        except BetaError: normalized='invalid'
-        try: self.store.limit('resend-email',normalized,self.config.resend_limit)
-        except BetaError: return {'detail':RESEND_MESSAGE}
-        with self.store.db() as db:
-            row=db.execute('SELECT id FROM users WHERE email_normalized=?',(normalized,)).fetchone()
-        if row:
-            try: self.send(row['id'])
-            except BetaError:
-                # A mailbox-specific SMTP rejection must not become an existence oracle.
-                pass
+        # Compatibility endpoint cannot authorize code sends by email alone.
+        # Legacy pending users can re-confirm their registration password to switch.
         return {'detail':RESEND_MESSAGE}
 
     def provision(self, uid):
@@ -142,6 +91,8 @@ class EmailRegistration:
             db.execute('BEGIN IMMEDIATE')
             token=db.execute("SELECT * FROM account_tokens WHERE digest=? AND purpose='verify_email'",(digest,)).fetchone()
             if not token: state='invalid'
+            elif now>=db.execute('SELECT legacy_until FROM email_link_transition').fetchone()[0]: state='expired'
+            elif db.execute('SELECT 1 FROM email_code_pending WHERE user_id=?',(token['user_id'],)).fetchone(): state='invalid'
             elif token['used_at'] is not None: state='used'
             elif token['invalidated_at'] is not None or token['expires_at']<=now: state='expired'
             else:

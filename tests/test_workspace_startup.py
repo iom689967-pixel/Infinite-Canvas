@@ -36,7 +36,11 @@ class WorkspaceEntryTests(unittest.IsolatedAsyncioTestCase):
             page=(await f.client.get('/'+form)).text
             if form=='login': self.assertIn("location.replace('/')",page)
             else:
-                self.assertNotIn("location.replace('/')",page)
+                # The code form enters / only after verification; registration
+                # itself stays on this page and never navigates to a startup shell.
+                self.assertIn("location.replace('/')",page)
+                self.assertIn("/api/beta/verify-email-code",page)
+                self.assertIn('showPending(state)',page)
                 self.assertIn('masked_email',page)
             self.assertNotIn("location.replace('/workspace')",page)
         private=await f.client.get('/api/canvases')

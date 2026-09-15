@@ -1,5 +1,7 @@
 # Resend HTTPS 邮件后端
 
+> 传输边界保持；当前共享邮件内容为 [6 位邮箱验证码](email-verification-codes.md)，新注册不再发送验证链接。
+
 开发基线 `cb9fb33`，分支 `codex/resend-mail-backend`。本轮不部署生产，不修改生产 env，不重启服务，不发送真实邮件。
 
 ## 配置
