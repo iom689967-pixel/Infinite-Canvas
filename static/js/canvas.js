@@ -6850,7 +6850,7 @@ function ensureCanvasPromptEditor(){
                 </div>
             </header>
             <div class="prompt-editor-main">
-                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+                <textarea class="prompt-editor-textarea" data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
             </div>
             <footer class="prompt-editor-footer">
                 <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}</span>

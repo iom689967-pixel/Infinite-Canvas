@@ -623,10 +623,12 @@ TUDOU_ASYNC_IMAGE_TASK_TIMEOUT = float(os.getenv("TUDOU_ASYNC_IMAGE_TASK_TIMEOUT
 TUDOU_ASYNC_IMAGE_POLL_INTERVAL = float(os.getenv("TUDOU_ASYNC_IMAGE_POLL_INTERVAL", "4"))
 TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY", "12"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
-ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
-VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
-MAX_LLM_TEXT_CHARS = int(os.getenv("MAX_LLM_TEXT_CHARS", "100000"))
-LLM_MESSAGE_MAX_LENGTH = MAX_LLM_TEXT_CHARS
+# User generation input is measured in Python/Unicode characters, not bytes or tokens.
+PROMPT_TEXT_MAX_LENGTH = 100_000
+ONLINE_IMAGE_PROMPT_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
+VIDEO_PROMPT_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
+MAX_LLM_TEXT_CHARS = PROMPT_TEXT_MAX_LENGTH
+LLM_MESSAGE_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 
@@ -2902,7 +2904,7 @@ def rollback_update(req: RollbackRequest):
         UPDATE_LOCK.release()
 
 class GenerateRequest(BaseModel):
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
     width: int = 1024
     height: int = 1024
     workflow_json: str = "Z-Image.json"
@@ -2918,7 +2920,7 @@ class TokenRequest(BaseModel):
     token: str
 
 class CloudGenRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(max_length=PROMPT_TEXT_MAX_LENGTH)
     api_key: str = ""
     model: str = ""
     resolution: str = "1024x1024"
@@ -3131,7 +3133,7 @@ def chat_system_prompt(payload):
     return prompt or SYSTEM_PROMPT
 
 class MsGenerateRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(max_length=PROMPT_TEXT_MAX_LENGTH)
     api_key: str = ""
     model: str = "black-forest-labs/FLUX.2-klein-9B"
     image_urls: List[str] = []
@@ -3256,7 +3258,7 @@ class LocalAssetCaptionRequest(BaseModel):
     provider: str = "comfly"
     model: str = ""
     ms_model: str = ""
-    prompt: str = "描述图片"
+    prompt: str = Field(default="描述图片", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetCaptionSaveRequest(BaseModel):
     name: str = ""
@@ -3267,7 +3269,7 @@ class LocalAssetClassifyRequest(BaseModel):
     provider: str = "comfly"
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetUrlImportItem(BaseModel):
     url: str = ""
@@ -3282,7 +3284,7 @@ class LocalAssetUrlImportRequest(BaseModel):
     provider: str = "comfly"
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetFolderRequest(BaseModel):
     parent: str = ""
@@ -3355,7 +3357,7 @@ class AssetLibraryClassifyRequest(BaseModel):
     provider: str = "comfly"
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class PromptLibraryRequest(BaseModel):
     name: str = "提示词库"
@@ -8019,8 +8021,8 @@ def save_asset_classification_prompt(text):
     value = str(text or "").strip()
     if not value:
         raise HTTPException(status_code=400, detail="分类规则不能为空")
-    if len(value) > 20000:
-        raise HTTPException(status_code=400, detail="分类规则过长")
+    if len(value) > PROMPT_TEXT_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"分类规则过长：最多允许 {PROMPT_TEXT_MAX_LENGTH} 个字符")
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(ASSET_CLASSIFICATION_PROMPT_FILE, "w", encoding="utf-8") as f:
         f.write(value)

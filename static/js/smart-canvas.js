@@ -8189,10 +8189,10 @@ function closeSmartCanvasShortcuts(){
     smartShortcutModal?.classList.remove('open');
 }
 function normalizedPromptNodeText(value){
-    return String(value == null ? '' : value).slice(0, PROMPT_TEXT_MAX_LENGTH);
+    return Array.from(String(value == null ? '' : value)).slice(0, PROMPT_TEXT_MAX_LENGTH).join('');
 }
 function promptEditorCountLabel(value){
-    return `${String(value || '').length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
+    return `${Array.from(String(value || '')).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
 }
 function updatePromptEditorCount(value){
     if(promptEditorCount) promptEditorCount.textContent = promptEditorCountLabel(value);
@@ -8218,7 +8218,7 @@ function syncPromptNodeText(node, value, source=null){
         textPreview.classList.toggle('is-empty', !next);
     }
     const textCount = nodeEl?.querySelector('.text-node-count');
-    if(textCount) textCount.textContent = `${next.length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
+    if(textCount) textCount.textContent = `${Array.from(next).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
     if(nodeEl && node.type === 'smart-prompt'){
         refreshPromptNodeSegmentsUi(nodeEl, node);
         if(node.promptSplitEnabled === true){
@@ -8265,7 +8265,7 @@ function ensurePromptEditor(){
                 </div>
             </header>
             <div class="prompt-editor-main">
-                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+                <textarea class="prompt-editor-textarea" data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
             </div>
             <footer class="prompt-editor-footer">
                 <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
@@ -9208,7 +9208,7 @@ function textNodeBodyHtml(node){
         <div class="text-node-label"><span>T</span><strong>文本</strong></div>
         <div class="text-node-preview ${value ? '' : 'is-empty'}">${escapeHtml(value || '输入提示词或文本')}</div>
         <div class="text-node-footer">
-            <span class="text-node-count">${value.length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
+            <span class="text-node-count">${Array.from(value).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
             <span class="text-node-edit-hint">双击编辑文本</span>
             <button class="text-node-expand" type="button" title="展开编辑文本" aria-label="展开编辑文本"><i data-lucide="maximize-2"></i></button>
         </div>
@@ -9765,7 +9765,7 @@ function focusEditUiHtml(){
             <section class="focus-edit-section"><div class="focus-edit-section-head"><h3>参考元素</h3>${reference && !running ? '<button type="button" data-focus-reselect>重新选择</button>' : ''}</div>
                 ${reference ? `<div class="focus-edit-reference-card"><span class="focus-edit-reference-preview">${referencePreview}</span><span class="focus-edit-reference-copy"><strong>${escapeHtml(reference.label)}</strong><small>${escapeHtml(source?.title || reference.sourceNodeId || '来源图片')}</small><em>Approximate region · ${(reference.point.x * 100).toFixed(1)}%, ${(reference.point.y * 100).toFixed(1)}%</em></span>${running ? '' : '<button type="button" data-focus-remove title="删除参考元素"><i data-lucide="trash-2"></i></button>'}</div>` : '<button type="button" class="focus-edit-pick-hint" data-focus-reselect><i data-lucide="mouse-pointer-2"></i><span>请在画布中点击其他图片的局部内容</span></button>'}
             </section>
-            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction maxlength="4000" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
+            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
             <footer>${running ? `<button type="button" class="focus-edit-cancel" data-focus-cancel ${cancelling ? 'disabled' : ''}>${cancelling ? '正在取消…' : '取消任务'}</button>` : '<span>执行时会同时提交目标图、参考元素视觉与文字指令。</span>'}<button type="button" class="focus-edit-run" data-focus-run ${!reference || !focusEditSession.instruction.trim() || running ? 'disabled' : ''}>${running ? '编辑中…' : '执行焦点编辑'}</button></footer>
         </aside>${candidate}`;
 }
@@ -9787,7 +9787,8 @@ function ensureFocusEditUi(){
     });
     root.addEventListener('input', event => {
         if(event.target.matches('[data-focus-instruction]')){
-            focusEditSession.instruction = event.target.value;
+            focusEditSession.instruction = normalizedPromptNodeText(event.target.value);
+            event.target.value = focusEditSession.instruction;
             const runButton = root.querySelector('[data-focus-run]');
             if(runButton) runButton.disabled = !focusEditSession.referenceElement || !focusEditSession.instruction.trim() || focusEditSession.status === FOCUS_EDIT_RUNNING;
         }
