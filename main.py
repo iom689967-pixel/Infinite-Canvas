@@ -22,6 +22,7 @@ import time
 import shutil
 import glob
 import asyncio
+from instance_maintenance import tracked_to_thread
 import logging
 import requests
 import zipfile
@@ -229,17 +230,17 @@ async def startup_event():
     GLOBAL_LOOP = asyncio.get_running_loop()
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
-        await asyncio.to_thread(migrate_asset_library_into_dirs)
+        await tracked_to_thread(migrate_asset_library_into_dirs)
     except Exception as exc:
         print(f"资产库分组整理失败: {exc}")
     # 修复历史遗留的双重扩展名素材（foo.png.png → foo.png），否则这些卡片无法显示
     try:
-        await asyncio.to_thread(migrate_double_extension_uploads)
+        await tracked_to_thread(migrate_double_extension_uploads)
     except Exception as exc:
         print(f"修复双重扩展名素材失败: {exc}")
     # 纠正内容与扩展名不符的图片（如 WebP 内容却叫 .png），否则严格客户端解不出来
     try:
-        await asyncio.to_thread(migrate_mislabeled_image_extensions)
+        await tracked_to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
 
@@ -7845,7 +7846,7 @@ async def media_preview(url: str, w: int = 512):
             return png_path, "image/png"
 
     try:
-        out_path, media_type = await asyncio.to_thread(_build_preview)
+        out_path, media_type = await tracked_to_thread(_build_preview)
         return FileResponse(out_path, media_type=media_type)
     except Exception as exc:
         raise HTTPException(status_code=415, detail=f"无法生成预览图：{exc}") from exc
@@ -7881,7 +7882,7 @@ async def image_jpeg(url: str, w: int = 0):
         return cache_path
 
     try:
-        out_path = await asyncio.to_thread(_build)
+        out_path = await tracked_to_thread(_build)
         return FileResponse(out_path, media_type="image/jpeg")
     except Exception as exc:
         raise HTTPException(status_code=415, detail=f"无法转换图片：{exc}") from exc
@@ -9335,7 +9336,7 @@ async def video_reference_to_frame_data_urls(value, max_frames=6, max_size=768):
             "-frames:v", str(max(1, max_frames)),
             pattern
         ]
-        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=90)
+        proc = await tracked_to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=90)
         if proc.returncode != 0:
             print(f"[canvas-llm] ffmpeg frame extract failed: {proc.stderr[:300]}")
             return []
@@ -12767,7 +12768,7 @@ async def export_minimax_timeline(payload: MiniMaxTimelineExportRequest):
                     ffprobe, "-v", "error", "-select_streams", "a:0",
                     "-show_entries", "stream=index", "-of", "csv=p=0", src,
                 ]
-                probe = await asyncio.to_thread(subprocess.run, probe_cmd, capture_output=True, text=True, timeout=30)
+                probe = await tracked_to_thread(subprocess.run, probe_cmd, capture_output=True, text=True, timeout=30)
                 if probe.returncode != 0 or not (probe.stdout or "").strip():
                     preserve_audio = False
                     break
@@ -12800,7 +12801,7 @@ async def export_minimax_timeline(payload: MiniMaxTimelineExportRequest):
                     "-c:a", "aac", "-ar", "48000", "-ac", "2",
                     "-movflags", "+faststart", part_path,
                 ]
-            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
+            proc = await tracked_to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
             if proc.returncode != 0:
                 raise HTTPException(status_code=500, detail=(proc.stderr or "视频裁剪失败").strip()[:300])
             part_paths.append(part_path)
@@ -12821,7 +12822,7 @@ async def export_minimax_timeline(payload: MiniMaxTimelineExportRequest):
                 "-f", "concat", "-safe", "0", "-i", concat_path,
                 "-c", "copy", "-movflags", "+faststart", output_path,
             ]
-            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
+            proc = await tracked_to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
             if proc.returncode != 0:
                 raise HTTPException(status_code=500, detail=(proc.stderr or "视频拼接失败").strip()[:300])
         return {"url": output_url_for(filename, "output"), "name": filename, "kind": "video"}
@@ -15528,7 +15529,7 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
             CANVAS_TASKS[task_id]["status"] = "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
-        result = await asyncio.to_thread(generate, payload)
+        result = await tracked_to_thread(generate, payload)
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(str(result.get("error") or "ComfyUI 生成失败"))
         with CANVAS_TASK_LOCK:
@@ -17402,7 +17403,7 @@ async def touch_canvas(canvas_id: str):
 async def list_canvas_assets():
     # canvas_assets_index 会同步遍历并解析所有画布 JSON，放进线程池避免阻塞事件循环
     # （否则画布多时一次请求就会卡住整个 asyncio loop，连 WebSocket 一起掉线）。
-    return await asyncio.to_thread(canvas_assets_index)
+    return await tracked_to_thread(canvas_assets_index)
 
 @app.get("/api/smart-canvas/prompt-templates")
 async def smart_canvas_prompt_templates():
@@ -18583,7 +18584,7 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
             save_canvas(canvas)
             return canvas, candidate_paths, reset_node_ids
 
-    canvas, candidate_paths, reset_node_ids = await asyncio.to_thread(remove_log_record)
+    canvas, candidate_paths, reset_node_ids = await tracked_to_thread(remove_log_record)
 
     def cleanup_unreferenced_media():
         removed_files = []
@@ -18612,7 +18613,7 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
         def locked_cleanup():
             with CANVAS_LOCK:
                 return cleanup_unreferenced_media()
-        removed_files, skipped_referenced, removed_previews = await asyncio.to_thread(locked_cleanup)
+        removed_files, skipped_referenced, removed_previews = await tracked_to_thread(locked_cleanup)
 
     await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()))
     return {
@@ -20436,6 +20437,9 @@ if PATHS.explicit:
     from instance_providers import OwnProviders
     app.add_middleware(InstanceAuthMiddleware, routes=app.routes, paths=PATHS,
                        store=INSTANCE_AUTH, catalog=assistant_model_catalog, own_providers=OwnProviders(INSTANCE_MODELS))
+    if PATHS.public_beta and PATHS.maintenance:
+        from instance_maintenance import MaintenanceMiddleware
+        app.add_middleware(MaintenanceMiddleware, root=PATHS.maintenance, instance=PATHS.instance_id)
 
 if __name__ == "__main__":
     import uvicorn

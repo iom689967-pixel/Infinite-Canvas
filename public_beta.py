@@ -1,5 +1,6 @@
 """Mio Canvas Public Beta loopback Gateway; one shared UI, isolated workers."""
 import asyncio
+from instance_maintenance import tracked_to_thread
 from contextlib import asynccontextmanager
 import hmac
 import ipaddress
@@ -12,7 +13,6 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
-from starlette.background import BackgroundTask
 from starlette.websockets import WebSocketDisconnect
 
 from instance_auth import PASSWORD_MAX_LENGTH
@@ -32,9 +32,9 @@ def create_app(config, *, mailer=None):
     store=GatewayStore(config);supervisor=gateway_supervisor(store)
     @asynccontextmanager
     async def lifespan(app):
-        await asyncio.to_thread(supervisor.recover_incomplete)
+        await tracked_to_thread(supervisor.recover_incomplete)
         yield
-        await asyncio.to_thread(supervisor.close)
+        await tracked_to_thread(supervisor.close)
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.store=store;app.state.supervisor=supervisor
     emails=EmailRegistration(store,supervisor,mailer if mailer is not None else mailer_for(config))
@@ -129,14 +129,14 @@ def create_app(config, *, mailer=None):
 
     @app.get('/api/beta/email-code-pending')
     async def pending_email_code(request:Request):
-        return await asyncio.to_thread(emails.codes.status,request.cookies.get(PENDING_COOKIE,''))
+        return await tracked_to_thread(emails.codes.status,request.cookies.get(PENDING_COOKIE,''))
 
     @app.post('/api/beta/verify-email-code')
     async def verify_email_code(request:Request):
         values=await body(request)
         if set(values)!={'pending_id','code'}: raise BetaError('验证字段不正确')
         cookie=pending_cookie(request)
-        token=await asyncio.to_thread(emails.codes.verify,values['pending_id'],cookie,values['code'],request.state.beta_client_ip)
+        token=await tracked_to_thread(emails.codes.verify,values['pending_id'],cookie,values['code'],request.state.beta_client_ip)
         store.revoke(request.cookies.get(COOKIE,''))
         response=signed_in(token,status='verified')
         response.delete_cookie(PENDING_COOKIE,path='/',httponly=True,secure=config.secure,samesite='strict')
@@ -146,13 +146,13 @@ def create_app(config, *, mailer=None):
     async def resend_email_code(request:Request):
         values=await body(request)
         if set(values)!={'pending_id'}: raise BetaError('验证字段不正确')
-        return await asyncio.to_thread(emails.codes.resend,values['pending_id'],pending_cookie(request),request.state.beta_client_ip)
+        return await tracked_to_thread(emails.codes.resend,values['pending_id'],pending_cookie(request),request.state.beta_client_ip)
 
     @app.post('/api/beta/cancel-email-code')
     async def cancel_email_code(request:Request):
         values=await body(request)
         if set(values)!={'pending_id'}: raise BetaError('验证字段不正确')
-        result=await asyncio.to_thread(emails.codes.cancel,values['pending_id'],pending_cookie(request))
+        result=await tracked_to_thread(emails.codes.cancel,values['pending_id'],pending_cookie(request))
         response=JSONResponse(result)
         response.delete_cookie(PENDING_COOKIE,path='/',httponly=True,secure=config.secure,samesite='strict')
         return response
@@ -161,13 +161,13 @@ def create_app(config, *, mailer=None):
     async def verify_email(request:Request):
         values=await body(request)
         if set(values)!={'token'}: raise BetaError('验证字段不正确')
-        return await asyncio.to_thread(emails.verify,values['token'],request.state.beta_client_ip)
+        return await tracked_to_thread(emails.verify,values['token'],request.state.beta_client_ip)
 
     @app.post('/api/beta/resend-verification')
     async def resend_email(request:Request):
         values=await body(request)
         if set(values)!={'email'}: raise BetaError('验证字段不正确')
-        return await asyncio.to_thread(emails.resend,values['email'],request.state.beta_client_ip)
+        return await tracked_to_thread(emails.resend,values['email'],request.state.beta_client_ip)
 
     @app.post('/api/beta/register')
     async def register(request:Request):
@@ -179,7 +179,7 @@ def create_app(config, *, mailer=None):
             store.limit('registration-invite',request.state.beta_client_ip,config.register_limit)
         if not config.invite_valid(values.pop('invite_code','')): raise BetaError('邀请码无效',403)
         pending_cookie(request)
-        outcome=await asyncio.to_thread(emails.register,values['email'],values['username'],values['password'],values['confirmation'],request.state.beta_client_ip)
+        outcome=await tracked_to_thread(emails.register,values['email'],values['username'],values['password'],values['confirmation'],request.state.beta_client_ip)
         response=JSONResponse(outcome.data)
         response.set_cookie(PENDING_COOKIE,outcome.cookie,httponly=True,secure=config.secure,
                             samesite='strict',max_age=config.pending_ttl,path='/')
@@ -189,7 +189,7 @@ def create_app(config, *, mailer=None):
     async def login(request:Request):
         values=await body(request)
         if set(values) not in ({'identifier','password'},{'username','password'}): raise BetaError('登录字段不正确')
-        token=await asyncio.to_thread(store.login,values.get('identifier',values.get('username')),values['password'],request.state.beta_client_ip)
+        token=await tracked_to_thread(store.login,values.get('identifier',values.get('username')),values['password'],request.state.beta_client_ip)
         store.revoke(request.cookies.get(COOKIE,''))
         return signed_in(token)
 
@@ -263,9 +263,9 @@ def create_app(config, *, mailer=None):
                 AND NOT EXISTS(SELECT 1 FROM instances WHERE user_id=u.id)''',(principal['id'],)).fetchone()
         if row:
             if hasattr(supervisor,'call'):
-                await asyncio.to_thread(supervisor.call,'provision',username=row['username'],password_hash=row['password_hash'])
+                await tracked_to_thread(supervisor.call,'provision',username=row['username'],password_hash=row['password_hash'])
             else:
-                await asyncio.to_thread(supervisor.provision,row['username'],row['password_hash'])
+                await tracked_to_thread(supervisor.provision,row['username'],row['password_hash'])
 
     @app.get('/workspace')
     async def workspace_alias(request:Request):
@@ -288,7 +288,7 @@ def create_app(config, *, mailer=None):
     async def enter(request:Request):
         principal=current(request);csrf(request,principal)
         await ensure_instance(principal)
-        instance=await asyncio.to_thread(supervisor.start,principal['id'])
+        instance=await tracked_to_thread(supervisor.start,principal['id'])
         origin=f'http://127.0.0.1:{instance["assigned_port"]}'
         reply=None
         async with httpx.AsyncClient(trust_env=False,timeout=5) as client:
@@ -314,6 +314,10 @@ def create_app(config, *, mailer=None):
         origin=f'http://127.0.0.1:{instance["assigned_port"]}'
         headers={k:v for k,v in request.headers.items() if k.lower() in {'accept','content-type','range','if-range','if-none-match','if-modified-since','x-csrf-token','accept-encoding'}}
         headers['host']=f'127.0.0.1:{instance["assigned_port"]}'
+        from instance_maintenance import CURRENT_ACTIVITY
+        admission = CURRENT_ACTIVITY.get()
+        if admission:
+            headers['x-mio-maintenance-parent'] = admission.id
         if request.headers.get('origin'): headers['origin']=origin
         cookie=instance_cookie(instance)
         headers['cookie']=cookie+'='+request.cookies.get(cookie,'')
@@ -332,13 +336,22 @@ def create_app(config, *, mailer=None):
             await client.aclose();raise
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             store.revoke(request.cookies.get(COOKIE,''))
-        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified','content-range','accept-ranges'}}
+        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified','content-range','accept-ranges','x-mio-maintenance','retry-after'}}
         location=upstream.headers.get('location')
         if location:
             if location.startswith('/') and not location.startswith('//'): copied['location']=location
             else: await upstream.aclose();await client.aclose();raise BetaError('工作区重定向不可用',502)
-        async def close(): await upstream.aclose();await client.aclose()
-        response=StreamingResponse(upstream.aiter_raw(),status_code=upstream.status_code,headers=copied,background=BackgroundTask(close))
+        async def relay():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                import anyio
+                with anyio.CancelScope(shield=True):
+                    async with asyncio.timeout(5):
+                        await upstream.aclose()
+                        await client.aclose()
+        response=StreamingResponse(relay(),status_code=upstream.status_code,headers=copied)
         for value in upstream.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(value))
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             response.delete_cookie(COOKIE,path='/',httponly=True,secure=config.secure,samesite='strict')
@@ -373,6 +386,9 @@ def create_app(config, *, mailer=None):
                             media_type=mimetypes.guess_type(url)[0],headers=headers)
         return await forward(request,principal)
 
+    if config.maintenance_root:
+        from instance_maintenance import MaintenanceMiddleware
+        app.add_middleware(MaintenanceMiddleware, root=config.maintenance_root)
     return app
 
 

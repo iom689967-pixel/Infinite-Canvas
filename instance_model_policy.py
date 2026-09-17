@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, unquote, quote, quote_plus, parse_qs
 
 import httpx
 from fastapi import HTTPException
+from instance_maintenance import tracked_to_thread
 
 OUTBOUND_ENDPOINTS = ContextVar('instance_model_outbound', default=frozenset())
 
@@ -354,7 +355,7 @@ class GuardedClient:
             private = getattr(self.policy, 'private_targets', {}).get(endpoint, frozenset())
             if endpoint[0] != 'https' or (endpoint[2] != 443 and not private):
                 raise failure('download', 502)
-            resolved = await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo, endpoint[1], endpoint[2], type=socket.SOCK_STREAM), 10)
+            resolved = await asyncio.wait_for(tracked_to_thread(socket.getaddrinfo, endpoint[1], endpoint[2], type=socket.SOCK_STREAM), 10)
             addresses = {(result[4][0], endpoint[2]) for result in resolved}
             def approved(value):
                 ip = ipaddress.ip_address(value)

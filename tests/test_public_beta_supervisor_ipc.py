@@ -23,6 +23,8 @@ from public_beta_daemon import daemon_server, dispatch
 from public_beta_ipc import SupervisorClient
 from public_beta_store import BetaConfig, GatewayStore, BetaError
 from public_beta_supervisor import Supervisor
+from instance_maintenance import initialize, Maintenance
+from public_beta_maintenance import set_phase
 from test_instance_isolation import free_port
 from test_public_beta import PASSWORD
 
@@ -30,9 +32,12 @@ from test_public_beta import PASSWORD
 class SupervisorIPCTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='mio-ipc-',dir='/tmp')
-        root=Path(self.temp.name)
+        root=Path(self.temp.name).resolve()
         self.config=BetaConfig(root/'g',root/'i',port=free_port(),min_free_disk=0,
-                               mail_mode='mock',register_limit=100,login_limit=100,supervisor_socket=str(root/'g'/'ctl.sock'))
+                               mail_mode='mock',register_limit=100,login_limit=100,supervisor_socket=str(root/'g'/'ctl.sock'),
+                               maintenance_root=root/'control')
+        initialize(self.config.maintenance_root)
+        set_phase(Maintenance(self.config.maintenance_root),'open')
         self.store=GatewayStore(self.config)
         self.context=daemon_server(self.config);self.server=self.context.__enter__()
         self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.02},daemon=True);self.thread.start()
@@ -218,6 +223,7 @@ class SupervisorIPCTests(unittest.IsolatedAsyncioTestCase):
         env={'PATH':os.defpath,'PYTHONDONTWRITEBYTECODE':'1','PUBLIC_BETA_ROOT':str(self.config.root),
              'PUBLIC_BETA_INSTANCES_ROOT':str(self.config.instances_root),'PUBLIC_BETA_BACKUP_ROOT':str(self.config.backup_root),
              'GATEWAY_PORT':str(self.config.port),'PUBLIC_BETA_SUPERVISOR_SOCKET':self.config.supervisor_socket,
+             'MIO_MAINTENANCE_ROOT':str(self.config.maintenance_root),
              'MIN_FREE_DISK_BYTES':'0'}
         program=Path(__file__).resolve().parents[1]
         def spawn():return subprocess.Popen([sys.executable,str(program/'public_beta.py')],cwd=program,env=env,

@@ -65,6 +65,7 @@ class NetworkTasks(NetworkOperations):
                                     carry=carry[-guard:] if guard else ''
                                     text+=delta;yield self.app.sse_event({'type':'delta','delta':delta})
                             if carry:text+=carry;yield self.app.sse_event({'type':'delta','delta':carry})
+            execution.finish_maintenance_submission()  # Complete upstream JSON/SSE, not response headers.
             if not text.strip():raise failure('upstream',502)
             assistant=dict(id=__import__('uuid').uuid4().hex,role='assistant',content=text,created_at=self.app.now_ms(),model=payload.model,raw_usage=None)
             conversation.setdefault('messages',[]).extend([dict(id=__import__('uuid').uuid4().hex,role='user',content=payload.message,attachments=[r.model_dump() for r in payload.reference_images],created_at=self.app.now_ms()),assistant])

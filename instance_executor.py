@@ -138,10 +138,23 @@ class Execution:
             self.submitted = True
         if self.observer:
             await self.observer('before', phase, method, str(url), kwargs, None)
+        if phase == 'submit' and self.purpose == 'llm':
+            from instance_maintenance import CURRENT_ACTIVITY
+            activity = CURRENT_ACTIVITY.get()
+            if activity:
+                self.maintenance_submission = (activity.gate, activity.gate.uncertain_llm(activity.instance))
 
     async def after(self, method, url, kwargs, response):
+        if self.purpose == 'llm' and self.classify(method, url) == 'submit':
+            self.finish_maintenance_submission()
         if self.observer:
             await self.observer('after', self.classify(method, url), method, str(url), kwargs, response)
+
+    def finish_maintenance_submission(self):
+        receipt = getattr(self, 'maintenance_submission', None)
+        if receipt:
+            receipt[0].complete_llm(receipt[1])
+            self.maintenance_submission = None
 
     @contextmanager
     def activate(self):

@@ -12,6 +12,7 @@ import re
 import sys
 import sysconfig
 import tempfile
+import urllib.parse
 from threading import Lock
 from instance_model_policy import OUTBOUND_ENDPOINTS
 
@@ -65,6 +66,7 @@ class InstancePaths:
         self._lock = None
         self.public_beta = False
         self.storage_quota = None
+        self.maintenance = None
         configured_program = os.environ.get("PROGRAM_ROOT")
         if configured_program and Path(configured_program).resolve() != self.program_root:
             raise RuntimeError("PROGRAM_ROOT must match the installed source directory")
@@ -143,6 +145,13 @@ class InstancePaths:
             for rel in (".runtime/tmp", ".runtime/logs", ".runtime/home", "workflows", "API", "data"):
                 (self.data_root / rel).mkdir(parents=True, exist_ok=True, mode=0o700)
             self.public_beta = (self.data_root / '.auth/gateway-handoff.json').is_file()
+            if self.public_beta and os.environ.get('MIO_MAINTENANCE_ROOT'):
+                from instance_maintenance import Maintenance
+                root = Path(os.environ['MIO_MAINTENANCE_ROOT'])
+                if _inside(root, self.data_root) or _inside(root, self.program_root):
+                    raise RuntimeError('Maintenance root must be outside user data and release')
+                self.maintenance = Maintenance(root)  # PID identity before the OS boundary.
+                self.maintenance.state()
             self._isolate_environment()
             # Use Python's built-in MIME database, never machine/user web-server config.
             mimetypes.knownfiles = []
@@ -213,7 +222,7 @@ class InstancePaths:
         sys.dont_write_bytecode = True
 
     def allow_env_key(self, key):
-        return not self.explicit or (not key.startswith(("INSTANCE_", "PYTHON", "LD_", "DYLD_"))
+        return not self.explicit or (not key.startswith(("INSTANCE_", "MIO_", "PYTHON", "LD_", "DYLD_"))
                                     and key not in {"PROGRAM_ROOT", "HOME", "USERPROFILE", "PATH",
                                                     "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR"})
 
@@ -261,6 +270,18 @@ class InstancePaths:
             if isinstance(path, int) or path is None:
                 return
             path = os.path.realpath(os.fsdecode(path))
+            if self.maintenance:
+                from instance_maintenance import MAINTENANCE_IO
+                control = str(self.maintenance.root)
+                # A server-only capability, not another user-visible data root.
+                # No directories, state writes, arbitrary files or network grants.
+                if MAINTENANCE_IO.get() and not directory:
+                    if path == control+'/state.json' and not write:
+                        return
+                    if path == control+'/gate.lock' or path in {
+                        control+'/activity/journal.sqlite3', control+'/activity/journal.sqlite3-journal',
+                        control+'/activity/journal.sqlite3-wal', control+'/activity/journal.sqlite3-shm'}:
+                        return
             if _inside(path, root):
                 if write and path in protected:
                     raise InstanceBoundaryError("Instance identity/lock cannot be replaced")
@@ -279,7 +300,16 @@ class InstancePaths:
             raise InstanceBoundaryError("Filesystem access outside this instance is disabled")
 
         def audit(event, args):
-            if event == "open":
+            if event == 'sqlite3.connect':
+                if args[0] != ':memory:':
+                    database = os.fspath(args[0])
+                    if database.startswith('file:'):
+                        uri = urllib.parse.urlsplit(database)
+                        if uri.netloc:
+                            raise InstanceBoundaryError('SQLite network paths are disabled')
+                        database = urllib.parse.unquote(uri.path)
+                    check(database, True)
+            elif event == "open":
                 path, mode, flags = args
                 write = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
                 check(path, write)

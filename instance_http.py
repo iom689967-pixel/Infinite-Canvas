@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from instance_access import PUBLIC_STATIC, ROUTE_ACCESS, WORKBENCH_STATIC
 from instance_auth import PRINCIPAL
+from instance_maintenance import tracked_to_thread
 from instance_frontend import authenticated_html, frontend_context
 from instance_model_policy import failure as model_access_failure
 from instance_storage_quota import SERVER_FULL
@@ -128,7 +129,7 @@ class InstanceAuthMiddleware:
             except (ValueError, TypeError, AttributeError):
                 return await self.reply(scope, receive, send, JSONResponse({"detail": "账号或密码不正确"}, 401))
             peer = (scope.get("client") or ("unknown", 0))[0]
-            new_token, error = await asyncio.to_thread(self.store.login, username, password, peer)
+            new_token, error = await tracked_to_thread(self.store.login, username, password, peer)
             if error:
                 response = JSONResponse({"detail": "尝试过于频繁，请稍后再试" if error == "limited" else "账号或密码不正确"}, 429 if error == "limited" else 401)
                 if error == "limited":

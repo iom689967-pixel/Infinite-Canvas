@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from instance_auth import PRINCIPAL
+from instance_maintenance import CURRENT_ACTIVITY
 from instance_model_policy import GuardedClient, ModelPolicy, failure
 from instance_providers import task_provider_revision, legacy_task_provider_revision
 from instance_reference_diagnostics import ReferenceDiagnostics
@@ -273,11 +274,24 @@ class ControlledModels(NetworkTasks):
         return {'task_id':job['id'], 'status':'queued', 'reused':False}
 
     def launch(self, job, *, query_only=False):
+        gate = getattr(self.paths, 'maintenance', None)
+        lease = gate.child(self.paths.instance_id, 'recovery' if query_only else 'runner_'+job.get('purpose','image')) if gate else None
         cancel = asyncio.Event()
         self.cancels[job['id']] = cancel
-        self.runners[job['id']] = asyncio.create_task(self.run(job, cancel, query_only=query_only))
+        async def accepted_runner():
+            # The HTTP lease can end before downloads and result writes begin.
+            # Children must inherit the still-live runner, not the expired HTTP.
+            token = CURRENT_ACTIVITY.set(lease) if lease else None
+            try:
+                await self.run(job, cancel, query_only=query_only)
+            finally:
+                if token is not None:
+                    CURRENT_ACTIVITY.reset(token)
+        self.runners[job['id']] = asyncio.create_task(accepted_runner())
         # A queued task can be canceled before its coroutine reaches its finally block.
         def cleanup(task):
+            if lease:
+                lease.finish()
             if self.runners.get(job['id']) is task:
                 self.runners.pop(job['id'], None)
                 self.cancels.pop(job['id'], None)

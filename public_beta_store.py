@@ -81,11 +81,20 @@ class BetaConfig:
     email_code_resend_seconds: int = 60
     email_code_hourly_limit: int = 5
     email_code_ip_hourly_limit: int = 20
+    maintenance_root: Path = None
 
     def __post_init__(self):
         self.root = private_directory(self.root)
         self.instances_root = private_directory(self.instances_root)
         self.backup_root = private_directory(self.backup_root or self.root.parent/'backups')
+        if self.maintenance_root is not None:
+            self.maintenance_root = Path(self.maintenance_root).absolute()
+            program = Path(__file__).resolve().parent
+            if (self.maintenance_root.is_relative_to(program) or program.is_relative_to(self.maintenance_root)
+                    or self.maintenance_root.is_relative_to(self.instances_root)):
+                raise ValueError('维护状态必须位于 release 和用户数据目录之外')
+            # Configuration parsing never creates maintenance state. Missing or
+            # unsafe state causes the runtime gate to refuse work, not to open it.
         if self.root == self.instances_root or self.root.is_relative_to(self.instances_root) or self.instances_root.is_relative_to(self.root):
             raise ValueError('Gateway 与用户实例目录必须分离')
         for left,right in ((self.backup_root,self.root),(self.backup_root,self.instances_root)):
@@ -193,6 +202,8 @@ class BetaConfig:
                    registration_mode=env.get('PUBLIC_BETA_REGISTRATION_MODE','open').strip().lower(),
                    invite_hash=env.get('PUBLIC_BETA_INVITE_CODE_HASH','').strip().lower(),
                    supervisor_socket=supervisor_socket,
+                   maintenance_root=Path(env.get('MIO_MAINTENANCE_ROOT',
+                       str(Path(env.get('PUBLIC_BETA_ROOT', '~/.infinite-canvas/public-beta')).expanduser().parent/'release-control'))),
                    idle_seconds=int(env.get('PUBLIC_BETA_IDLE_SECONDS','0')),
                    mail_mode=env.get('MIO_MAIL_MODE','disabled').strip().lower(),
                    backup_root=Path(env.get('PUBLIC_BETA_BACKUP_ROOT','~/.infinite-canvas/backups')).expanduser(), **values)

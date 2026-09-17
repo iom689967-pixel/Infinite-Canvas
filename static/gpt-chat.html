@@ -1519,7 +1519,8 @@
                 if(!cap?.executable){alert(cap?.reason || '尚未添加此用途的个人模型，请到 API 设置配置');return;}
             }
             const input = document.getElementById('messageInput');
-            const message = input.value.trim();
+            const draft = input.value;
+            const message = draft.trim();
             if(!message) return;
             const btn = document.getElementById('sendBtn');
             btn.disabled = true;
@@ -1617,6 +1618,11 @@
                     await loadConversations();
                 }
             } catch(err) {
+                if(err.code === 'maintenance') {
+                    if(!input.value) input.value = draft;
+                    refs = [...pendingRefs, ...refs];
+                    renderRefs(); autoGrow(input);
+                }
                 renderMessages([...(currentConversation.messages || []), {role:'assistant', content:err.message || tr('chat.requestFailed')}]);
             } finally {
                 btn.disabled = false;

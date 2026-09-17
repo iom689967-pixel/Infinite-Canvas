@@ -40,10 +40,13 @@ class Supervisor:
         return root
 
     def env(self, instance):
-        return {'PATH':os.defpath,'LANG':'en_US.UTF-8','PYTHONDONTWRITEBYTECODE':'1',
+        result = {'PATH':os.defpath,'LANG':'en_US.UTF-8','PYTHONDONTWRITEBYTECODE':'1',
                 'INSTANCE_ID':instance['instance_id'],'INSTANCE_DATA_ROOT':instance['data_root'],
                 'INSTANCE_HOST':'127.0.0.1','INSTANCE_PORT':str(instance['assigned_port']),
                 'INSTANCE_AUTH_ALLOW_HTTP_LOOPBACK':'1','INSTANCE_MOCK_UPSTREAMS':self.config.mock_upstreams}
+        if getattr(self.config, 'maintenance_root', None):
+            result['MIO_MAINTENANCE_ROOT'] = str(self.config.maintenance_root)
+        return result
 
     @staticmethod
     def available(port):

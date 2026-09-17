@@ -13937,7 +13937,8 @@ function cancelCascade(nodeId){
 async function runLLMChat(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.running) return;
-    const message = (node.chatInput || '').trim();
+    const draft = node.chatInput || '';
+    const message = draft.trim();
     if(!message) return;
     node.messages = node.messages || [];
     const history = node.messages.slice();
@@ -13954,6 +13955,11 @@ async function runLLMChat(nodeId){
         scheduleSave();
     } catch(err) {
         node.running = false;
+        if(err.code === 'maintenance') {
+            if(!node.chatInput) node.chatInput = draft;
+            node.messages = history;
+            scheduleSave();
+        }
         refreshNodes([node.id]);
         alert(err.message || 'LLM 运行失败');
     }
