@@ -46,16 +46,20 @@ async def probe_settings(app, client, base_url, credential, protocol, image_mode
             if isinstance(candidate,dict) and isinstance(candidate.get('models'),list):
                 protocol, response, status, raw = 'gemini', alternate, 200, candidate
     grouped, ids = app.parse_upstream_models(raw, protocol)
+    definitions = []
     if protocol == 'runninghub':
         registry = app.runninghub_registry_items_from_raw(raw)
         if registry:
+            definitions = registry
             payload = app.runninghub_registry_payload(registry)
             grouped = {k:payload[k+'_models'] for k in ('image','chat','video')}
             ids = payload['all']
     if protocol == 'gemini' and 200 <= status < 300:
         grouped, ids, _ = await app.supplement_gemini_gateway_models(client, base, credential, grouped, ids)
-    grouped, ids = app.apply_agnes_model_defaults(base, grouped, ids)
-    grouped = app.apply_locked_recommended_model_rules(base, grouped)
+    personal = client.provider.get('personal',False) if hasattr(client,'provider') else False
+    if not personal:
+        grouped, ids = app.apply_agnes_model_defaults(base, grouped, ids)
+        grouped = app.apply_locked_recommended_model_rules(base, grouped)
     ids = [v for v in ids if MODEL_ID.fullmatch(v) and credential not in v][:200]
     grouped = {k:[v for v in values if v in ids] for k,values in grouped.items()}
     ok = 200 <= status < 300 and bool(ids)
@@ -76,10 +80,11 @@ async def probe_settings(app, client, base_url, credential, protocol, image_mode
             ok, status = True, task.status_code
         elif protocol in {'apimart','volcengine'} and action == 'probe-async':
             ok, status = False, task.status_code
-    mode = app.detect_image_request_mode(base,ids) or app.normalize_image_request_mode(image_mode)
-    if app.is_tudou_base_url(base): mode = 'tudou-async'
+    mode = app.normalize_image_request_mode(image_mode) if personal else app.detect_image_request_mode(base,ids) or app.normalize_image_request_mode(image_mode)
+    if not personal and app.is_tudou_base_url(base): mode = 'tudou-async'
     return {'ok':ok,'status':status,'status_code':status,'protocol':protocol,
             'image_request_mode':mode,'total':len(ids),'model_count':len(ids),'all':ids,
             'image_models':grouped['image'],'chat_models':grouped['chat'],'video_models':grouped['video'],
             'message':'只读目录验证通过；请保存协议与模型' if ok else '只读探测未能确认协议；请检查地址、权限或手动配置',
-            'checks':{'read_only':True}}
+            'rh_model_definitions':definitions,
+            'checks':{'read_only':True,'call_verified':False}}

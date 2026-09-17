@@ -384,7 +384,9 @@
         // 4. ModelScope 云端逻辑
         async function runCloudTask(prompt) {
             // 优先用 API 设置里集中管理的 Token（服务端）；localStorage 仅作旧版兜底
+            const personalSelection=window.PersonalModelscopeSelection?.get();
             let apiKey = '';
+            if(!personalSelection){
             try {
                 const res = await fetch('/api/config/token');
                 const data = await res.json();
@@ -397,6 +399,7 @@
                 apiKey = localStorage.getItem(MS_TOKEN_KEY) || '';
             }
             if (!apiKey) return alert(tr('studio.modelscopeTokenRequired'));
+            }
 
             const btn = document.getElementById('mainGenBtn');
             setLoading(true);
@@ -410,7 +413,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         prompt: prompt,
-                        api_key: apiKey,
+                        api_key: personalSelection ? undefined : apiKey,
+                        provider_id:personalSelection?.provider_id,model:personalSelection?.model,request_id:personalSelection ? crypto.randomUUID() : undefined,
                         resolution: `${document.getElementById('width').value}x${document.getElementById('height').value}`
                     })
                 });

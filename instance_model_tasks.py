@@ -18,7 +18,7 @@ from PIL import Image
 
 from instance_auth import PRINCIPAL
 from instance_model_policy import GuardedClient, ModelPolicy, failure
-from instance_providers import task_provider_revision
+from instance_providers import task_provider_revision, legacy_task_provider_revision
 from instance_reference_diagnostics import ReferenceDiagnostics
 from instance_storage_quota import SERVER_FULL
 from providers.kie.client import KieClient, KieAPIError
@@ -27,7 +27,11 @@ from providers.kie.tasks import poll_task, KieTaskCancelled, KieTaskError, task_
 from providers.kie.uploads import KieReferenceUploadCache, prepare_kie_references
 
 
-class ControlledModels:
+from instance_network_tasks import NetworkTasks
+from provider_capabilities import effective_protocol
+
+
+class ControlledModels(NetworkTasks):
     def __init__(self, paths, application):
         self.paths, self.app = paths, application
         self.policy = ModelPolicy(paths)
@@ -39,6 +43,10 @@ class ControlledModels:
             # No createTask is ever replayed after a process crash.
             for row in db.execute('SELECT id,data FROM jobs').fetchall():
                 job = json.loads(row['data'])
+                provider=self.policy.providers.get(job['provider_id'])
+                if provider and job.get('provider_revision')==legacy_task_provider_revision(self.policy,provider):
+                    job['provider_revision']=task_provider_revision(self.policy,provider)
+                    db.execute('UPDATE jobs SET data=? WHERE id=?',(json.dumps(job),row['id']))
                 recoverable = (bool(job['upstream']) and all(e.get('remote_done') for e in job['upstream'])
                                and not job.get('submission_uncertain') and job.get('upstream_status') != 'fail')
                 if job['status'] == 'failed' and recoverable:
@@ -79,7 +87,10 @@ class ControlledModels:
 
     def outstanding(self):
         with self.db() as db:
-            return sum(bool(json.loads(row['data']).get('outstanding')) for row in db.execute('SELECT data FROM jobs'))
+            jobs=sum(bool(json.loads(row['data']).get('outstanding')) for row in db.execute('SELECT data FROM jobs'))
+        lib=self.app.load_asset_library() if getattr(self.app,"ASSET_LIBRARY_PATH","") and Path(self.app.ASSET_LIBRARY_PATH).exists() else {}
+        assets=sum(1 for library in lib.get('libraries',[]) for category in library.get('categories',[]) for item in category.get('items',[]) for reg in item.get('registrations',{}).values() if isinstance(reg,dict) and reg.get('status') in {'Processing','SubmissionUnknown'})
+        return jobs+assets
 
     def check_capacity(self):
         if self.outstanding() + self.llm_active >= self.policy.max_concurrent:
@@ -114,7 +125,7 @@ class ControlledModels:
 
     async def llm(self, payload):
         provider, limits = self.policy.allowed(payload.provider, payload.model, 'llm')
-        if payload.videos or payload.ms_model or len(payload.message) + len(payload.system_prompt) > limits['max_text_chars']:
+        if payload.ms_model or len(payload.message) + len(payload.system_prompt) > limits['max_text_chars']:
             raise failure('limits')
         messages = []
         for item in payload.messages:
@@ -124,29 +135,48 @@ class ControlledModels:
         if sum(len(m['content']) for m in messages) + len(payload.message) + len(payload.system_prompt) > limits['max_text_chars']:
             raise failure('limits')
         self.references(payload.images, limits)
+        self.media_references(payload.videos, limits)
         self.check_capacity()
+        from instance_executor import Execution
+        execution = Execution(self, provider, payload.model, 'llm')
         self.llm_active += 1
-        client = GuardedClient(self.policy, provider, timeout=min(self.app.CANVAS_LLM_TIMEOUT, limits['timeout_seconds']))
+        selected_provider = execution.provider
+        client = execution.client()
         try:
             if payload.system_prompt:
                 messages.insert(0, {'role': 'system', 'content': payload.system_prompt})
             content = [{'type': 'text', 'text': payload.message}]
             for url in payload.images:
-                content.append({'type': 'image_url', 'image_url': {'url': self.app.reference_to_data_url({'url':url}, max_size=1536)}})
+                content.append({'type': 'image_url', 'image_url': {'url': self.app.reference_to_data_url({'url':url})}})
+            for url in payload.videos:
+                content.append({'type':'video_url','video_url':{'url':self.app.reference_to_data_url({'url':url})}})
             messages.append({'role': 'user', 'content': content})
-            url, body = self.app.chat_upstream_request(provider, provider['base_url'], payload.model, messages)
-            if provider['protocol'] == 'gemini':
-                body['generationConfig'] = {'maxOutputTokens': limits['max_output_tokens'], 'candidateCount': 1}
-            else:
-                body['max_tokens'] = limits['max_output_tokens']
-            credential = self.policy.credential(provider)
+            url, body = self.app.chat_upstream_request(selected_provider, provider['base_url'], payload.model, messages)
+            tokens = getattr(payload,'max_output_tokens',None)
+            if not provider.get('personal'):
+                tokens=min(tokens or limits['max_output_tokens'],limits['max_output_tokens'])
+            if tokens:
+                if selected_provider['protocol']=='gemini':body.setdefault('generationConfig',{})['maxOutputTokens']=tokens
+                else:body['max_tokens']=tokens
+            temperature=getattr(payload,'temperature',None)
+            if temperature is not None:
+                if selected_provider['protocol']=='gemini':body.setdefault('generationConfig',{})['temperature']=temperature
+                else:body['temperature']=temperature
+            if payload.videos and selected_provider['protocol']=='gemini':
+                for url in payload.videos:
+                    data=self.app.reference_to_data_url({'url':url})
+                    mime,encoded=data.split(';base64,',1)
+                    body['contents'][-1]['parts'].append({'inlineData':{'mimeType':mime.removeprefix('data:'),'data':encoded}})
+            credential = execution.key()
             client.used_credential = credential
             # httpx read timeouts alone reset for each chunk; also bound total waiting time.
-            async with asyncio.timeout(min(self.app.CANVAS_LLM_TIMEOUT, limits['timeout_seconds'])):
-                auth = {'x-goog-api-key': credential} if provider['protocol'] == 'gemini' else {'Authorization': 'Bearer '+credential}
-                response = await client.post(url, headers=auth | {'Content-Type':'application/json'}, json=body)
+            with execution.activate():
+                async with asyncio.timeout(limits['timeout_seconds'] if provider.get('personal') else min(self.app.CANVAS_LLM_TIMEOUT, limits['timeout_seconds'])):
+                    auth = {'x-goog-api-key': credential} if selected_provider['protocol'] == 'gemini' else {'Authorization': 'Bearer '+credential}
+                    response = await client.post(url, headers=auth | {'Content-Type':'application/json'}, json=body)
             response.raise_for_status()
             text = self.app.text_from_chat_response(response.json())
+            self.policy.mark_verified(provider,payload.model,'llm')
             return {'text': self.policy.redact(text, used_credential=credential), 'model':payload.model, 'raw_usage':None}
         except (TimeoutError, httpx.TimeoutException):
             raise failure('timeout', 504) from None
@@ -158,20 +188,28 @@ class ControlledModels:
             raise failure('upstream', 502) from None
         finally:
             self.llm_active -= 1
-            await client.aclose()
+            await execution.close()
 
     def validate_image(self, payload):
+        configured=self.policy.providers.get(payload.provider_id,{})
+        if configured.get('personal') and payload.reference_images and configured['settings'].get('image_edit_route')=='chat':raise HTTPException(400,'image_edit_route=chat 缺少图片编辑响应契约，请选择通用编辑路径')
         provider, limits = self.policy.allowed(payload.provider_id, payload.model, 'image')
-        if not 1 <= payload.n <= limits['max_images'] or payload.operation or payload.resolution_type or payload.quality not in {'', 'auto'}:
+        if provider.get('personal') and effective_protocol(provider['settings'], payload.model,'image') != 'kie':
+            return self.validate_network(payload, 'image')
+        if provider.get('personal') and payload.quality not in {'','auto'}:raise HTTPException(400,'所选 Kie input 模板未实现 quality 字段契约，不会忽略所选质量')
+        if provider.get('personal') and payload.adapter_parameters:raise HTTPException(400,'所选 Kie input 模板没有其它 adapter_parameters 契约；不会忽略这些参数')
+        if not 1 <= payload.n <= limits['max_images'] or payload.operation not in {'','generate','edit'} or payload.resolution_type or payload.quality not in {'', 'auto'}:
             raise failure('limits')
         try:
-            _, adapted = build_create_payload(payload.model, payload.prompt, [r.url for r in payload.reference_images],
+            template=provider.get('capabilities',{}).get('image',{}).get(payload.model,{}).get('adapter',payload.model)
+            _, adapted = build_create_payload(template, payload.prompt, [r.url for r in payload.reference_images],
                                                payload.aspect_ratio, payload.resolution, payload.output_format)
         except KieValidationError:
             raise failure('limits', 400) from None
+        if provider.get('personal') and payload.output_format and not adapted['output_format']:raise HTTPException(400,'所选 Kie input 模板没有 output_format 字段契约；不会忽略所选格式')
         checks = {'sizes': payload.size, 'resolutions': adapted['requested_resolution'],
                   'aspect_ratios': adapted['requested_aspect_ratio'], 'output_formats': adapted['output_format']}
-        if any(value not in limits[key] for key, value in checks.items()):
+        if any(key in limits and value not in limits[key] for key, value in checks.items()):
             raise failure('limits')
         self.references([r.url for r in payload.reference_images], limits)
         return provider, limits
@@ -198,8 +236,8 @@ class ControlledModels:
         if job['status'] in {'waiting', 'queuing', 'generating'}: return 'processing'
         return job['status']
 
-    def create(self, payload):
-        provider, _ = self.validate_image(payload)
+    def create(self, payload, purpose='image'):
+        provider, _ = self.validate_image(payload) if purpose == 'image' else self.validate_network(payload, purpose)
         owner = PRINCIPAL.get()['subject']
         params = payload.model_dump()
         nonce = params.pop('request_id', '')
@@ -211,7 +249,9 @@ class ControlledModels:
         else:
             binding = {}
         params['binding'] = binding
-        fingerprint = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()
+        params['purpose'] = purpose
+        revision=task_provider_revision(self.policy,provider)
+        fingerprint = hashlib.sha256(json.dumps({'params':params,'provider_revision':revision}, sort_keys=True).encode()).hexdigest()
         with self.db() as db:
             for row in db.execute('SELECT * FROM jobs WHERE owner=? ORDER BY updated DESC', (owner,)):
                 job = json.loads(row['data'])
@@ -219,10 +259,10 @@ class ControlledModels:
                     if row['fingerprint'] != fingerprint:
                         raise failure('conflict', 409)
                     return {'task_id':job['id'], 'status':job['status'], 'reused':True}
-                if row['fingerprint'] == fingerprint and (job['outstanding'] or row['updated'] > time.time()-60):
+                if not nonce and row['fingerprint'] == fingerprint and (job['outstanding'] or row['updated'] > time.time()-60):
                     return {'task_id':job['id'], 'status':job['status'], 'reused':True}
         self.check_capacity()
-        job = {'id':'canvas_img_'+uuid.uuid4().hex, 'owner':owner, 'status':'queued', 'params':params,
+        job = {'id':('canvas_img_' if purpose == 'image' else 'canvas_vid_')+uuid.uuid4().hex, 'owner':owner, 'status':'queued', 'params':params, 'purpose':purpose,
                'provider_revision':task_provider_revision(self.policy, provider),
                'provider_id':payload.provider_id, 'model':payload.model, 'upstream':[], 'result':None,
                'binding':binding, 'upstream_status':'', 'local_result_status':'not_ready', 'recovery_attempts':0,
@@ -263,7 +303,7 @@ class ControlledModels:
         configured = self.policy.providers.get(job['provider_id'])
         if not configured or not configured.get('enabled', True):
             raise HTTPException(409, '原 Provider 已删除或禁用；恢复不可用，不会使用其他 Provider 或重新生成')
-        provider, _ = self.policy.allowed(job['provider_id'], job['model'], 'image')
+        provider, _ = self.policy.allowed(job['provider_id'], job['model'], job.get('purpose','image'))
         if job.get('provider_revision') != task_provider_revision(self.policy, provider):
             raise HTTPException(409, '原任务配置已变化或为旧版本任务；禁止使用新凭证查询，也不会重新提交')
         if task_id not in self.runners and job['upstream'] and job['status'] != 'succeeded':
@@ -285,7 +325,7 @@ class ControlledModels:
         if cancel:
             cancel.set()
         hard = job['status'] in {'queued', 'preparing'} and not job['upstream']
-        if hard and task_id in self.runners:
+        if task_id in self.runners:
             self.runners[task_id].cancel()
         if job['status'] != 'succeeded':
             job.update(status='canceled', cancel_scope='pre-submit' if hard else 'local-only',
@@ -296,13 +336,21 @@ class ControlledModels:
         return self.public(job) | {'task_id':task_id, 'message':job['error']}
 
     async def run(self, job, cancel, *, query_only=False):
+        p = self.policy.providers.get(job['provider_id'], {})
+        if p.get('personal') and (job.get('purpose','image') != 'image' or effective_protocol(p['settings'], job['model'],job.get('purpose','image')) != 'kie'):
+            return await self.run_network(job, cancel, query_only=query_only)
         client = None
         submitted = False
         try:
-            provider, limits = self.policy.allowed(job['provider_id'], job['model'], 'image')
+            provider, limits = self.policy.allowed(job['provider_id'], job['model'], job.get('purpose','image'))
             if job.get('provider_revision') != task_provider_revision(self.policy, provider):
                 raise failure('conflict', 409)
-            client = GuardedClient(self.policy, provider, timeout=min(120, limits['timeout_seconds']))
+            client = GuardedClient(self.policy, provider, timeout=limits['timeout_seconds'] if provider.get('personal') else min(120, limits['timeout_seconds']))
+            if provider.get('personal'):
+                # The effective model protocol is Kie even in a mixed Provider.
+                # Only this executor receives the fixed Kie upload authority.
+                from providers.kie.uploads import KIE_UPLOAD_BASE_URL
+                client.kie_upload_base_url=provider['base_url'] if self.policy.mode=='mock' else KIE_UPLOAD_BASE_URL
             client.query_only = query_only
             credential = self.policy.credential(provider)
             client.used_credential = credential
@@ -315,6 +363,9 @@ class ControlledModels:
                 self.references([r['url'] for r in references], limits)
                 # Separate cache namespace for provider + credential rotation; never share upload ownership.
                 namespace = hashlib.sha256((provider['id']+credential).encode()).hexdigest()[:24]
+                if provider.get('personal'):
+                    namespace=hashlib.sha256((provider['id']+credential+'|original-v1').encode()).hexdigest()[:24]
+                    client.preserve_reference_bytes=True
                 cache = KieReferenceUploadCache(self.paths.data_root/f'.auth/reference-cache/{namespace}.json', url_validator=client.validate_media_url)
                 diagnostic = ReferenceDiagnostics()
                 client.reference_diagnostic = diagnostic
@@ -335,8 +386,11 @@ class ControlledModels:
                 if index >= len(job['upstream']):
                     if query_only:
                         raise HTTPException(409, '恢复操作禁止创建任务')
-                    body, _ = build_create_payload(job['model'], params['prompt'], urls,
+                    template=provider.get('capabilities',{}).get('image',{}).get(job['model'],{}).get('adapter',job['model'])
+                    body, _ = build_create_payload(template, params['prompt'], urls,
                         params['aspect_ratio'], params['resolution'], params['output_format'])
+                    if template != job['model']: body['model']=job['model']
+                    if provider.get('personal'):body['input']['prompt']=params['prompt']
                     job.update(status='submitting', submission_uncertain=True); self.save(job)
                     submitted = True  # Durable uncertainty precedes every potentially billable call.
                     upstream_id, _ = await kie.create_task(body)
@@ -358,7 +412,7 @@ class ControlledModels:
                 entry['remote_done'] = True
                 job.update(upstream_status='success', status='result_pending_download', local_result_status='pending')
                 self.save(job)
-                for url in ([] if entry.get('local') else result['resultUrls'][:1]):
+                for url in result['resultUrls'][len(entry.get('local',[])):] :
                     if cancel.is_set():
                         raise KieTaskCancelled('local stop')
                     response = await client.get(url)
@@ -368,8 +422,13 @@ class ControlledModels:
                             raise failure('download', 502)
                         image.load()
                         normalized = BytesIO(); image.convert('RGB').save(normalized, 'PNG')
-                    local = await self.app.save_ai_image_to_output({'type':'b64','value':base64.b64encode(normalized.getvalue()).decode()}, prefix='controlled_')
-                    entry['local'] = [local]
+                    if provider.get('personal'):
+                        from instance_executor import Execution
+                        execution=Execution(self,provider,job['model'],'image')
+                        local=await execution.save_image({'type':'b64','value':base64.b64encode(response.content).decode()},prefix='controlled_')
+                    else:
+                        local = await self.app.save_ai_image_to_output({'type':'b64','value':base64.b64encode(normalized.getvalue()).decode()}, prefix='controlled_')
+                    entry.setdefault('local',[]).append(local)
                     self.save(job)
                 entry['done'] = True; self.save(job)
             images = [url for entry in job['upstream'] for url in entry['local']]
@@ -381,6 +440,7 @@ class ControlledModels:
                 job.update(status='failed', result=result, outstanding=True, recovery='manual-reconcile',
                            error='已保存已知任务结果；另有提交状态不明，需管理员核对，未自动补交')
             else:
+                self.policy.mark_verified(provider,job['model'],'image')
                 result['local_result_status'] = 'completed'
                 self.app.save_to_history(result, identity_key=job['id'])
                 job.update(status='succeeded', result=result, outstanding=False, error='', error_code='', recovery='',

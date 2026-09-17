@@ -179,7 +179,7 @@ class InstanceAuthMiddleware:
                         raise HTTPException(413, ingress_error)
                 return message
             receive = limited_receive
-        full_api = path in {'/api/instance/provider-settings', '/api/instance/provider-settings/test-connection', '/api/instance/provider-settings/probe-async', '/api/instance/provider-settings/fetch-models'}
+        full_api = path in {'/api/instance/provider-settings', '/api/instance/provider-settings/test-connection', '/api/instance/provider-settings/probe-async', '/api/instance/provider-settings/fetch-models','/api/instance/provider-settings/metadata'}
         own_api = full_api or path in {'/api/instance/providers', '/api/instance/providers/discover'}
         own_page = path in {'/static/api-settings.html', '/static/js/api-settings.js', '/static/js/instance-api-settings.js'}
         if own_api or own_page:
@@ -237,10 +237,10 @@ class InstanceAuthMiddleware:
         query.append(("client_id", principal["subject"]))
         scope["query_string"] = urllib.parse.urlencode(query).encode()
         context = PRINCIPAL.set(principal)
-        started, stopped, failed = False, False, False
+        started, stopped, failed, redact_error = False, False, False, False
 
         async def private_send(message):
-            nonlocal started, stopped, failed
+            nonlocal started, stopped, failed, redact_error
             if stopped:
                 return
             if not self.store.validate(token):
@@ -254,13 +254,14 @@ class InstanceAuthMiddleware:
                     return await self.reply(scope, receive, send, JSONResponse({'detail':ingress_error},413))
                 started = True
                 failed = message["status"] >= 500
+                redact_error=400<=message["status"]<500
                 from workspace_assets import program_assets, PRIVATE_CACHE
                 cache = program_assets(str(self.paths.program_root / 'static')).cache_control(
                     path, scope.get('query_string', b''), method, message['status'],
                     any(k.lower() == b'set-cookie' for k, _ in message.get('headers', [])))
                 message["headers"] = [(k, v) for k, v in message.get("headers", [])
                                       if k.lower() not in {b"cache-control", b"pragma", b"x-instance-namespace"}
-                                      and not (failed and k.lower() == b'content-length')]
+                                      and not ((failed or redact_error) and k.lower() == b'content-length')]
                 message["headers"] += [(b"cache-control", cache.encode()),
                                        (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
                                        (b"x-frame-options", b"SAMEORIGIN")]
@@ -274,13 +275,22 @@ class InstanceAuthMiddleware:
                 try:
                     payload = json.loads(message.get('body', b''))
                     detail = payload['detail']
+                    if self.own_providers and detail.get('code')=='task_incomplete':
+                        task_id=detail.get('task_id')
+                        self.own_providers.models.owned(task_id)
+                        if payload=={'detail':dict(model_access_failure('task_incomplete').detail,task_id=task_id)}:
+                            failed=False
+                            return await send(message)
                     if payload == {'detail':model_access_failure(detail['code']).detail}:
                         failed = False
                         return await send(message)
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError, HTTPException):
                     pass
                 message = {"type": "http.response.body", "body": json.dumps({"detail": "请求失败或功能尚未开放，请重试或联系管理员"}, ensure_ascii=False).encode(), "more_body": False}
                 stopped = True
+            if redact_error and message['type']=='http.response.body' and self.own_providers:
+                body=message.get('body',b'').decode('utf-8',errors='replace')
+                message={**message,'body':self.own_providers.models.policy.redact(body).encode()}
             await send(message)
         try:
             if method == "GET" and path in {"/api/config", "/api/providers", "/api/models"}:

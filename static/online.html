@@ -253,7 +253,8 @@
         });
         let refs = {1:null,2:null,3:null};
         let refDims = {1:null,2:null,3:null};
-        let provider = 'comfly';
+        const personalApiInstance=Boolean(document.getElementById('instance-context'));
+        let provider = personalApiInstance ? '' : 'comfly';
         let selectedModel = 'gpt-image-2';
         let apiProviders = [];
         let ratio = 'square';
@@ -312,6 +313,7 @@
             return (list || []).map(item => String(item || '').trim()).filter(item => item && !seen.has(item) && seen.add(item));
         }
         function imageProviders(){
+            if(personalApiInstance) return (apiProviders || []).filter(p=>(p.image_models || []).length);
             const list = (apiProviders || []).filter(p => p.enabled !== false && (
                 (p.image_models || []).length || (p.rh_apps || []).length || (p.rh_workflows || []).length
             ));
@@ -321,7 +323,7 @@
             return imageProviders().find(p => p.id === id) || imageProviders()[0];
         }
         function providerModels(id){
-            return uniqueModels(providerById(id)?.image_models || [models.gpt]);
+            return uniqueModels(providerById(id)?.image_models || (personalApiInstance ? [] : [models.gpt]));
         }
         /* ---- RunningHub：同一平台下同步模型 API / 工作流 / AI 应用。
          * 模型 API 直接提交原始模型名；value=app:ID / workflow:ID 走 RH 应用/工作流路径。 */
@@ -366,6 +368,12 @@
                 modelSelect.innerHTML = modelsForProvider.map(m => `<option value="${escapeHtml(m)}" ${m === selectedModel ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('');
             }
             updateAdaptivePanel();
+            if(personalApiInstance){
+                const p=providerById(provider);
+                Array.from(modelSelect.options).forEach(option=>{const cap=p?.capabilities?.image?.[option.value];if(cap && !cap.executable){option.disabled=true;option.textContent+=` · ${cap.reason}`;}});
+                if(!providers.length) modelSelect.innerHTML='<option value="">尚未添加个人生图模型，请到 API 设置配置 Provider 和模型用途</option>';
+                document.getElementById('genBtn').disabled=!p?.capabilities?.image?.[selectedModel]?.executable;
+            }
         }
 
         /* ---- 协议自适应：根据所选 provider 的 protocol 调整参数栏 ----
@@ -399,13 +407,13 @@
                 badge.style.display = '';
             }
             const qf = document.getElementById('qualityField');
-            if(qf) qf.style.display = QUALITY_PROTOCOLS.has(proto) ? '' : 'none';
+            if(qf) qf.style.display = (personalApiInstance ? providerById(provider)?.capabilities?.image?.[selectedModel]?.parameters?.includes('quality') : QUALITY_PROTOCOLS.has(proto)) ? '' : 'none';
             const qs = document.getElementById('qualitySelect');
             if(qs) qs.value = quality;
             // RunningHub 每次出图都是一次完整工作流运行，隐藏数量并固定为 1，避免误触发多次昂贵任务。
-            if(proto === 'runninghub') outputCount = 1;
+            if(!personalApiInstance && proto === 'runninghub') outputCount = 1;
             const cf = document.getElementById('countField');
-            if(cf) cf.style.display = (proto === 'runninghub') ? 'none' : '';
+            if(cf) cf.style.display = (!personalApiInstance && proto === 'runninghub') ? 'none' : '';
             const cs = document.getElementById('countSelect');
             if(cs) cs.value = String(outputCount);
         }
@@ -623,7 +631,8 @@
             btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); loader.classList.remove('hidden');
             try {
                 const reqBody = { prompt, provider_id:provider, model:selectedModel, size:currentSize(), n:outputCount, reference_images:Object.values(refs).filter(Boolean) };
-                if(QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
+                if(personalApiInstance){reqBody.aspect_ratio=({square:'1:1',portrait:'2:3',portrait43:'3:4',landscape43:'4:3',landscape:'3:2',story:'9:16',wide:'16:9'})[ratio] || (ratio==='custom' ? `${customRatioWidth}:${customRatioHeight}` : '');reqBody.resolution=resolution==='custom' ? '' : resolution;}
+                if(personalApiInstance ? providerById(provider)?.capabilities?.image?.[selectedModel]?.parameters?.includes('quality') : QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
                 const result = await fetch('/api/online-image', {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify(reqBody)

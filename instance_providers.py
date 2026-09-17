@@ -22,19 +22,10 @@ FIELDS = {'id', 'name', 'protocol', 'base_url', 'enabled', 'models'}
 
 
 def model_limits(policy, protocol):
-    common = dict(max_references=8, max_reference_bytes=1048576, timeout_seconds=120)
-    defaults = (dict(max_output_tokens=4096, max_text_chars=100000) if protocol != 'kie' else
-                dict(max_images=1, sizes=['1024x1024'], resolutions=['1K'], aspect_ratios=['1:1'], output_formats=['']))
-    limits = common | defaults
-    # Existing administrator limits remain ceilings, not browser-editable defaults.
-    for p in policy.providers.values():
-        if p.get('personal') or (p['protocol'] == 'kie') != (protocol == 'kie'):
-            continue
-        for configured in p['models'].values():
-            for key, value in limits.items():
-                if key in configured:
-                    limits[key] = min(value, configured[key]) if isinstance(value, int) else [v for v in value if v in configured[key]]
-    return limits
+    # Transport/process bounds, never inherited from an unrelated shared key.
+    # Adapter-specific upstream parameter checks happen before upload/submission.
+    return dict(max_references=20, max_reference_bytes=30*1024*1024,
+                timeout_seconds=1800, max_images=8, max_text_chars=32*1024*1024)
 
 
 def validate_item(policy, item):
@@ -63,15 +54,16 @@ def validate_item(policy, item):
         except ValueError as exc:
             if str(exc) == 'Private address':
                 raise
-    if not isinstance(item['models'], list) or len(item['models']) > 200:
+    if not isinstance(item['models'], list) or len(item['models']) > 600:
         raise ValueError()
     seen = set()
     for m in item['models']:
-        if not isinstance(m, dict) or set(m) != {'id', 'purpose'} or not MODEL.fullmatch(m.get('id', '')):
+        if not isinstance(m, dict) or set(m) != {'id', 'purpose'} or not isinstance(m.get('id'),str) or not MODEL.fullmatch(m['id']):
             raise ValueError()
-        if '..' in m['id'] or m['id'] in seen or m['purpose'] not in {'llm', 'image', 'video'}:
+        if '..' in m['id'] or (m['id'], m['purpose']) in seen or m['purpose'] not in {'llm', 'image', 'video'}:
             raise ValueError()
-        seen.add(m['id'])
+        seen.add((m['id'], m['purpose']))
+    if len({model for model,purpose in seen})>200:raise ValueError()
 
 
 def compile_personal(policy, stored):
@@ -89,13 +81,29 @@ def compile_personal(policy, stored):
         policy.private_file(policy.paths.data_root / '.auth' / credential)
     limits = model_limits(policy, stored['protocol'])
     supported = {}
-    from providers.kie.models import KIE_UI_MODELS
-    for m in stored['models']:
-        compatible = (stored['protocol'] in {'openai', 'gemini'} and m['purpose'] == 'llm') or (
-            stored['protocol'] == 'kie' and m['purpose'] == 'image' and m['id'] in KIE_UI_MODELS)
-        if compatible and credential:
-            supported[m['id']] = dict(limits)
-    result = dict(stored, personal=True, models=supported)
+    from provider_capabilities import capabilities, CATEGORIES
+    settings = dict(stored.get('settings', {}))
+    settings.update({k: stored[k] for k in FIELDS-{'models'}})
+    for purpose, category in CATEGORIES.items():
+        settings[category] = [m['id'] for m in stored['models'] if m['purpose'] == purpose]
+    refs = dict(stored.get('secret_refs', {}))
+    if credential: refs['api_key'] = credential
+    if settings['protocol']=='runninghub':
+        for kind,category in [('app','rh_apps'),('workflow','rh_workflows')]:
+            for entry in settings.get(category,[]):
+                entry_id=str(entry.get('id') or entry.get('appId') or entry.get('webappId') or entry.get('workflowId') or '')
+                model=kind+':'+entry_id
+                purpose=entry.get('purpose','image')
+                if entry_id and purpose in CATEGORIES and model not in settings[CATEGORIES[purpose]]:settings[CATEGORIES[purpose]].append(model)
+    caps = capabilities(settings, refs)
+    purposes = {}
+    for purpose,models in caps.items():
+        for model,cap in models.items():
+            if cap['executable']:
+                supported[model]=dict(limits)
+                purposes.setdefault(purpose,{})[model]=dict(limits)
+    result = dict(stored, personal=True, models=supported, model_uses=purposes,
+                  capabilities=caps, settings=settings, secret_refs=refs)
     if stored['protocol'] == 'kie':
         # Mock targets are administrator-provided, never a production localhost escape.
         result['upload_base_url'] = stored['base_url'] if policy.mode == 'mock' else 'https://kieai.redpandaai.co'
@@ -138,8 +146,8 @@ class OwnProviders:
             compiled = policy.providers[stored['id']]
             item = {k: stored[k] for k in FIELDS}
             item['has_key'] = bool(stored['credential_file'])
-            item['models'] = [dict(m, supported=m['id'] in compiled['models'],
-                                   support_note='' if m['id'] in compiled['models'] else '尚未适配此用途，或未配置 Key；不可运行') for m in stored['models']]
+            item['models'] = [dict(m, supported=compiled['capabilities'][m['purpose']][m['id']]['executable'],
+                                   support_note=compiled['capabilities'][m['purpose']][m['id']]['reason']) for m in stored['models']]
             result.append(item)
         return {'providers': result, 'shared_provider_ids': [p['id'] for p in policy.providers.values() if not p.get('personal')],
                 'max_concurrent': policy.max_concurrent}
@@ -188,4 +196,28 @@ class OwnProviders:
 
 def task_provider_revision(policy, provider):
     # Internal digest only; never exported. Also detects administrator key rotation.
-    return hashlib.sha256((json.dumps(provider, sort_keys=True) + policy.credential(provider)).encode()).hexdigest()
+    fields = provider.get('secret_refs', {}) or ({'api_key':provider['credential_file']} if provider.get('credential_file') else {})
+    return hashlib.sha256((json.dumps(provider, sort_keys=True) + ''.join(policy.credential(provider, field) for field in sorted(fields))).encode()).hexdigest()
+
+def legacy_task_provider_revision(policy, provider):
+    """Recognize the exact pre-upgrade digest, with the same private Key/config.
+
+    This does not authorize a different Provider or credential. It only permits
+    querying an already owned legacy task after the capability compiler changes.
+    """
+    if not provider.get('personal'): return task_provider_revision(policy,provider)
+    stored=next((p for p in json.loads(policy.file.read_text()).get('personal_providers',[]) if p['id']==provider['id']),None)
+    if not stored or not stored['credential_file']:return ''
+    protocol=stored['protocol']
+    limits=dict(max_references=8,max_reference_bytes=1048576,timeout_seconds=120)
+    limits.update(dict(max_images=1,sizes=['1024x1024'],resolutions=['1K'],aspect_ratios=['1:1'],output_formats=['']) if protocol=='kie' else dict(max_output_tokens=4096,max_text_chars=100000))
+    for shared in policy.providers.values():
+        if shared.get('personal') or (shared['protocol']=='kie')!=(protocol=='kie'):continue
+        for configured in shared['models'].values():
+            for key,value in limits.items():
+                if key in configured:limits[key]=min(value,configured[key]) if isinstance(value,int) else [v for v in value if v in configured[key]]
+    from providers.kie.models import KIE_UI_MODELS
+    supported={m['id']:dict(limits) for m in stored['models'] if (protocol in {'openai','gemini'} and m['purpose']=='llm') or (protocol=='kie' and m['purpose']=='image' and m['id'] in KIE_UI_MODELS)}
+    previous=dict(stored,personal=True,models=supported)
+    if protocol=='kie':previous.update(upload_base_url=stored['base_url'] if policy.mode=='mock' else 'https://kieai.redpandaai.co',media_origins=[])
+    return hashlib.sha256((json.dumps(previous,sort_keys=True)+policy.credential(stored)).encode()).hexdigest()

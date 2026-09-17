@@ -161,6 +161,7 @@ let quickConnectMenu = null;
 let pendingQuickConnection = null;
 let connectionEraseState = null;
 let saveTimer = null;
+const personalApiInstance=Boolean(document.getElementById('instance-context'));
 let apiProviders = [];
 let comfyWorkflows = [];
 let comfyInstanceCount = 1;
@@ -2535,7 +2536,7 @@ function toggleZoomPreview(){
     else enterZoomPreview();
 }
 function imageProviders(){
-    return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine' && (p.image_models || []).length);
+    return (apiProviders || []).filter(p => (document.getElementById('instance-context') || (p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine')) && (p.image_models || []).length);
 }
 function isKieProviderId(providerId){
     const provider = apiProviders.find(item => item.id === providerId);
@@ -2608,6 +2609,7 @@ function volcengineProvider(){
     };
 }
 function runningHubProvider(){
+    if(document.getElementById('instance-context'))return apiProviders.find(p=>p.id===document.documentElement.dataset.personalRhProviderId) || apiProviders.find(p=>p.protocol==='runninghub' && p.enabled!==false) || null;
     return (apiProviders || []).find(p => p.id === 'runninghub' && p.enabled !== false) || null;
 }
 function runningHubEntries(kind){
@@ -2760,7 +2762,7 @@ function runningHubSelectedModel(sourceSettings=settings){
 }
 function runningHubModelApiSettings(sourceSettings=settings){
     const model = runningHubSelectedModel(sourceSettings);
-    return {...(sourceSettings || settings), engine:'api', apiKind:'image', provider_id:'runninghub', model};
+    return {...(sourceSettings || settings), engine:'api', apiKind:'image', provider_id:personalApiInstance ? runningHubProvider()?.id || '' : 'runninghub', model};
 }
 function rhUsableFields(fields){
     const list = Array.isArray(fields) ? fields : [];
@@ -2808,12 +2810,12 @@ function sortRunningHubFields(fields){
     });
 }
 function chatApiProviders(){
-    return (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
+    return (apiProviders || []).filter(p => (document.getElementById('instance-context') || p.enabled !== false) && (p.chat_models || []).length);
 }
 function resolveChatProviderId(providerId=''){
     const providers = chatApiProviders();
     if(providers.some(p => p.id === providerId)) return providerId;
-    return providers[0]?.id || 'comfly';
+    return providers[0]?.id || (document.getElementById('instance-context') ? '' : 'comfly');
 }
 function providerChatModels(providerId){
     const provider = chatApiProviders().find(p => p.id === providerId);
@@ -2821,19 +2823,24 @@ function providerChatModels(providerId){
 }
 function resolveChatModel(model='', providerId=''){
     const models = providerChatModels(resolveChatProviderId(providerId));
-    return models.includes(model) ? model : (models[0] || model || 'gpt-4o-mini');
+    return models.includes(model) ? model : (models[0] || model || (document.getElementById('instance-context') ? '' : 'gpt-4o-mini'));
 }
 function chatProviderOptions(selectedId=''){
     const selected = resolveChatProviderId(selectedId);
     return chatApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
+function personalModelOption(model,selected,providerId,purpose){
+    const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];const reason=cap&&!cap.executable?cap.reason:'';return `<option value="${escapeHtml(model)}" ${model===selected?'selected':''} ${reason?'disabled':''}>${escapeHtml(model)}${reason?' · '+escapeHtml(reason):''}</option>`;
+}
+function personalModelButtonAttributes(model,providerId,purpose){const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];return cap&&!cap.executable?`disabled title="${escapeHtml(cap.reason)}"`:'';}
 function chatModelOptions(selectedModel='', providerId=''){
     const selectedProvider = resolveChatProviderId(providerId);
     const models = providerChatModels(selectedProvider);
     const selected = resolveChatModel(selectedModel, selectedProvider);
-    return [...new Set([selected, ...models].filter(Boolean))].map(model => `<option value="${escapeHtml(model)}" ${model === selected ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    return [...new Set([selected,...models].filter(Boolean))].map(model=>personalModelOption(model,selected,selectedProvider,'llm')).join('');
 }
 function apiProviderById(providerId){
+    if(document.getElementById('instance-context')) return apiProviders.find(p=>p.id===providerId) || null;
     if(providerId === 'volcengine') return volcengineProvider();
     return (apiProviders || []).find(p => p.id === providerId) || imageProviders()[0] || null;
 }
@@ -2847,6 +2854,7 @@ function videoProviderPlatform(providerId){
     return '';
 }
 function providerImageModels(providerId){
+    if(document.getElementById('instance-context')) return apiProviders.find(p=>p.id===providerId)?.image_models || [];
     if(providerId === 'volcengine') return volcengineProvider().image_models || [];
     return (apiProviders || []).find(p => p.id === providerId)?.image_models || [];
 }
@@ -2927,6 +2935,9 @@ function syncJimengVideoModelPillForRefs(){
 }
 function sanitizeSmartApiSelection(target=settings){
     if(!target || typeof target !== 'object') return target;
+    // Personal selections are exact user configuration. Missing models must be
+    // explained by capability validation, never replaced while refreshing.
+    if(personalApiInstance) return target;
     if(target.engine === 'volcengine'){
         if(target.apiKind === 'video'){
             target.videoProvider = 'volcengine';
@@ -2963,15 +2974,18 @@ function modelscopeImageModels(){
 }
 const DEFAULT_VIDEO_MODELS = ['veo3-fast','veo3','sora','runway','kling','pika','minimax-video','wan-v2','seedance-1.0-pro','jimeng-vide-3.0','jimeng-video-3.0-pro'];
 function videoApiProviders(){
+    if(document.getElementById('instance-context')) return apiProviders.filter(p=>(p.video_models || []).length);
     const fromConfig = (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
     if(fromConfig.length) return fromConfig;
     return [{id:'comfly', name:'Comfly', video_models:DEFAULT_VIDEO_MODELS, enabled:true}];
 }
 function videoProviderById(providerId){
+    if(document.getElementById('instance-context')) return apiProviders.find(p=>p.id===providerId) || null;
     if(providerId === 'volcengine') return volcengineProvider();
     return videoApiProviders().find(p => p.id === providerId) || videoApiProviders()[0] || null;
 }
 function providerVideoModels(providerId){
+    if(document.getElementById('instance-context')) return apiProviders.find(p=>p.id===providerId)?.video_models || [];
     if(providerId === 'volcengine') return volcengineVideoModels();
     const provider = videoApiProviders().find(p => p.id === providerId);
     const models = provider?.video_models || DEFAULT_VIDEO_MODELS;
@@ -2999,13 +3013,13 @@ function renderVideoModelControl(models){
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.videoModel'))}</div>
             <div class="model-list">
-                ${models.map(m => `<button type="button" class="direct-option ${m === settings.videoModel ? 'active' : ''}" data-smart-param="videoModel" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(m)}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noVideoModel'))}</div>`}
+                ${models.map(m => `<button type="button" class="direct-option ${m === settings.videoModel ? 'active' : ''}" ${personalModelButtonAttributes(m,settings.videoProvider,'video')} data-smart-param="videoModel" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(m)}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noVideoModel'))}</div>`}
             </div>
         </div>
     </div>`;
 }
 function renderVideoDurationControl(){
-    const v = Math.max(1, Math.min(60, Number(settings.videoDuration) || 5));
+    const v = Math.max(1, Math.min(personalApiInstance ? 3600 : 60, Number(settings.videoDuration) || 5));
     const quick = [3, 4, 5, 6, 8, 10, 12, 15];
     return `<div class="smart-control duration-control" title="${escapeHtml(tr('smart.videoDurationTip'))}">
         <button class="smart-pill" type="button"><i data-lucide="timer"></i><span>${v}s</span></button>
@@ -3016,7 +3030,7 @@ function renderVideoDurationControl(){
             </div>
             <label class="duration-custom">
                 <span>${escapeHtml(tr('smart.custom'))}</span>
-                <input type="number" min="1" max="60" step="1" data-param="videoDuration" value="${v}">
+                <input type="number" min="1" max="${personalApiInstance ? 3600 : 60}" step="1" data-param="videoDuration" value="${v}">
             </label>
         </div>
     </div>`;
@@ -3610,7 +3624,7 @@ function renderModelControl(models){
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.imageModel'))}</div>
             <div class="model-list">
-                ${models.map(m => `<button type="button" class="direct-option ${m === settings.model ? 'active' : ''}" data-smart-param="model" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(labelFor(m))}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noImageModel'))}</div>`}
+                ${models.map(m => `<button type="button" class="direct-option ${m === settings.model ? 'active' : ''}" ${personalModelButtonAttributes(m,settings.provider_id,'image')} data-smart-param="model" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(labelFor(m))}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noImageModel'))}</div>`}
             </div>
         </div>
     </div>`;
@@ -4767,7 +4781,7 @@ async function loadConfig(){
         const wf = await fetch('/api/workflows').then(r => r.json()).catch(() => ({workflows:[]}));
         comfyWorkflows = Array.isArray(wf.workflows) ? wf.workflows : [];
         runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+        const rhProvider = runningHubProvider();
         const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
         await Promise.all(rhWorkflowIds.map(async workflowId => {
             try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
@@ -4784,7 +4798,6 @@ async function refreshSmartConfigFromSettings(){
     renderDynamicParams();
     const node = selectedNode();
     if(node?.type === 'smart-prompt') {
-        applySettingsToNode(node);
         render();
     }
 }
@@ -18869,7 +18882,7 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
     const urls = activeSettings.engine === 'runninghub'
-        ? await runRunningHubGeneration(prompt, refs, activeSettings)
+        ? await runRunningHubGeneration(prompt, refs, activeSettings,node)
         : activeSettings.engine === 'modelscope'
             ? await runModelscopeGeneration(prompt, refs, activeSettings)
             : [];
@@ -19560,7 +19573,7 @@ async function runGeneration(options={}){
             return;
         }
         if(isApiLikeEngine(settings.engine) && settings.apiKind === 'video'){
-            const outVideos = await runApiVideoGeneration(prompt, refs);
+            const outVideos = await runApiVideoGeneration(prompt, refs,settings,pendingNode);
             if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));
             finalizePendingNode(pendingNode, outVideos, pendingMeta, 'video');
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
@@ -19575,7 +19588,7 @@ async function runGeneration(options={}){
         const outImages = rhModelMode
             ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings), pendingNode)
             : settings.engine === 'runninghub'
-                ? await runRunningHubGeneration(prompt, refs)
+                ? await runRunningHubGeneration(prompt, refs,settings,pendingNode)
                 : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
                 : await runApiGeneration(prompt, refs, settings, pendingNode);
@@ -19874,7 +19887,7 @@ function runningHubPayloadError(stage, data, fallback, extra={}){
     if(code !== '') parts.push(`code=${code}`);
     return smartDetailedError(parts.join('：'), {stage, taskId, code, raw, ...(detailObj || {}), ...extra});
 }
-async function runRunningHubGeneration(prompt, refs, runSettings=settings){
+async function runRunningHubGeneration(prompt, refs, runSettings=settings,bindingNode=null){
     const ref = selectedRunningHubRef(runSettings);
     if(!ref) throw new Error(tr('smart.rhNeedConfig'));
     const fields = rhActiveFields(runSettings);
@@ -19888,6 +19901,8 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     const body = mode === 'workflow'
         ? {workflowId:ref.id, nodeInfoList, useWallet:runSettings.rhPayment === 'wallet', ...workflowExtras}
         : {webappId:ref.id, nodeInfoList, instanceType:runSettings.rhInstanceType || '', useWallet:runSettings.rhPayment === 'wallet'};
+    const personal=Boolean(document.getElementById('instance-context'));
+    if(personal){Object.assign(body,{provider_id:runningHubProvider().id,request_id:crypto.randomUUID().replaceAll('-',''),...(bindingNode?{canvas_id:canvas.id,node_id:bindingNode.id,generation_id:bindingNode.activeGenerationId||''}: {})});await saveCanvas();}
     if(mode === 'workflow') runSettings.rhWorkflowId = ref.id;
     else runSettings.rhAppId = ref.id;
     runSettings.rhMode = mode;
@@ -19909,6 +19924,10 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     const taskId = submit.taskId;
     if(!taskId) throw new Error(tr('smart.rhNoTaskId'));
     runSettings.rhTaskId = taskId;
+    if(personal){
+        if(bindingNode){bindingNode.pendingTasks=[{taskId,kind:'image',providerId:body.provider_id}];scheduleSave();}
+        const result=await pollSmartCanvasTask(taskId);return resultMediaUrls(result.images||result.videos||[]);
+    }
     const useWallet = runSettings.rhPayment === 'wallet';
     for(let i = 0; i < 720; i++){
         await sleep(2500);
@@ -19926,7 +19945,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     }
     throw new Error(tr('smart.rhTimeout'));
 }
-async function runApiVideoGeneration(prompt, refs, runSettings=settings){
+async function runApiVideoGeneration(prompt, refs, runSettings=settings,bindingNode=null){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
@@ -19956,13 +19975,14 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         // 云端上传/手动链接只替换素材 URL，不能改变原引用的媒体类型。
         // 否则图片的云端 URL 会被无条件塞进 videos，导致 APIMart 把 PNG 当参考视频解析。
         const refVideos = videoRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
-        const refAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean).slice(0, 3);
+        const refAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
+        if(!personalApiInstance)refAudios.splice(3);
         if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
         const payload = {
             prompt,
             provider_id: runSettings.videoProvider || 'comfly',
             model: runSettings.videoModel || 'veo3-fast',
-            duration: Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)),
+            duration: Math.max(1, Math.min(personalApiInstance ? 3600 : 60, Number(runSettings.videoDuration) || 5)),
             aspect_ratio: runSettings.videoAspect || '16:9',
             resolution: runSettings.videoResolution || '',
             images: refImages,
@@ -19976,11 +19996,28 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
             multimodal: Boolean(runSettings.videoMultimodal),
             trusted_asset: useAssetUris
         };
-        const result = await fetch('/api/canvas-video', {
+        const personal=Boolean(document.getElementById('instance-context'));
+        if(personal){
+            payload.request_id=crypto.randomUUID();
+            if(bindingNode){
+                await saveCanvas();
+                Object.assign(payload,{canvas_id:canvasId,node_id:bindingNode.id,generation_id:bindingNode.activeGenerationId || ''});
+            }
+        }
+        const result = await fetch(personal ? '/api/canvas-video-tasks' : '/api/canvas-video', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify(payload)
-        }).then(async r => { if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed'))); return r.json(); });
+        }).then(async r => {
+            if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
+            const data=await r.json();
+            if(!personal)return data;
+            if(bindingNode){
+                bindingNode.pendingTasks=[{taskId:data.task_id,kind:'video',providerId:payload.provider_id,model:payload.model,status:'queued',generationId:payload.generation_id || ''}];
+                scheduleSave();
+            }
+            return pollSmartCanvasTask(data.task_id,bindingNode,bindingNode?.pendingTasks?.[0]);
+        });
         if(result && result.jimeng_pending) throw new JimengPendingSignal({submitId:result.submit_id, kind:result.kind || 'video', queueInfo:result.queue_info, message:result.message});
         return resultMediaUrls(result);
     } finally {
@@ -20429,9 +20466,9 @@ function smartPendingRuntimeStatus(node){
 }
 function smartPendingStatusLabel(node){
     const status = smartPendingRuntimeStatus(node);
-    if(status === 'generating') return 'Kie 正在生成';
-    if(status === 'waiting') return 'Kie 等待中';
-    if(status === 'queued') return 'Kie 排队中';
+    if(status === 'generating') return '上游正在生成';
+    if(status === 'waiting') return '上游等待中';
+    if(status === 'queued') return '任务排队中';
     if(status === 'submitting') return '正在提交任务';
     if(status === 'preparing') return '正在准备参考图';
     return '';
@@ -22433,6 +22470,19 @@ window.addEventListener('blur', () => {
     spacePanGestureUsed = false;
 });
 engineSelect.onchange = () => {
+    if(personalApiInstance && ['modelscope','volcengine'].includes(engineSelect.value)){
+        const kind=smartGenerationKind(activeComposerNode()) || settings.apiKind || 'image';
+        const legacyEngine=engineSelect.value;
+        const category=kind==='video' ? 'video_models' : 'image_models';
+        const candidates=apiProviders.flatMap(p=>(p[category] || []).map(model=>({p,model,cap:p.capabilities?.[kind]?.[model]}))).filter(x=>x.cap?.executable && (legacyEngine==='volcengine' ? x.cap.protocol==='volcengine' : x.cap.adapter==='modelscope-async'));
+        const chosen=candidates[0];
+        settings.engine='api';engineSelect.value='api';
+        if(!chosen){toast('请在个人 API 设置中配置此协议的模型和用途；当前没有可执行模型');return;}
+        settings.apiKind=kind;
+        if(kind==='video'){settings.videoProvider=chosen.p.id;settings.videoModel=chosen.model;}
+        else{settings.provider_id=chosen.p.id;settings.model=chosen.model;}
+        renderDynamicParams();persistActiveSmartSettings();scheduleSave();return;
+    }
     settings.engine = engineSelect.value;
     applyRecentSmartSettingsForCurrentMode();
     enforceDedicatedGenerationSettings(settings, activeComposerNode());

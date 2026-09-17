@@ -291,11 +291,14 @@
                                     </select>
                                 </div>
                                 <div class="field-frame image-request-mode-wrap">
-                                    <select id="imageRequestModeInput" title="图片接口">
+                                    <select id="imageRequestModeInput" title="图片请求模式仅用于有效协议为 OpenAI 的模型；原生逐模型协议使用自己的执行器">
                                         <option value="openai">图片：OpenAI 标准</option>
                                         <option value="openai-json">图片：OpenAI JSON</option>
                                         <option value="openai-video-proxy">图片：OpenAI 中转</option>
                                         <option value="openai-responses">图片：OpenAI RS</option>
+                                        <option value="openai-responses-stream">图片：Responses 流式</option>
+                                        <option value="openai-responses-sync">图片：Responses 同步</option>
+                                        <option value="modelscope-async">图片：ModelScope 异步</option>
                                         <option value="tudou-async">图片：土豆 GPT-Image-2 异步</option>
                                     </select>
                                 </div>

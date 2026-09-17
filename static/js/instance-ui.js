@@ -20,6 +20,27 @@
     session.ready.then(() => {
         if (!session.can('manage_own_providers')) hide('[onclick*="api-settings"]');
     }).catch(() => {});
+    if(['canvas.html','smart-canvas.html'].includes(location.pathname.split('/').pop())){
+        async function refreshPersonalRh(){
+            const response=await fetch('/api/config');if(!response.ok)return;
+            const config=await response.json();
+            const providers=(config.api_providers||[]).filter(p=>p.personal && p.protocol==='runninghub' && p.enabled);
+            document.querySelector('[data-personal-rh-picker]')?.remove();
+            delete document.documentElement.dataset.personalRhProviderId;
+            if(!providers.length)return;
+            document.documentElement.dataset.personalRhProviderId=providers.find(p=>p.id===sessionStorage.getItem('personalRhProviderId'))?.id||providers[0].id;
+            if(providers.length>1){
+                const label=document.createElement('label');label.dataset.personalRhPicker='';label.className='instance-feature-notice';label.textContent='RunningHub 平台 ';
+                const select=document.createElement('select');
+                for(const p of providers){const option=document.createElement('option');option.value=p.id;option.textContent=p.name||p.id;select.append(option);}
+                select.value=document.documentElement.dataset.personalRhProviderId;select.onchange=()=>{sessionStorage.setItem('personalRhProviderId',select.value);document.documentElement.dataset.personalRhProviderId=select.value;};
+                label.append(select);document.body.prepend(label);
+            }
+        }
+        session.ready.then(refreshPersonalRh).catch(()=>{});
+        window.addEventListener('message',event=>{if(event.origin===location.origin && event.data?.type==='providers-changed')refreshPersonalRh().catch(()=>{});});
+        try{const channel=new BroadcastChannel('studio-api');channel.onmessage=event=>{if(event.data?.type==='providers-changed')refreshPersonalRh().catch(()=>{});};}catch(_){}
+    }
     // Machine-local execution stays visibly unavailable, with the original navigation retained.
     const page = location.pathname.split('/').pop();
     if (page === 'canvas-list.html') {
@@ -28,7 +49,7 @@
         document.documentElement.setAttribute('data-instance-loading', '');
         session.ready.then(() => document.documentElement.removeAttribute('data-instance-loading')).catch(() => {});
     }
-    if (['zimage.html','enhance.html','klein.html','angle.html','online.html'].includes(page)) {
+    if (['enhance.html','klein.html'].includes(page)) {
         deny('#mainGenBtn,#genBtn,input[type="file"]');
         const button = document.querySelector('#mainGenBtn,#genBtn');
         if (button) {
@@ -36,9 +57,34 @@
             notice.textContent = '当前实例未开放此页面的生成能力'; button.after(notice);
         }
     }
+    if(['zimage.html','angle.html'].includes(page)){
+        deny('#modeLocal');
+        const button=document.querySelector('#mainGenBtn,#genBtn');
+        const panel=document.createElement('div');panel.className='instance-feature-notice';
+        const label=document.createElement('p');label.textContent='使用个人 ModelScope API 模型；模型 ID 原样提交';
+        const picker=document.createElement('select');picker.setAttribute('aria-label','个人 ModelScope 模型');panel.append(label,picker);button?.before(panel);
+        let choices=[];
+        window.PersonalModelscopeSelection={get(){const selected=choices.find(c=>c.value===picker.value);if(!selected)throw new Error(label.textContent);return {provider_id:selected.provider_id,model:selected.model};}};
+        async function refreshPersonalMs(){
+            try{
+                const response=await fetch('/api/config');if(!response.ok)throw new Error();const config=await response.json();
+                choices=(config.api_providers||[]).flatMap(p=>(p.image_models||[]).map(model=>({value:p.id+'|'+model,provider_id:p.id,model,label:(p.name||p.id)+' · '+model,cap:p.capabilities?.image?.[model]}))).filter(c=>c.cap?.adapter==='modelscope-async');
+                const old=picker.value;picker.replaceChildren();
+                choices.forEach(c=>{const option=document.createElement('option');option.value=c.value;option.textContent=c.label+(c.cap.executable?'':' · '+c.cap.reason);option.disabled=!c.cap.executable;picker.append(option);});
+                if(choices.some(c=>c.value===old))picker.value=old;
+                if(!choices.length){label.textContent='尚未配置个人 ModelScope 模型；请在 API 设置选择 ModelScope 异步适配器';}
+                else label.textContent='使用个人 ModelScope API 模型；模型 ID 原样提交';
+                if(typeof window.switchEngine==='function')window.switchEngine('cloud');
+                if(button)button.disabled=!choices.some(c=>c.cap.executable);
+            }catch{label.textContent='模型配置加载失败，请刷新或重新登录';if(button)button.disabled=true;}
+        }
+        session.ready.then(refreshPersonalMs).catch(()=>{});
+        window.addEventListener('message',event=>{if(event.origin===location.origin && event.data?.type==='providers-changed')void refreshPersonalMs();});
+        try{new BroadcastChannel('studio-api').addEventListener('message',event=>{if(event.data?.type==='providers-changed')void refreshPersonalMs();});}catch{}
+    }
     hide('#storageSettingsBtn');
     if (!session.can('local_generation')) {
-        deny('#engineSelect option:not([value="api"]),[onclick="menuAdd(\'msgen\')"],[onclick="menuAdd(\'comfy\')"]');
+        deny('#engineSelect option[value="comfy"],[onclick="menuAdd(\'comfy\')"]');
     }
     document.querySelector('[data-instance-machine-settings]')?.closest('.side-card')?.setAttribute('data-instance-hidden', '');
     const actions = document.querySelector('#studioSidebar .side-actions');

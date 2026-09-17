@@ -45,6 +45,7 @@ if [[ "$js_count" -eq 0 ]]; then
 fi
 
 echo "[3/4] Unit tests"
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/check_inline_js.py" "$NODE_BIN"
 "$PYTHON_BIN" -m unittest discover -s tests
 
 echo "[4/4] Git diff check"

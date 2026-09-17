@@ -55,7 +55,8 @@ class FullSettingsTests(unittest.TestCase):
         item=self.item(api_key=self.f.keys['A']);self.save(item);item.pop('api_key')
         self.assertTrue(self.save(item)['has_key'])
         changed=item|{'image_edit_route':'auto'}
-        self.assertEqual(self.f.request('A','PUT',API,json=[changed]).status_code,409)
+        self.assertEqual(self.f.request('A','PUT',API,json=[changed]).status_code,200)
+        self.assertEqual(self.f.request('A','PUT',API,json=[item|{'base_url':self.f.mock.origin+'/changed'}]).status_code,409)
         self.assertTrue(self.f.ok('A','GET',API)['providers'][0]['has_key'])
         self.assertTrue(self.save(item|{'api_key':'replacement-fake-key'})['has_key'])
         self.assertFalse(self.save(item|{'clear_key':True})['has_key'])
@@ -66,7 +67,8 @@ class FullSettingsTests(unittest.TestCase):
         self.assertNotIn('fake-sk',json.dumps(p));self.assertEqual(p['volcengine_project_name'],'project')
         for k in ['api_key','volcengine_access_key_id','volcengine_secret_access_key']:item.pop(k)
         item['volcengine_project_name']='new-project'
-        self.assertEqual(self.f.request('A','PUT',API,json=[item]).status_code,409)
+        self.assertEqual(self.f.request('A','PUT',API,json=[item]).status_code,200)
+        self.assertTrue(self.f.ok('A','GET',API)['providers'][0]['has_volcengine_secret_key'])
     def test_shared_editor_served_without_simplified_script(self):
         html=self.f.request('A','GET','/static/api-settings.html').text
         self.assertIn('/static/js/api-settings.js',html);self.assertNotIn('/static/js/instance-api-settings.js',html)

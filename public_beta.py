@@ -323,7 +323,8 @@ def create_app(config, *, mailer=None):
                 total+=len(chunk)
                 if total>config.max_upload+1024**2: raise BetaError('请求超过上传上限',413)
                 yield chunk
-        client=httpx.AsyncClient(trust_env=False,follow_redirects=False,timeout=httpx.Timeout(120,connect=3))
+        long_generation=request.url.path in {'/api/online-image','/api/canvas-video','/api/chat','/api/chat/agent','/api/ms/generate','/api/angle/generate','/generate'}
+        client=httpx.AsyncClient(trust_env=False,follow_redirects=False,timeout=httpx.Timeout(1830 if long_generation else 120,connect=3))
         url=httpx.URL(origin).copy_with(path=request.url.path,query=request.url.query.encode())
         try:
             upstream=await client.send(client.build_request(request.method,url,headers=headers,content=chunks() if request.method not in {'GET','HEAD'} else None),stream=True)
@@ -331,7 +332,7 @@ def create_app(config, *, mailer=None):
             await client.aclose();raise
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             store.revoke(request.cookies.get(COOKIE,''))
-        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified'}}
+        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified','content-range','accept-ranges'}}
         location=upstream.headers.get('location')
         if location:
             if location.startswith('/') and not location.startswith('//'): copied['location']=location

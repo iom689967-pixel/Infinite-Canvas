@@ -268,6 +268,7 @@ const RECOMMEND_GROUPS = [
 // provider to another compatible protocol when the upstream configuration changes.
 const LOCKED_RECOMMENDED_PROTOCOL_IDS = new Set(['fhl']);
 function lockedRecommendedApi(itemOrId){
+    if(personalSettings)return null;
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
     const name = typeof itemOrId === 'string' ? '' : itemOrId?.name;
     const baseUrl = typeof itemOrId === 'string' ? '' : itemOrId?.base_url;
@@ -762,7 +763,7 @@ function syncEditor(){
     if(oldId !== item.id) selectedId = item.id;
     item.name = nameInput.value.trim() || item.id;
     const lockedApi = lockedRecommendedApi(item);
-    const selectedProtocol = lockedApi
+    const selectedProtocol = personalSettings ? (protocolInput?.value || item.protocol || 'openai') : lockedApi
         ? lockedApi.protocol
         : item.id === 'modelscope'
         ? 'openai'
@@ -781,14 +782,14 @@ function syncEditor(){
     // 固定平台不从协议下拉读取
     item.protocol = selectedProtocol;
     item.image_request_mode = normalizeImageRequestMode(
-        item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
+        !personalSettings && (item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol))
             ? 'openai'
             : lockedApi
             ? lockedApi.image_request_mode
             : (imageRequestModeInput?.value || item.image_request_mode)
     );
     item.image_edit_route = normalizeImageEditRoute(
-        item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
+        !personalSettings && (item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol))
             ? 'general'
             : (imageEditRouteInput?.value || item.image_edit_route)
     );
@@ -1054,6 +1055,11 @@ function renderRhWorkflowEditorLoading(text){
 }
 async function loadRhWorkflowEditorConfig(entry){
     let config = null;
+    if(personalSettings && entry.fields?.length){
+        rhWorkflowEditorState.config=normalizeRhWorkflowConfig(entry,entry);
+        renderRhWorkflowEditor();return rhWorkflowEditorState.config;
+    }
+    if(personalSettings)return fetchRhWorkflowEditor(false);
     const workflowId = String(entry.workflowId || entry.id || '').trim();
     if(!workflowId) throw new Error('workflowId 为空');
     const existing = await fetch(`/api/runninghub/workflows/${encodeURIComponent(workflowId)}`).then(async r => {
@@ -1191,7 +1197,7 @@ async function fetchRhAppEditor(force=false){
     const appId = String(entry?.appId || entry?.id || '').trim();
     if(!appId) throw new Error('appId 为空');
     if(force) renderRhWorkflowEditorLoading('正在重新拉取...');
-    const res = await fetch(`/api/runninghub/app-info?webappId=${encodeURIComponent(appId)}`);
+    const res = await (personalSettings ? fetch('/api/instance/provider-settings/metadata',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_id:provider().id,kind:'app',entry_id:appId})}) : fetch(`/api/runninghub/app-info?webappId=${encodeURIComponent(appId)}`));
     const data = await res.json();
     if(!res.ok || data.success === false) throw new Error(data.detail || '拉取应用参数失败');
     const fields = rhAppFieldSourceList(data).map(normalizeFetchedRhAppField);
@@ -1215,13 +1221,15 @@ async function fetchRhWorkflowEditor(force=false){
     const workflowId = String(entry.workflowId || entry.id || '').trim();
     if(!workflowId) throw new Error('workflowId 为空');
     if(force) renderRhWorkflowEditorLoading('正在重新拉取...');
-    const res = await fetch('/api/runninghub/workflows/fetch', {
+    const res = await fetch(personalSettings ? '/api/instance/provider-settings/metadata' : '/api/runninghub/workflows/fetch', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
+            ...(personalSettings ? {provider_id:provider().id,kind:'workflow',entry_id:workflowId} : {
             workflowId,
             title:rhWorkflowEditName?.value.trim() || entry.title || workflowId,
             description:rhWorkflowEditNote?.value.trim() || entry.note || ''
+            })
         })
     });
     const data = await res.json();
@@ -1368,7 +1376,7 @@ async function saveRhWorkflowEditor(){
     try {
         if(rhEditorMode === 'app'){
             const item = provider();
-            if(item?.id === 'runninghub' && item.rh_apps?.[state.index]){
+            if((personalSettings || item?.id === 'runninghub') && item.rh_apps?.[state.index]){
                 const entry = item.rh_apps[state.index];
                 entry.title = config.title || entry.title;
                 entry.note = config.description || '';
@@ -1383,6 +1391,14 @@ async function saveRhWorkflowEditor(){
             broadcastStudioApiChange('providers-changed');
             renderRhWorkflowEditor();
             return;
+        }
+        if(personalSettings){
+            const item=provider();const entry=item.rh_workflows?.[state.index];
+            if(!entry)throw new Error('个人工作流条目不存在');
+            Object.assign(entry,config,{fields:(config.fields || []).map(normalizeRhWorkflowField)});
+            if(!await saveProviders())throw new Error('保存失败');
+            broadcastStudioApiChange('providers-changed');
+            setRhWorkflowSaveButtonState('saved','已保存');return;
         }
         const res = await fetch(`/api/runninghub/workflows/${encodeURIComponent(config.workflowId)}`, {
             method:'PUT',
@@ -1627,7 +1643,7 @@ async function rhPreviewUploadValueIfNeeded(value){
     const res = await fetch('/api/runninghub/upload-asset', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({url:text})
+        body:JSON.stringify({url:text,...(personalSettings?{provider_id:provider().id}: {})})
     });
     const data = await res.json();
     if(!res.ok || data.success === false) throw new Error(data.detail || data.error || 'RunningHub 素材上传失败');
@@ -1707,6 +1723,7 @@ async function testRhMappedPreview(){
         const body = rhEditorMode === 'workflow'
             ? {workflowId:String(config.workflowId || '').trim(), nodeInfoList, ...(workflow ? {workflow} : {})}
             : {webappId:String(config.appId || '').trim(), nodeInfoList};
+        if(personalSettings)body.provider_id=provider().id;
         if(rhEditorMode === 'workflow' && !body.workflowId) throw new Error('workflowId 为空');
         if(rhEditorMode === 'app' && !body.webappId) throw new Error('webappId 为空');
         const submit = await fetch(endpoint, {
@@ -2508,23 +2525,24 @@ function renderEditor(){
             : API_PROTOCOLS.includes(protocolValue)
             ? protocolValue
             : 'openai';
-        protocolInput.disabled = FIXED_PROTOCOL_PROVIDER_IDS.has(item.id) || Boolean(lockedApi);
+        protocolInput.disabled = !personalSettings && (FIXED_PROTOCOL_PROVIDER_IDS.has(item.id) || Boolean(lockedApi));
         protocolInput.title = lockedApi ? '推荐平台使用固定协议' : (protocolInput.disabled ? '内置平台使用固定协议' : '');
     }
     if(imageRequestModeInput){
         const requestedMode = isKie ? 'kie' : normalizeImageRequestMode(item.image_request_mode);
         imageRequestModeInput.value = requestedMode;
-        imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        imageRequestModeInput.disabled = !personalSettings && (Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase()));
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
     }
     if(imageEditRouteInput){
         imageEditRouteInput.value = normalizeImageEditRoute(item.image_edit_route);
-        imageEditRouteInput.disabled = item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        imageEditRouteInput.disabled = !personalSettings && (item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase()));
     }
     if(personalSettings){
         let hint=document.getElementById('personalModelSupport');
         if(!hint){hint=document.createElement('p');hint.id='personalModelSupport';hint.className='hint';settingsContent.append(hint);}
-        hint.textContent=Object.entries(item.model_support||{}).map(([model,state])=>model+' · '+(state==='runnable'?'可运行':state)).join('；');
+        let resource=document.getElementById('personalResourceLimits');if(!resource){resource=document.createElement('p');resource.id='personalResourceLimits';resource.className='hint';settingsContent.append(resource);}resource.textContent='服务器资源保护：每次最多 8 张输出、每类最多 20 个参考素材；单素材 30 MiB、请求/响应 32 MiB、图片 3200 万像素；生成等待上限 30 分钟。账号并发、上传与存储配额按当前工作区设置执行。超过时会明确拒绝，不会压缩素材或降低参数。目录只证明已配置；真实调用权限由上游决定。';
+        hint.textContent=Object.entries(item.capabilities||{}).flatMap(([purpose,models])=>Object.entries(models).map(([model,cap])=>`${model} / ${purpose} · 已配置 · ${cap.executable?(cap.verified?'真实调用已验证':cap.mock_verified?'协议可执行（mock 已验证，真实调用未验证）':'协议可执行（真实调用未验证）'):cap.reason}`)).join('；');
     }
     keyInput.value = '';
     keyInput.placeholder = item.has_key ? `${tr('api.keepCurrentKey')} ${item.key_preview || ''}` : tr('api.enterKey');
@@ -2545,7 +2563,7 @@ function renderEditor(){
         keyInput.placeholder = '请只在 API/.env 中配置 KIE_API_KEY';
         keyHint.textContent = item.has_key ? 'KIE_API_KEY 已在 API/.env 配置' : 'KIE_API_KEY 尚未在 API/.env 配置';
     }
-    const isModelScope = item.id === 'modelscope';
+    const isModelScope = item.id === 'modelscope' || (personalSettings && (item.image_request_mode === 'modelscope-async' || Object.values(item.model_adapters || {}).includes('modelscope-async')));
     const isRunningHub = item.id === 'runninghub' || item.protocol === 'runninghub';
     const isVolcengine = item.id === 'volcengine' || String(protocolInput?.value || item.protocol || '').toLowerCase() === 'volcengine';
     const isStandaloneVolcengine = item.id === 'volcengine';
@@ -2604,7 +2622,7 @@ function renderEditor(){
         keyInput.placeholder = 'Antigravity CLI 使用本机 agy 登录态，无需 API Key';
         keyHint.textContent = '请先安装 Antigravity CLI，并在终端执行 agy 完成登录';
     }
-    document.body.classList.toggle('show-ms', isModelScope);
+    document.body.classList.toggle('show-ms', isModelScope && !personalSettings);
     document.body.classList.toggle('show-runninghub', isRunningHub);
     document.body.classList.toggle('show-volcengine', isVolcengine);
     document.body.classList.toggle('show-volcengine-standalone', isStandaloneVolcengine);
@@ -2946,7 +2964,7 @@ function syncKieSelectOptions(isKie){
 }
 function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
-    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'tudou-async'].includes(mode) ? mode : 'openai';
+    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses','openai-responses-stream','openai-responses-sync', 'tudou-async','modelscope-async'].includes(mode) ? mode : 'openai';
 }
 function normalizeImageEditRoute(value){
     const route = String(value || '').trim().toLowerCase();
@@ -2957,7 +2975,10 @@ function imageRequestModeLabel(mode){
     const normalized = normalizeImageRequestMode(mode);
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
-    if(normalized === 'openai-responses') return 'OpenAI RS';
+    if(normalized === 'openai-responses') return 'OpenAI Responses 后台任务';
+    if(normalized === 'openai-responses-stream') return 'OpenAI Responses SSE';
+    if(normalized === 'openai-responses-sync') return 'OpenAI Responses 同步';
+    if(normalized === 'modelscope-async') return 'ModelScope 异步';
     if(normalized === 'tudou-async') return '土豆 GPT-Image-2 异步';
     return 'OpenAI 标准';
 }
@@ -3245,6 +3266,7 @@ async function verifyKieSettings(kind){
             return payload;
         });
         setFetchedModelState(data);
+        if(personalSettings && Array.isArray(data.rh_model_definitions) && data.rh_model_definitions.length) item.rh_model_definitions=data.rh_model_definitions;
         const count = Number(data.model_count ?? data.total ?? KIE_IMAGE_MODELS.length);
         const checks = data.checks || {};
         const checksText = isAddress
@@ -3414,14 +3436,14 @@ async function fetchModels(){
 
 // —— 模型选择器浮层 ——
 // 每个模型只归一类（根据用户已配置 或 关键字猜测）；勾选 = 纳入该分类
-let pickerState = { category: {}, selected: {} };
+let pickerState = { category: {}, selected: {}, uses: {} };
 let pickerVisibleIds = [];
 function openModelPicker(){
     const item = provider();
     if(!item || !lastFetchedAll.length){ alert('没有拉取到模型'); return; }
     const existing = { image: new Set(item.image_models||[]), chat: new Set(item.chat_models||[]), video: new Set(item.video_models||[]) };
     const allIds = new Set([...lastFetchedAll, ...(item.image_models||[]), ...(item.chat_models||[]), ...(item.video_models||[])]);
-    pickerState = { category: {}, selected: {} };
+    pickerState = { category: {}, selected: {}, uses: {} };
     allIds.forEach(id => {
         // 类别归属：用户已配置 > 关键字建议 > 默认 chat
         let cat;
@@ -3432,6 +3454,7 @@ function openModelPicker(){
         else if(lastFetchedSuggestion?.video?.has(id)) cat = 'video';
         else cat = 'chat';
         pickerState.category[id] = cat;
+        pickerState.uses[id]={image:existing.image.has(id),chat:existing.chat.has(id),video:existing.video.has(id)};
         // 默认勾选状态：已在用户配置里的 = 勾选；新拉的 = 不勾选（让用户主动选）
         pickerState.selected[id] = existing.image.has(id) || existing.chat.has(id) || existing.video.has(id);
     });
@@ -3451,15 +3474,15 @@ function renderModelPicker(){
     const selecteds = { all:0, image:0, chat:0, video:0 };
     ids.forEach(id => {
         const cat = pickerState.category[id];
-        totals[cat]++;
-        if(pickerState.selected[id]){ selecteds[cat]++; selecteds.all++; }
+        if(personalSettings){for(const kind of ['image','chat','video']){totals[kind]++;if(pickerState.uses[id][kind])selecteds[kind]++;}if(Object.values(pickerState.uses[id]).some(Boolean))selecteds.all++;}
+        else{totals[cat]++;if(pickerState.selected[id]){selecteds[cat]++;selecteds.all++;}}
     });
     // 过滤显示
     const list = ids.filter(id => {
         const label = modelDisplayName(id, item);
         if(filter && !id.toLowerCase().includes(filter) && !label.toLowerCase().includes(filter)) return false;
         if(currentTab === 'all') return true;
-        return pickerState.category[id] === currentTab;
+        return pickerState.category[id] === currentTab || (personalSettings && pickerState.uses[id][currentTab]);
     });
     pickerVisibleIds = list;
     document.getElementById('pickerCount').textContent = `共 ${totals.all} 个模型 · 当前显示 ${list.length} 个`;
@@ -3482,6 +3505,7 @@ function renderModelPicker(){
                     <div class="picker-model-label">${escapeHtml(label || id)}</div>
                     ${label && label !== id ? `<div class="picker-model-id">${escapeHtml(id)}</div>` : ''}
                 </div>
+                ${personalSettings ? ['image','chat','video'].map(kind=>`<label onclick="event.stopPropagation()"><input type="checkbox" ${pickerState.uses[id][kind]?'checked':''} onchange="togglePickerUseByIndex(${index},'${kind}')">${{image:'图片',chat:'文本',video:'视频'}[kind]}</label>`).join('') : ''}
             </div>
         `;
     }).join('');
@@ -3496,8 +3520,10 @@ function renderModelPicker(){
     if(sumVideo){ sumVideo.textContent = `视频 ${selecteds.video}`; sumVideo.classList.toggle('picker-sum-chip-empty', selecteds.video === 0); }
     if(sumUnsel){ sumUnsel.textContent = `未选 ${totals.all - selecteds.all}`; }
 }
+function togglePickerUseByIndex(index,kind){const id=pickerVisibleIds[index];if(!id || !['image','chat','video'].includes(kind))return;pickerState.uses[id][kind]=!pickerState.uses[id][kind];pickerState.selected[id]=Object.values(pickerState.uses[id]).some(Boolean);renderModelPicker();}
 function togglePickerRow(id){
     pickerState.selected[id] = !pickerState.selected[id];
+    if(personalSettings){if(!pickerState.selected[id])pickerState.uses[id]={image:false,chat:false,video:false};else pickerState.uses[id][pickerState.category[id]]=true;}
     renderModelPicker();
 }
 function togglePickerRowByIndex(index){
@@ -3516,16 +3542,18 @@ function applyModelPicker(){
     Object.entries(pickerState.selected).forEach(([id, sel]) => {
         if(!sel) return;
         const cat = pickerState.category[id];
-        if(cat === 'image') image.push(id);
+        if(personalSettings){if(pickerState.uses[id].image)image.push(id);if(pickerState.uses[id].chat)chat.push(id);if(pickerState.uses[id].video)video.push(id);}
+        else if(cat === 'image') image.push(id);
         else if(cat === 'video') video.push(id);
         else chat.push(id);
         const label = modelDisplayName(id, item);
         if(label && label !== id) modelNames[id] = label;
     });
-    item.image_models = image;
-    item.chat_models = chat;
-    item.video_models = video;
-    item.model_names = modelNames;
+    // A catalog picker edits its chosen use without erasing another saved use.
+    item.image_models = personalSettings ? unique([...(item.image_models || []).filter(m=>image.includes(m)),...image]) : image;
+    item.chat_models = personalSettings ? unique([...(item.chat_models || []).filter(m=>chat.includes(m)),...chat]) : chat;
+    item.video_models = personalSettings ? unique([...(item.video_models || []).filter(m=>video.includes(m)),...video]) : video;
+    item.model_names = personalSettings ? {...item.model_names,...modelNames} : modelNames;
     renderModels('image'); renderModels('chat'); renderModels('video');
     renderMsLoras();
     setStatus(`已应用 · 生图 ${image.length} / LLM ${chat.length} / 视频 ${video.length}，点保存生效`);
@@ -3553,17 +3581,28 @@ async function clearKeyOnly(){
 }
 const FIXED_PROTOCOL_PROVIDER_IDS = new Set(['modelscope', 'volcengine', 'runninghub', 'kie']);
 function providerSupportsModelProtocol(item){
-    return Boolean(item) && !FIXED_PROTOCOL_PROVIDER_IDS.has(item.id);
+    return Boolean(item) && (personalSettings || !FIXED_PROTOCOL_PROVIDER_IDS.has(item.id));
+}
+function updateModelAdapter(kind,index,value){
+    const item=provider(); const category=kind==='image'?'image_models':kind==='video'?'video_models':'chat_models';
+    const model=item[category][index]; const key=(kind==='chat'?'llm':kind)+'|'+model; item.model_adapters ||= {}; if(value)item.model_adapters[key]=value;else delete item.model_adapters[key];
+}
+function modelAdapterSelectHtml(kind,index,model,item){
+    if(!personalSettings || kind==='chat')return '';
+    const current=item.model_adapters?.[kind+'|'+model]||item.model_adapters?.[model]||'';
+    const options=['','openai','openai-json','openai-responses','openai-responses-stream','openai-responses-sync','openai-video-proxy','tudou-async','modelscope-async','tudou-grok-image','midjourney','gpt-image-2','nano-banana-pro','runninghub-openapi','tudou-grok-video','tudou-sora2','tudou-veo31','tudou-kling','tudou-pixverse','tudou-seedance','yuli-openai-video','yuli-native-video','lingjing-video','agnes-video','apimart-veo31'];
+    return `<select title="接口契约适配器；模型 ID 原样提交" onchange="updateModelAdapter('${kind}',${index},this.value)">${options.map(v=>`<option value="${v}" ${v===current?'selected':''}>${v||'默认适配器'}</option>`).join('')}</select>`;
 }
 function modelProtocolSelectHtml(kind, index, model, item){
-    if(kind === 'video' || !providerSupportsModelProtocol(item)) return '';
+    if((kind === 'video' && !personalSettings) || !providerSupportsModelProtocol(item)) return '';
     const map = (item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {};
-    const current = String(map[String(model || '').trim()] || '').toLowerCase();
+    const current = String(map[(kind==='chat'?'llm':kind)+'|'+String(model || '').trim()] || map[String(model || '').trim()] || '').toLowerCase();
     const opt = (val, label) => `<option value="${val}" ${current === val ? 'selected' : ''}>${label}</option>`;
     return `<select class="model-protocol-select" title="该模型使用的协议，默认跟随平台全局协议" onchange="updateModelProtocol('${kind}', ${index}, this.value)">
         <option value="" ${current === '' ? 'selected' : ''}>默认</option>
         ${opt('openai', 'OpenAI')}
         ${opt('gemini', 'Gemini')}
+        ${personalSettings ? ['apimart','volcengine','runninghub','kie'].map(p=>opt(p,p)).join('') : ''}
     </select>`;
 }
 function renderModels(kind){
@@ -3575,7 +3614,7 @@ function renderModels(kind){
         list.innerHTML = `<div class="empty">${tr('api.noModels')}</div>`;
         return;
     }
-    if(item?.id === 'kie'){
+    if(item?.id === 'kie' && !personalSettings){
         list.innerHTML = models.map(model => `
             <div class="model-row">
                 <div class="model-id-field">
@@ -3585,17 +3624,18 @@ function renderModels(kind){
         `).join('');
         return;
     }
-    const showProtocol = kind !== 'video' && providerSupportsModelProtocol(item);
+    const showProtocol = (personalSettings || kind !== 'video') && providerSupportsModelProtocol(item);
     list.innerHTML = models.map((model, index) => {
         const label = modelDisplayName(model, item);
         return `
             <div class="model-row${showProtocol ? ' has-protocol' : ''}">
                 <div class="model-id-field">
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
-                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)" ${item?.id === 'kie' ? 'disabled' : ''}>
+                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)" ${item?.id === 'kie' && !personalSettings ? 'disabled' : ''}>
                 </div>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
-                <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除" ${item?.id === 'kie' ? 'disabled' : ''}><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                ${modelAdapterSelectHtml(kind,index,model,item)}
+                <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除" ${item?.id === 'kie' && !personalSettings ? 'disabled' : ''}><i data-lucide="trash-2" class="w-4 h-4"></i></button>
             </div>
         `;
     }).join('');
@@ -3609,11 +3649,11 @@ function msLoraTargetOptions(selected){
 function normalizeLoraStrength(value){
     const n = Number(value);
     if(!Number.isFinite(n)) return 0.8;
-    return Math.max(0, Math.min(2, n));
+    return personalSettings ? n : Math.max(0, Math.min(2, n));
 }
 function renderMsLoras(){
     const item = provider();
-    if(!msLoraList || !item || item.id !== 'modelscope') return;
+    if(!msLoraList || !item || (!personalSettings && item.id !== 'modelscope')) return;
     item.ms_loras = Array.isArray(item.ms_loras) ? item.ms_loras : [];
     if(!item.ms_loras.length){
         msLoraList.innerHTML = `<div class="lora-empty">${tr('api.loraEmpty')}</div>`;
@@ -3634,7 +3674,7 @@ function renderMsLoras(){
                 </label>
                 <label class="lora-field">
                     <span>${tr('api.loraDefaultStrength')}</span>
-                    <input type="number" min="0" max="2" step="0.05" value="${strength}" oninput="updateMsLora(${index}, 'strength', this.value)">
+                    <input type="number" ${personalSettings ? 'step="any"' : 'min="0" max="2" step="0.05"'} value="${strength}" oninput="updateMsLora(${index}, 'strength', this.value)">
                 </label>
                 <button class="icon-btn" type="button" onclick="removeMsLora(${index})" title="${escapeAttr(tr('common.delete'))}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
             </div>
@@ -3644,7 +3684,7 @@ function renderMsLoras(){
 }
 function addMsLora(){
     const item = provider();
-    if(!item || item.id !== 'modelscope') return;
+    if(!item || (!personalSettings && item.id !== 'modelscope')) return;
     item.ms_loras = Array.isArray(item.ms_loras) ? item.ms_loras : [];
     item.ms_loras.push({
         id:'',
@@ -3658,7 +3698,7 @@ function addMsLora(){
 }
 function updateMsLora(index, field, value){
     const item = provider();
-    if(!item || item.id !== 'modelscope') return;
+    if(!item || (!personalSettings && item.id !== 'modelscope')) return;
     item.ms_loras = Array.isArray(item.ms_loras) ? item.ms_loras : [];
     const lora = item.ms_loras[index];
     if(!lora) return;
@@ -3667,7 +3707,7 @@ function updateMsLora(index, field, value){
 }
 function removeMsLora(index){
     const item = provider();
-    if(!item || item.id !== 'modelscope') return;
+    if(!item || (!personalSettings && item.id !== 'modelscope')) return;
     item.ms_loras = Array.isArray(item.ms_loras) ? item.ms_loras : [];
     item.ms_loras.splice(index, 1);
     renderMsLoras();
@@ -3811,7 +3851,7 @@ async function clearVolcengineAssetKeys(){
 }
 function addModel(kind){
     const item = provider();
-    if(item?.id === 'kie') return;
+    if(item?.id === 'kie' && !personalSettings) return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     item[key] = [...(item[key] || []), ''];
     renderModels(kind);
@@ -3824,11 +3864,18 @@ function modelProtocolStillUsed(item, name){
 }
 function updateModel(kind, index, value){
     const item = provider();
-    if(item?.id === 'kie') return;
+    if(item?.id === 'kie' && !personalSettings) return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     const oldName = String(item[key][index] || '').trim();
     const newName = String(value || '').trim();
     item[key][index] = value;
+    if(personalSettings && oldName && oldName!==newName){
+        const purpose=kind==='chat'?'llm':kind;
+        for(const field of ['model_protocols','model_adapters']){
+            const map=item[field];const oldKey=purpose+'|'+oldName;
+            if(map && Object.prototype.hasOwnProperty.call(map,oldKey)){if(newName)map[purpose+'|'+newName]=map[oldKey];delete map[oldKey];}
+        }
+    }
     // 重命名时迁移该模型的协议覆盖
     if(item.model_protocols && typeof item.model_protocols === 'object' && oldName && oldName !== newName){
         if(Object.prototype.hasOwnProperty.call(item.model_protocols, oldName)){
@@ -3857,19 +3904,25 @@ function updateModelProtocol(kind, index, value){
     const name = String(item[key]?.[index] || '').trim();
     if(!name) return;
     if(!item.model_protocols || typeof item.model_protocols !== 'object') item.model_protocols = {};
+    const overrideKey = personalSettings ? (kind==='chat'?'llm':kind)+'|'+name : name;
     const proto = String(value || '').trim().toLowerCase();
-    if(proto === 'openai' || proto === 'gemini'){
-        item.model_protocols[name] = proto;
+    if(['openai','gemini',...(personalSettings?['apimart','volcengine','runninghub','kie']:[])].includes(proto)){
+        item.model_protocols[overrideKey] = proto;
     } else {
-        delete item.model_protocols[name];
+        delete item.model_protocols[overrideKey];
     }
 }
 function removeModel(kind, index){
     const item = provider();
-    if(item?.id === 'kie') return;
+    if(item?.id === 'kie' && !personalSettings) return;
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
     const removed = String(item[key][index] || '').trim();
     item[key].splice(index, 1);
+    if(personalSettings){
+        const purpose=kind==='chat'?'llm':kind;
+        for(const field of ['model_protocols','model_adapters']){if(item[field])delete item[field][purpose+'|'+removed];}
+        if(item.model_adapters && !modelProtocolStillUsed(item,removed))delete item.model_adapters[removed];
+    }
     // 清理不再使用的协议覆盖
     if(removed && item.model_protocols && typeof item.model_protocols === 'object' && !modelProtocolStillUsed(item, removed)){
         delete item.model_protocols[removed];
@@ -3898,19 +3951,19 @@ async function saveProviders(){
     providers.forEach(item => {
         item.id = normalizeId(item.id);
         applyLockedRecommendedProtocol(item);
-        item.protocol = item.id === 'runninghub'
+        item.protocol = personalSettings ? item.protocol : item.id === 'runninghub'
             ? 'runninghub'
             : item.id === 'volcengine'
             ? 'volcengine'
             : API_PROTOCOLS.includes(String(item.protocol || '').toLowerCase()) ? String(item.protocol).toLowerCase() : 'openai';
         const isCliProtocol = CLI_PROTOCOLS.has(item.protocol);
         item.image_request_mode = normalizeImageRequestMode(
-            item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
+            !personalSettings && (item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol)
                 ? 'openai'
                 : item.image_request_mode
         );
         item.image_edit_route = normalizeImageEditRoute(
-            item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
+            !personalSettings && (item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol)
                 ? 'general'
                 : item.image_edit_route
         );
@@ -3958,7 +4011,7 @@ async function saveProviders(){
                 id:item.id,
                 name:item.name,
                 base_url:item.base_url,
-                protocol:(item.id === 'modelscope') ? 'openai' : item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai'),
+                protocol:personalSettings ? item.protocol : (item.id === 'modelscope') ? 'openai' : item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai'),
                 image_request_mode:item.image_request_mode || 'openai',
                 image_edit_route:item.image_edit_route || 'general',
                 image_generation_endpoint:item.image_generation_endpoint || '',
@@ -3970,8 +4023,10 @@ async function saveProviders(){
                 video_models:item.video_models || [],
                 model_names:(item.model_names && typeof item.model_names === 'object') ? item.model_names : {},
                 model_protocols:(item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {},
-                ms_loras:item.id === 'modelscope' ? (item.ms_loras || []) : [],
-                ms_defaults_version:item.id === 'modelscope' ? (item.ms_defaults_version || 1) : 0,
+                model_adapters:item.model_adapters || {},
+                rh_model_definitions:item.rh_model_definitions || [],
+                ms_loras:(personalSettings || item.id === 'modelscope') ? (item.ms_loras || []) : [],
+                ms_defaults_version:(personalSettings || item.id === 'modelscope') ? (item.ms_defaults_version || 1) : 0,
                 rh_apps:(item.id === 'runninghub' || item.protocol === 'runninghub') ? (item.rh_apps || []) : [],
                 rh_workflows:(item.id === 'runninghub' || item.protocol === 'runninghub') ? (item.rh_workflows || []) : [],
                 volcengine_project_name:isVolcengineProvider(item) ? (item.volcengine_project_name || VOLCENGINE_DEFAULT_PROJECT_NAME) : '',

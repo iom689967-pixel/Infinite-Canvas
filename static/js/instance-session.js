@@ -49,6 +49,19 @@
         if (loggedOut) throw new Error('请先登录');
         const headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
         if (!['GET', 'HEAD'].includes(method)) headers.set('X-CSRF-Token', session.csrf);
+        // The native RH workbench uses the same private Provider as API nodes.
+        // Never infer an owner provider from the historical "runninghub" ID.
+        if(url.pathname.startsWith('/api/runninghub/') && !url.pathname.endsWith('/query')) {
+            const providerId=document.documentElement.dataset.personalRhProviderId;
+            if(providerId){
+                if(['GET','HEAD','DELETE'].includes(method) && !url.searchParams.has('provider_id'))url.searchParams.set('provider_id',providerId);
+                else if(typeof options.body==='string'){
+                    const body=JSON.parse(options.body);
+                    if(!body.provider_id)options={...options,body:JSON.stringify({...body,provider_id:providerId})};
+                }
+            }
+            input=url.href;
+        }
         const response = await originalFetch(input, {...options, headers, credentials: 'same-origin',
             cache: programResource ? (options.cache || 'default') : 'no-store'});
         const namespace = response.headers.get('X-Instance-Namespace');

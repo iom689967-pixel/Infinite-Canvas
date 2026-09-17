@@ -829,6 +829,7 @@
         localStorage.setItem("client_id", CLIENT_ID);
 
         let uploadedPath = "";
+        let uploadedPersonalUrl = '';
         let uploadedFile = null; // Store raw file for cloud upload
         let currentResult = null;
         let allHistory = [];
@@ -901,8 +902,10 @@
             const formData = new FormData();
             formData.append('files', file);
             try {
-                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const res = await fetch(window.PersonalModelscopeSelection ? '/api/ai/upload' : '/api/upload', { method: 'POST', body: formData });
                 const data = await res.json();
+                if(!res.ok || !data.files?.[0])throw new Error('素材上传失败');
+                uploadedPersonalUrl=data.files[0].url;
                 uploadedPath = data.files[0].comfy_name;
                 btn.disabled = false;
                 btnText.innerText = tr('studio.generateAngle');
@@ -955,7 +958,9 @@
             if (!uploadedFile) throw new Error("Please upload an image first");
 
             // Get token from centralized management (Global server token first, legacy localStorage fallback)
+            const personalSelection=window.PersonalModelscopeSelection?.get();
             let token = '';
+            if(!personalSelection){
             try {
                 const res = await fetch('/api/config/token');
                 if (res.ok) {
@@ -983,6 +988,7 @@
                 throw new Error("请先点击右上角设置 ModelScope Token");
             }
 
+            }
             // Convert image to Base64
             const toBase64 = file => new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -991,7 +997,7 @@
                 reader.onerror = error => reject(error);
             });
 
-            const dataUri = await toBase64(uploadedFile);
+            const dataUri = personalSelection ? uploadedPersonalUrl : await toBase64(uploadedFile);
             console.log("DataURI generated, length:", dataUri.length);
 
             // Submit task via dedicated Angle endpoint
@@ -1005,9 +1011,11 @@
 
             const payload = {
                 "prompt": promptInput.value,
-                "api_key": token,
+                "api_key": personalSelection ? undefined : token,
+                "provider_id":personalSelection?.provider_id,
+                "request_id":personalSelection ? crypto.randomUUID() : undefined,
                 "type": "angle",
-                "model": "Qwen/Qwen-Image-Edit-2511",
+                "model": personalSelection?.model || "Qwen/Qwen-Image-Edit-2511",
                 "image_urls": [dataUri],
                 "client_id": clientId
             };
@@ -1046,7 +1054,7 @@
                          // Call poll endpoint
                          const pollPayload = {
                              "task_id": taskId,
-                             "api_key": token,
+                             "api_key": personalSelection ? undefined : token,
                              "client_id": clientId
                          };
                          

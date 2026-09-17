@@ -889,6 +889,17 @@ async def _resolve_source_cache_hit(
     return result
 
 
+def reference_image_bytes(client,content,*,index,filename,max_bytes):
+    if not getattr(client,'preserve_reference_bytes',False):
+        return normalize_image_bytes(content,index=index,filename=filename,max_bytes=max_bytes)
+    try:
+        with Image.open(BytesIO(content)) as source:
+            if source.format not in {'PNG','JPEG','WEBP'} or source.width*source.height>32_000_000 or len(content)>max_bytes:raise ValueError()
+            source.load()
+            meta=dict(format=source.format,mime_type={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[source.format],extension={'PNG':'.png','JPEG':'.jpg','WEBP':'.webp'}[source.format],mode=source.mode,bits_per_channel=16 if '16' in source.mode else 8,width=source.width,height=source.height,bytes=len(content))
+            return content,meta
+    except Exception as exc:raise KieReferenceError('图片解码失败或超过 Instance 安全上限',index=index,filename=filename) from exc
+
 async def _read_reference_for_reupload(client, context, *, resolve_local_path, max_bytes):
     source_url = context["source_url"]
     source_form = context["source_form"]
@@ -931,12 +942,7 @@ async def _read_reference_for_reupload(client, context, *, resolve_local_path, m
         source_type = _magic_image_type(content)
         context["source_fingerprint"] = source_fingerprint
         context["local_source"] = local_source
-    normalized, meta = normalize_image_bytes(
-        content,
-        index=index,
-        filename=filename,
-        max_bytes=max_bytes,
-    )
+    normalized, meta = reference_image_bytes(client,content,index=index,filename=filename,max_bytes=max_bytes)
     return normalized, meta, local_source, source_type
 
 
@@ -1225,7 +1231,7 @@ async def prepare_kie_references(
                             )
                         normalize_started = time.perf_counter()
                         _diagnose(client, 'normalize', media_type=source_type)
-                        normalized, meta = normalize_image_bytes(
+                        normalized, meta = reference_image_bytes(client,
                             content, index=index, filename=filename, max_bytes=max_bytes
                         )
                         normalize_ms = (time.perf_counter() - normalize_started) * 1000
@@ -1250,7 +1256,7 @@ async def prepare_kie_references(
                             _log_reference_source_cache("STORE", source_fingerprint)
             else:
                 normalize_started = time.perf_counter()
-                normalized, meta = normalize_image_bytes(
+                normalized, meta = reference_image_bytes(client,
                     content, index=index, filename=filename, max_bytes=max_bytes
                 )
                 normalize_ms = (time.perf_counter() - normalize_started) * 1000

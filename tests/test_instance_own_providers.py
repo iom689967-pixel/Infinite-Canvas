@@ -97,7 +97,9 @@ class OwnProviderTests(unittest.TestCase):
         self.ok('A','PUT',API,json=item | {'clear_key':True})
         self.assertFalse(keyfile.exists())
         self.assertFalse(self.ok('A','GET',API)['providers'][0]['has_key'])
-        self.assertNotIn('arbitrary-text-v99',self.ok('A','GET','/api/models')['chat_models'])
+        self.assertIn('arbitrary-text-v99',self.ok('A','GET','/api/models')['chat_models'])
+        cap=next(p for p in self.ok('A','GET','/api/config')['api_providers'] if p['id']=='personal')['capabilities']['llm']['arbitrary-text-v99']
+        self.assertFalse(cap['executable']);self.assertIn('凭证',cap['reason'])
         self.ok('A','PUT',API,json=item | {'api_key':self.keys['A']})
         self.ok('A','PUT',API,json=item | {'enabled':False})
         self.assertEqual(self.request('A','POST','/api/canvas-llm',json={'provider':'personal','model':'arbitrary-text-v99','message':'hi'}).status_code,403)
@@ -139,7 +141,7 @@ class OwnProviderTests(unittest.TestCase):
                 self.assertIn('garment',result['text'])
         gemini=next(p for kind,_,p in self.mock.calls if kind=='llm')
         self.assertIn('inlineData',json.dumps(gemini))
-        self.assertEqual(gemini['generationConfig']['maxOutputTokens'],64)
+        self.assertNotIn('maxOutputTokens',gemini.get('generationConfig',{}))
         self.assertEqual(sum(kind=='create' for kind,_,_ in self.mock.calls),1)
         for n in ('A','B'):
             log=(self.root/f'{n}.log').read_text()
@@ -157,11 +159,11 @@ class OwnProviderTests(unittest.TestCase):
         self.assertEqual(self.mock.calls,[('discover','A',{})])
 
     def test_unsupported_models_stored_but_never_run_or_expand_limits(self):
-        self.save_personal()
-        item=self.item();item['models'] += [{'id':'future-image','purpose':'image'},{'id':'future-video','purpose':'video'}]
+        self.save_personal(protocol='kie')
+        item=self.item(protocol='kie');item['models'] += [{'id':'future-image','purpose':'image'},{'id':'future-video','purpose':'video'}]
         saved=self.ok('A','PUT',API,json=item)
         self.assertFalse(saved['providers'][0]['models'][1]['supported'])
-        self.assertNotIn('future-image',self.ok('A','GET','/api/models')['image_models'])
+        self.assertIn('future-image',self.ok('A','GET','/api/models')['image_models'])
         self.assertEqual(self.request('A','POST','/api/canvas-image-tasks',json=self.image_payload(provider_id='personal',model='future-image')).status_code,403)
         self.assertEqual(self.request('A','PUT',API,json=item | {'max_concurrent':8}).status_code,400)
         self.assertEqual(self.request('A','PUT',API,json=item | {'model_limits':{}}).status_code,400)

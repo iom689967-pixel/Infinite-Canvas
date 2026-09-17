@@ -71,9 +71,10 @@ def validate_root(root, instance_id, *, initialize=False):
 
 
 class AuthStore:
-    def __init__(self, root, instance_id, *, initialize=False, ttl=28800):
+    def __init__(self, root, instance_id, *, initialize=False, ttl=28800, personal_api=False):
         self.root = validate_root(root, instance_id, initialize=initialize)
         self.instance_id = instance_id
+        self.personal_api = personal_api
         self.db_path = self.root / ".auth/access.sqlite3"
         self.ttl = ttl
         self.boot = secrets.token_hex(16)
@@ -195,6 +196,8 @@ class AuthStore:
         with self.connect() as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='permissions'").fetchone()
             permissions = [p[0] for p in db.execute('SELECT permission FROM permissions WHERE username=?', (row['username'],))] if exists else []
+        if self.personal_api and 'manage_own_providers' not in permissions:
+            permissions.append('manage_own_providers')
         return {"username": row["username"], "role": "assistant", "instance_id": self.instance_id,
                 "permissions": permissions,
                 "csrf": row["csrf"], "expires": row["expires"],

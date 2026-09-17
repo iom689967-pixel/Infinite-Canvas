@@ -683,9 +683,17 @@ function isRunningHubProvider(provider){
 function normalizeProviderId(value){
     return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40);
 }
+const personalApiInstance = Boolean(document.getElementById('instance-context'));
+let providerConfigError = '';
+function providerPool(){ return personalApiInstance ? apiProviders : (apiProviders.length ? apiProviders : defaultApiProviders()); }
+function capabilityModelOption(model, selected, providerId, purpose){
+    const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];
+    const reason=providerConfigError || (personalApiInstance && !cap ? '尚未配置此 Provider / 模型用途' : cap && !cap.executable ? cap.reason : '');
+    return `<option value="${escapeHtml(model)}" ${model===selected?'selected':''} ${reason?'disabled':''}>${escapeHtml(model)}${reason?' · '+escapeHtml(reason):''}</option>`;
+}
 function imageApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
+    const providers = providerPool()
+        .filter(p => (personalApiInstance || p.id !== 'modelscope') && (personalApiInstance || p.enabled !== false) && (p.image_models || []).length);
     return providers;
 }
 function midjourneyApiProviders(){
@@ -706,19 +714,20 @@ function midjourneyProviderOptions(selectedId){
     return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function providerById(id){
-    return (apiProviders.length ? apiProviders : defaultApiProviders()).find(p => p.id === id) || imageApiProviders()[0] || defaultApiProviders()[0];
+    return providerPool().find(p => p.id === id) || imageApiProviders()[0] || defaultApiProviders()[0];
 }
 function resolveProviderId(id){
     return providerById(id)?.id || 'comfly';
 }
 function chatApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
+    const providers = providerPool()
         .filter(p => p.enabled !== false && (p.chat_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    return providers.length || personalApiInstance ? providers : defaultApiProviders();
 }
 function resolveChatProviderId(id){
+    if(personalApiInstance && id && id !== 'comfly') return id;
     const providers = chatApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return providers.find(p => p.id === id)?.id || providers[0]?.id || (personalApiInstance ? '' : 'comfly');
 }
 function chatProviderOptions(selectedId){
     const selected = resolveChatProviderId(selectedId);
@@ -729,8 +738,9 @@ function providerChatModels(providerId){
     return uniqueModels(provider?.chat_models || []);
 }
 function resolveImageProviderId(id){
+    if(personalApiInstance && id && id !== 'comfly') return id;
     const providers = imageApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || '';
+    return (personalApiInstance && apiProviders.find(p=>p.id===id)?.id) || providers.find(p => p.id === id)?.id || providers[0]?.id || '';
 }
 function providerOptions(selectedId){
     const selected = resolveImageProviderId(selectedId);
@@ -747,17 +757,22 @@ function sanitizeImageNodeProviderModel(node){
     if(!node || node.type !== 'generator') return;
     node.apiProvider = resolveImageProviderId(node.apiProvider || '');
     const models = providerImageModels(node.apiProvider);
+    if(personalApiInstance){
+        if(!node.model) node.model = models[0] || '';
+        return;
+    }
     if(!models.length) node.model = '';
     else if(!models.includes(resolveImageModel(node.model))) node.model = models[0] || '';
 }
 function videoApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.video_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    const providers = providerPool()
+        .filter(p => (personalApiInstance || p.id !== 'modelscope') && (personalApiInstance || p.enabled !== false) && (p.video_models || []).length);
+    return providers.length || personalApiInstance ? providers : defaultApiProviders();
 }
 function resolveVideoProviderId(id){
+    if(personalApiInstance && id && id !== 'comfly') return id;
     const providers = videoApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return providers.find(p => p.id === id)?.id || providers[0]?.id || (personalApiInstance ? '' : 'comfly');
 }
 function videoProviderOptions(selectedId){
     const selected = resolveVideoProviderId(selectedId);
@@ -772,6 +787,10 @@ function sanitizeVideoNodeProviderModel(node){
     if(!node || node.type !== 'video') return;
     node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
     const models = providerVideoModels(node.apiProvider);
+    if(personalApiInstance){
+        if(!node.model) node.model = models[0] || '';
+        return;
+    }
     if(!models.length) node.model = '';
     else if(!models.includes(node.model)) node.model = models[0] || '';
 }
@@ -781,13 +800,16 @@ function videoModelOptions(selectedModel, providerId){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
     }
     const selected = selectedModel || models[0];
-    return uniqueModels([selected, ...models]).filter(Boolean).map(model => `<option value="${escapeHtml(model)}" ${model === selected ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    return uniqueModels([selected,...models]).filter(Boolean).map(model=>capabilityModelOption(model,selected,providerId,'video')).join('');
 }
 function allImageModels(providerId){
     const providerModels = providerImageModels(providerId || managedProviderId);
     return uniqueModels(providerModels);
 }
-function modelscopeImageModels(selected = ''){
+function personalModelscopeProviders(){return providerPool().filter(p=>p.personal && Object.values(p.capabilities?.image || {}).some(c=>c.adapter==='modelscope-async'));}
+function personalMsProvider(node={}){const ps=personalModelscopeProviders();return node.msProviderId ? ps.find(p=>p.id===node.msProviderId) : ps[0];}
+function modelscopeImageModels(selected = '', node=null){
+    if(personalApiInstance)return uniqueModels((node ? [personalMsProvider(node)].filter(Boolean) : personalModelscopeProviders()).flatMap(p=>Object.keys(p.capabilities?.image || {}).filter(m=>p.capabilities.image[m].adapter==='modelscope-async')));
     const provider = (apiProviders.length ? apiProviders : []).find(p => p.id === 'modelscope');
     return uniqueModels([
         selected,
@@ -796,16 +818,16 @@ function modelscopeImageModels(selected = ''){
         'black-forest-labs/FLUX.2-klein-9B'
     ]);
 }
-function modelscopeImageModelOptions(selectedModel){
-    const selectedValue = selectedModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo';
-    return modelscopeImageModels(selectedValue).map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+function modelscopeImageModelOptions(selectedModel,node=null){
+    const selectedValue = selectedModel || modelscopeImageModels('',node)[0] || (personalApiInstance ? '' : 'Tongyi-MAI/Z-Image-Turbo');
+    return modelscopeImageModels(selectedValue,node).map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
 }
 function currentMsModelId(modelKey, node){
     if(modelKey === 'custom') return node.msCustomModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo';
     return (MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage).modelId;
 }
-function modelscopeLorasForModel(modelId){
-    const provider = (apiProviders.length ? apiProviders : []).find(p => p.id === 'modelscope');
+function modelscopeLorasForModel(modelId, node={}){
+    const provider = personalApiInstance ? personalMsProvider(node) : (apiProviders.length ? apiProviders : []).find(p => p.id === 'modelscope');
     const list = Array.isArray(provider?.ms_loras) ? provider.ms_loras : [];
     return list.filter(lora =>
         lora && lora.enabled !== false &&
@@ -825,6 +847,7 @@ function allChatModels(){
     return uniqueModels(hasManagedChatModels ? localChatModels : [...providerModels, ...chatModels, ...localChatModels]);
 }
 function resolveImageModel(value){
+    if(personalApiInstance)return value || allImageModels(managedProviderId)[0] || '';
     if(value === 'gpt') return models.gpt;
     if(value === 'nano') return models.nano;
     return value || allImageModels(managedProviderId)[0] || models.gpt;
@@ -850,6 +873,7 @@ function normalizedImageQuality(value){
 }
 function resolveChatModel(value, providerId=''){
     const providerModels = providerId ? providerChatModels(providerId) : [];
+    if(personalApiInstance) return value || providerModels[0] || allChatModels()[0] || '';
     return value || providerModels[0] || allChatModels()[0] || chatModels[0] || 'gpt-4o-mini';
 }
 function showErrorModal(message, title=tr('canvas.generationFailed')){
@@ -1090,9 +1114,9 @@ function imageModelOptions(selectedModel, providerId){
         return `<option value="" disabled selected>${tr('canvas.noImageModelsHint') || '暂无生图模型，请到 API 设置添加'}</option>`;
     }
     const selectedValue = resolveImageModel(selectedModel);
-    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    const options = models.map(model => capabilityModelOption(model,selectedValue,providerId,'image')).join('');
     const hasSelected = models.includes(selectedValue);
-    return `${hasSelected || !selectedValue ? '' : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`}${options}`;
+    return `${hasSelected || !selectedValue ? '' : (personalApiInstance ? capabilityModelOption(selectedValue,selectedValue,providerId,'image') : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`)}${options}`;
 }
 function chatModelOptions(selectedModel, providerId=''){
     const models = providerId ? providerChatModels(providerId) : allChatModels();
@@ -1100,9 +1124,9 @@ function chatModelOptions(selectedModel, providerId=''){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
     }
     const selectedValue = resolveChatModel(selectedModel, providerId);
-    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    const options = models.map(model => capabilityModelOption(model,selectedValue,providerId,'llm')).join('');
     const hasSelected = models.includes(selectedValue);
-    return `${hasSelected || !selectedValue ? '' : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`}${options}`;
+    return `${hasSelected || !selectedValue ? '' : (personalApiInstance ? capabilityModelOption(selectedValue,selectedValue,providerId,'llm') : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`)}${options}`;
 }
 function formatCanvasTime(value){
     if(!value) return '--';
@@ -1541,7 +1565,8 @@ async function loadConfig(){
         videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
         msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
         comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
-        apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
+        apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : (personalApiInstance ? [] : defaultApiProviders());
+        providerConfigError='';
         models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
         models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
         try {
@@ -1551,13 +1576,14 @@ async function loadConfig(){
             comfyWorkflows = [];
         }
         runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+        const rhProvider = runningHubProvider();
         const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
         await Promise.all(rhWorkflowIds.map(async workflowId => {
             try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
         }));
     } catch(e) {
-        apiProviders = defaultApiProviders();
+        providerConfigError='模型配置加载失败，请刷新或重新登录';
+        if(!personalApiInstance) apiProviders = defaultApiProviders();
     }
 }
 
@@ -2612,7 +2638,7 @@ function addMsGenNode(point){
         msgenModel:'zimage',
         msWidth:1024,
         msHeight:1024,
-        msCustomModel:modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo',
+        msCustomModel:modelscopeImageModels()[0] || (personalApiInstance ? '' : 'Tongyi-MAI/Z-Image-Turbo'),
         msRatio:'square',
         msResolution:'1k',
         msCustomRatio:'',
@@ -2763,6 +2789,7 @@ async function urlToBase64(url){
 function renderMsGenBody(node){
     const wrap = document.createElement('div');
     wrap.className = 'generator-body';
+    if(personalApiInstance)node.msgenModel='custom';
     const modelKey = node.msgenModel || 'zimage';
     const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
     const inputSources = generatorSources(node);
@@ -2772,16 +2799,17 @@ function renderMsGenBody(node){
     const referenceImages = mediaInputs.flatMap(src => src.refs || []);
     const isCustomMs = modelKey === 'custom';
     const msUsesImages = Boolean(msModel.supportsImage || msModel.acceptsImage);
-    node.msCustomModel = node.msCustomModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo';
+    node.msCustomModel = node.msCustomModel || modelscopeImageModels()[0] || (personalApiInstance ? '' : 'Tongyi-MAI/Z-Image-Turbo');
     const msModelId = currentMsModelId(modelKey, node);
-    const msLoras = modelscopeLorasForModel(msModelId);
+    const msLoras = modelscopeLorasForModel(msModelId,node);
     const selectedMsLora = msLoras.find(lora => String(lora.id || '').trim() === String(node.msLoraId || '').trim()) || msLoras[0];
     const loraEnabled = Boolean(node.msLoraEnabled);
     const loraStrength = node.msLoraStrength ?? Number(selectedMsLora?.strength ?? 0.8);
     const msCount = Math.max(1, Math.min(8, Number(node.count || 1)));
     wrap.innerHTML = `
+        ${personalApiInstance ? `<select class="select-lite ms-provider-select">${personalModelscopeProviders().map(p=>`<option value="${escapeHtml(p.id)}" ${p.id===personalMsProvider(node)?.id?'selected':''}>${escapeHtml(p.name||p.id)}</option>`).join('')||'<option value="">请配置 ModelScope 异步适配器</option>'}</select>` : ''}
         <div class="ms-model-tabs">
-            ${Object.entries(MS_GEN_MODELS).map(([k,m]) =>
+            ${Object.entries(MS_GEN_MODELS).filter(([k])=>!personalApiInstance || k==='custom').map(([k,m]) =>
                 `<button type="button" data-model="${k}" class="${modelKey===k?'active':''}">${escapeHtml(m.labelKey ? tr(m.labelKey) : m.label)}</button>`
             ).join('')}
         </div>
@@ -2796,7 +2824,7 @@ function renderMsGenBody(node){
             <div class="gen-settings">
                 ${isCustomMs ? `
                 <div class="gen-settings-row">
-                    <select class="select-lite ms-custom-model-select">${modelscopeImageModelOptions(node.msCustomModel)}</select>
+                    <select class="select-lite ms-custom-model-select">${modelscopeImageModelOptions(node.msCustomModel,node)}</select>
                 </div>
                 ` : ''}
                 <div class="gen-settings-row">
@@ -2866,7 +2894,7 @@ function renderMsGenBody(node){
                         <div class="setting-title" style="display:flex;justify-content:space-between">
                             <span>${tr('canvas.loraStrength')}</span><span class="ms-lora-strength-val">${loraStrength.toFixed(2)}</span>
                         </div>
-                        <input type="range" class="canvas-range ms-lora-strength-slider" min="0.1" max="1.0" step="0.05" value="${loraStrength}">
+                        <input type="${personalApiInstance ? 'number' : 'range'}" class="canvas-range ms-lora-strength-slider" ${personalApiInstance ? 'step="any"' : 'min="0.1" max="1.0" step="0.05"'} value="${loraStrength}">
                     </label>
                 </div>` : ''}` : ''}
                 ${!msLoras.length ? `<div class="gen-settings-row"><div style="color:var(--faint);font-size:11px;font-weight:700;line-height:1.45">${tr('canvas.noLoraForModel')}</div></div>` : ''}
@@ -3042,6 +3070,8 @@ function renderMsGenBody(node){
             };
         });
     }
+    const msProviderSelect=wrap.querySelector('.ms-provider-select');
+    if(msProviderSelect)msProviderSelect.onchange=e=>{node.msProviderId=e.target.value;node.msCustomModel=Object.keys(personalMsProvider(node)?.capabilities?.image||{}).find(m=>personalMsProvider(node).capabilities.image[m].adapter==='modelscope-async')||'';refreshNodes([node.id]);scheduleSave();};
     const msLoraCheck = wrap.querySelector('.ms-lora-check');
     if(msLoraCheck){
         msLoraCheck.onchange = e => {
@@ -3102,6 +3132,14 @@ function renderMsGenBody(node){
 async function runMsGenNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
+    if(personalApiInstance){
+        const provider=personalMsProvider(node);const model=node.msCustomModel;
+        if(!provider || provider.capabilities?.image?.[model]?.adapter!=='modelscope-async'){showErrorModal('请为当前个人 Provider 配置该精确模型及 ModelScope 异步适配器','ModelScope 配置不完整');return;}
+        node.apiProvider=provider.id;node.model=model;node.ratio=node.msRatio||'square';node.resolution=node.msResolution||'1k';node.customRatio=node.msCustomRatio||'';node.customSize=node.msCustomSize||'';
+        node.personalAdapterParameters={};
+        if(node.msLoraEnabled){const lora=modelscopeLorasForModel(model,node).find(l=>l.id===node.msLoraId);if(!lora){showErrorModal('该 LoRA 尚未配置在当前个人 Provider','LoRA 配置不完整');return;}node.personalAdapterParameters.loras={[lora.id]:Number(node.msLoraStrength??lora.strength??0.8)};}
+        return runGenerator(node.id,opts);
+    }
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const sources = orderedSources(node, generatorSources(node));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
@@ -3109,7 +3147,7 @@ async function runMsGenNode(nodeId, opts={}){
     const modelKey = node.msgenModel || 'zimage';
     const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
     const msModelId = currentMsModelId(modelKey, node);
-    const msLoras = modelscopeLorasForModel(msModelId);
+    const msLoras = modelscopeLorasForModel(msModelId,node);
     if(!prompt){ alert(tr('canvas.needPrompt')); return; }
     if(msModel.supportsImage && !refs.length){ alert(tr('canvas.needImage')); return; }
     const count = Math.max(1, Math.min(8, Number(node.count || 1)));
@@ -8930,7 +8968,7 @@ function renderVideoBody(node){
             <div class="gen-settings-row">
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoDuration')}</div>
-                    <input class="setting-input video-duration" type="number" min="1" max="60" step="1" value="${Number(node.duration || 5)}">
+                    <input class="setting-input video-duration" type="number" min="1" max="${personalApiInstance ? 3600 : 60}" step="1" value="${Number(node.duration || 5)}">
                 </label>
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoAspect')}</div>
@@ -8995,8 +9033,8 @@ function renderVideoBody(node){
         scheduleSave();
     };
     modelSelect.onchange = e => { e.stopPropagation(); node.model = e.target.value; scheduleSave(); };
-    durationSelect.oninput = e => { e.stopPropagation(); node.duration = Math.max(1, Math.min(60, Number(e.target.value || 5))); scheduleSave(); };
-    durationSelect.onblur = e => { e.target.value = String(Math.max(1, Math.min(60, Number(node.duration || 5)))); };
+    durationSelect.oninput = e => { e.stopPropagation(); node.duration = Math.max(1, Math.min(personalApiInstance ? 3600 : 60, Number(e.target.value || 5))); scheduleSave(); };
+    durationSelect.onblur = e => { e.target.value = String(Math.max(1, Math.min(personalApiInstance ? 3600 : 60, Number(node.duration || 5)))); };
     aspectSelect.onchange = e => { e.stopPropagation(); node.aspectRatio = e.target.value; scheduleSave(); };
     resolutionSelect.onchange = e => { e.stopPropagation(); node.resolution = e.target.value; scheduleSave(); };
     wrap.querySelectorAll('[data-video-toggle]').forEach(btn => {
@@ -10006,7 +10044,7 @@ function rhIsWorkflowLinkValue(value){
     return Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' && Number.isInteger(value[1]);
 }
 function runningHubProvider(){
-    const provider = (apiProviders || []).find(p => p.id === 'runninghub');
+    const provider = personalApiInstance ? apiProviders.find(p=>p.id===document.documentElement.dataset.personalRhProviderId) || apiProviders.find(p=>p.protocol==='runninghub' && p.enabled!==false) : apiProviders.find(p=>p.id==='runninghub');
     return provider || null;
 }
 function runningHubEntries(kind){
@@ -10076,7 +10114,7 @@ function applyRhEntrySelection(node, ref){
     else if(ref.kind === 'model'){
         node.rhModel = ref.id;
         node.model = ref.id;
-        node.apiProvider = 'runninghub';
+        node.apiProvider = personalApiInstance ? runningHubProvider()?.id || '' : 'runninghub';
         node.resolution = node.resolution || defaultApiImageResolution(ref.id);
         node.ratio = node.ratio || 'square';
         node.quality = node.quality || 'auto';
@@ -10920,6 +10958,7 @@ async function runRhNode(nodeId, opts={}){
         const body = mode === 'workflow'
             ? {workflowId:node.workflowId.trim(), nodeInfoList, useWallet:rhUseWallet(node), ...workflowExtras}
             : {webappId:node.webappId.trim(), nodeInfoList, instanceType:node.instanceType || '', useWallet:rhUseWallet(node)};
+        if(personalApiInstance){Object.assign(body,{provider_id:runningHubProvider().id,request_id:pendingId,canvas_id:canvas.id,node_id:node.id,purpose:selectedEntry.purpose||'image'});await saveCanvas();}
         const submit = await cascadeFetch(endpoint, {
             method:'POST',
             headers:{'Content-Type':'application/json'},
@@ -10931,6 +10970,10 @@ async function runRhNode(nodeId, opts={}){
         });
         const taskId = submit.taskId;
         if(!taskId) throw new Error(tr('canvas.rhNoTaskId'));
+        if(personalApiInstance){
+            const pending=pendingById(out,pendingId);Object.assign(pending,{canvasTaskId:taskId,canvasTaskType:'online-image',canvasTaskKind:body.purpose});scheduleSave();
+            const data=await waitCanvasImageTaskResult(taskId);completeCanvasImageTask(taskId,data);return;
+        }
         const useWallet = rhUseWallet(node);
         run.request = {task_id:taskId, webappId:node.webappId, workflowId:node.workflowId, backend:'runninghub', mode, useWallet};
         let result = null;
@@ -10989,7 +11032,7 @@ async function runRhModelNode(node, opts={}){
     }
     node.rhModel = model;
     node.model = model;
-    node.apiProvider = 'runninghub';
+    node.apiProvider = personalApiInstance ? runningHubProvider()?.id || '' : 'runninghub';
     const media = rhMediaSources(node);
     const prompt = media.prompt || '';
     const refs = imageRefsOnly(media.refs || []);
@@ -11000,7 +11043,7 @@ async function runRhModelNode(node, opts={}){
     run.taskLabel = 'RunningHub';
     const payload = {
         prompt:prompt || 'Edit the reference images.',
-        provider_id:'runninghub',
+        provider_id:personalApiInstance ? node.apiProvider : 'runninghub',
         model,
         size:await generatorSizeForRun(node, refs),
         reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
@@ -11015,7 +11058,12 @@ async function runRhModelNode(node, opts={}){
         setTimeout(() => { node.running = false; refreshRunNodes(node, out); }, 2000);
     }
     try {
-        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        if(personalApiInstance){
+            payload.n=count;payload.request_id=crypto.randomUUID();
+            await saveCanvas();
+            Object.assign(payload,{canvas_id:canvas.id,node_id:node.id});
+        }
+        const taskInfos = await Promise.all(Array.from({length:personalApiInstance ? 1 : count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
@@ -12000,7 +12048,8 @@ async function runGenerator(genId, opts={}){
         setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
     }
     try {
-        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        if(personalApiInstance){if(gen.personalAdapterParameters)payload.adapter_parameters=gen.personalAdapterParameters;payload.n=count;payload.request_id=crypto.randomUUID();await saveCanvas();Object.assign(payload,{canvas_id:canvas.id,node_id:gen.id});}
+        const taskInfos = await Promise.all(Array.from({length:personalApiInstance ? 1 : count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
@@ -12293,7 +12342,8 @@ async function runVideoNode(nodeId, opts={}){
     if(!opts.cascade){ node.running = true; refreshRunNodes(node, out); }
     else refreshRunNodes(node, out);
     try {
-        const result = await cascadeFetch('/api/canvas-video', {
+        if(personalApiInstance)await saveCanvas();
+        const result = await cascadeFetch(personalApiInstance ? '/api/canvas-video-tasks' : '/api/canvas-video', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
@@ -12314,8 +12364,17 @@ async function runVideoNode(nodeId, opts={}){
                 camerafixed:Boolean(node.cameraFixed),
                 generate_audio:Boolean(node.generateAudio),
                 multimodal:Boolean(node.multimodal)
+                ,...(personalApiInstance && canvas?.id ? {canvas_id:canvas.id,node_id:node.id,request_id:pendingId} : {})
             })
-        }, {cascadeTargetId}).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('canvas.videoFailed'))); return r.json(); });
+        }, {cascadeTargetId}).then(async r => {
+            if(!r.ok) throw new Error(await responseErrorMessage(r, tr('canvas.videoFailed')));
+            const data=await r.json();
+            if(!personalApiInstance)return data;
+            const pending=pendingById(out,pendingId);
+            if(pending)Object.assign(pending,{canvasTaskId:data.task_id,canvasTaskType:'online-image',kind:'video',providerId:node.apiProvider});
+            scheduleSave();
+            return waitCanvasImageTaskResult(data.task_id,{cascadeTargetId});
+        });
         const meta = collectRunMeta(out, pendingId);
         if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
         const outputUrls = resultMediaUrls(result).map(item => {
@@ -12333,7 +12392,11 @@ async function runVideoNode(nodeId, opts={}){
     } catch(err) {
         const meta = collectRunMeta(out, pendingId);
         addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
-        if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
+        if(personalApiInstance && pendingById(out,pendingId)?.canvasTaskId){
+            const pending=pendingById(out,pendingId);
+            pending.failed=true;pending.error=err.message || String(err);pending.recoverTaskId=pending.canvasTaskId;
+            scheduleSave();
+        } else if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
         if(isCascadeAbortError(err)){
             if(opts.cascade) throw err;
             return;
@@ -14363,7 +14426,7 @@ function providerIdForPending(pending){
 }
 function completeRecoverPendingOutput(out, pending, result){
     if(!out || !pending || !result) return;
-    const images = result.images || [];
+    const images = resultMediaUrls(result);
     if(!images.length) return;
     const meta = {
         runMs: nowMs() - Number(pending.startedAt || nowMs()),
@@ -14387,7 +14450,7 @@ async function queryRecoverPendingOutput(pendingId){
     const out = findOutputByPendingId(pendingId);
     const pending = pendingById(out, pendingId);
     if(!out || !pending || pending.querying) return;
-    const taskId = pending.recoverTaskId || extractUpstreamTaskId(pending.error || '');
+    const taskId = pending.canvasTaskId || pending.recoverTaskId || extractUpstreamTaskId(pending.error || '');
     if(!taskId){
         showErrorModal('没有任务 ID，无法查询结果', tr('canvas.apiFailed'));
         return;
@@ -14396,6 +14459,12 @@ async function queryRecoverPendingOutput(pendingId){
     pending.recoverTaskId = taskId;
     refreshNodes([out.id]);
     try {
+        if(personalApiInstance){
+            const response=await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}/refresh`,{method:'POST'});
+            if(!response.ok)throw new Error(await responseErrorMessage(response,'原任务恢复失败'));
+            pending.canvasTaskId=taskId;pending.canvasTaskType='online-image';pending.failed=false;
+            const recovered=await waitCanvasImageTaskResult(taskId);completeCanvasImageTask(taskId,recovered);return;
+        }
         const res = await fetch('/api/image-task-query', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
@@ -14447,7 +14516,7 @@ async function pollCanvasImageTask(taskId, options={}){
                 completeCanvasImageTask(taskId, data.result || {});
                 return 'succeeded';
             }
-            if(data.status === 'failed'){
+            if(['failed','canceled','result_recovery_required'].includes(data.status)){
                 failCanvasImageTask(taskId, data.error || tr('canvas.generationFailed'), data);
                 return 'failed';
             }
@@ -14474,7 +14543,7 @@ async function waitCanvasImageTaskResult(taskId, options={}){
         }
         const data = await res.json();
         if(data.status === 'succeeded') return data.result || {};
-        if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
+        if(['failed','canceled','result_recovery_required'].includes(data.status)) throw new Error(data.error || tr('canvas.generationFailed'));
         await sleep(1800);
     }
 }
@@ -14487,7 +14556,7 @@ function completeCanvasImageTask(taskId, result){
         run: pending.run || {},
     };
     meta.run.request = requestMetaFromResult(result);
-    const images = result.images || [];
+    const images = resultMediaUrls(result);
     out._pending = (out._pending || []).filter(p => p.id !== pending.id);
     appendOutputImages(out, images, meta.run?.refs?.[0], [meta]);
     const gen = nodes.find(n => n.id === meta.run?.node?.id);
@@ -14507,7 +14576,7 @@ function failCanvasImageTask(taskId, message, taskData={}){
     const {out, pending} = found;
     const run = pending.run || {};
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
-    const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || extractUpstreamTaskId(message);
+    const recoverTaskId = personalApiInstance ? (taskData?.id || pending.canvasTaskId || taskId) : (taskData?.upstream_task_id || taskData?.task_id || extractUpstreamTaskId(message));
     const gen = nodes.find(n => n.id === run?.node?.id);
     if(recoverTaskId){
         pending.failed = true;

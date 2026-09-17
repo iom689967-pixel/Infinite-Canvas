@@ -19,7 +19,7 @@ class FullProviderSettings:
         item = {k:v for k,v in stored.items() if k in FIELDS and k != 'models'}
         for category,purpose in [('chat','llm'),('image','image'),('video','video')]:
             item[category+'_models'] = [m['id'] for m in stored['models'] if m['purpose']==purpose]
-        return self.models.app.normalize_provider(item)
+        return ApiProviderPayload(**item).model_dump(exclude=set(SECRET_FIELDS) | set(SECRET_FIELDS.values()))
 
     def public(self):
         items=[]
@@ -32,9 +32,10 @@ class FullProviderSettings:
                         has_volcengine_access_key=bool(refs.get('volcengine_access_key_id')),
                         has_volcengine_secret_key=bool(refs.get('volcengine_secret_access_key')))
             item['runnable_models']=list(compiled['models']) if item['enabled'] else []
-            item['model_support']={m:('runnable' if m in item['runnable_models'] else
-                '未配置 Key' if not item['has_key'] else '当前实例运行权限尚未开放此适配器/用途')
-                for k in ('image_models','chat_models','video_models') for m in item.get(k,[])}
+            for category in ('chat_models','image_models','video_models'):item[category]=compiled['settings'][category]
+            item['capabilities'] = self.models.policy.public_capabilities(compiled)
+            item['model_support']={m:('runnable' if cap['executable'] else cap['reason'])
+                for uses in compiled['capabilities'].values() for m,cap in uses.items()}
             items.append(item)
         return {'providers':items}
 
@@ -48,7 +49,20 @@ class FullProviderSettings:
         if body.get('image_edit_route','general') not in {'general','auto','chat'}:
             raise ValueError('Invalid edit route')
         parsed=ApiProviderPayload(**body).model_dump()
-        item=self.models.app.normalize_provider(parsed)
+        # Public settings are explicit user choices. Owner recommended-provider
+        # rules and domain/model-name heuristics must never rewrite these choices.
+        item={k:v for k,v in parsed.items() if k not in SECRET_FIELDS and k not in SECRET_FIELDS.values()}
+        item['base_url']=item['base_url'].strip().rstrip('/')
+        if any(p not in NETWORK_PROTOCOLS for p in item['model_protocols'].values()):
+            raise ValueError('Unsupported per-model protocol')
+        for category in ('chat_models','image_models','video_models'):
+            if len(item[category]) != len(set(item[category])):
+                raise ValueError('Duplicate model within purpose')
+        from instance_providers import MODEL
+        for definition in item.get('rh_model_definitions',[]):
+            endpoint=definition.get('endpoint','')
+            if not MODEL.fullmatch(endpoint) or '..' in endpoint or not isinstance(definition.get('params',[]),list):
+                raise ValueError('Invalid RunningHub endpoint contract')
         if item['protocol'] not in NETWORK_PROTOCOLS:
             raise HTTPException(403,'此实例不开放 CLI / Shell 协议')
         # The shared schema stores HTTP image mode independently of the adapter.
@@ -84,7 +98,7 @@ class FullProviderSettings:
                 previous=old.get(pid,{});refs=dict(previous.get('secret_refs',{}))
                 if previous.get('credential_file'):refs['api_key']=previous['credential_file']
                 before=self.settings(previous) if previous else {}
-                target_changed=previous and any(before.get(k)!=item.get(k) for k in ('base_url','protocol','image_request_mode','image_edit_route','image_generation_endpoint','image_edit_endpoint','model_protocols','volcengine_project_name','volcengine_region'))
+                target_changed=previous and before.get('base_url')!=item.get('base_url')
                 for secret,clear_field in SECRET_FIELDS.items():
                     key=parsed[secret];clear=parsed[clear_field]
                     if key is not None and (not key or len(key)>4096 or any(c in key for c in '\r\n')):raise ValueError('Invalid credential')
@@ -111,6 +125,7 @@ class FullProviderSettings:
         return self.public()
 
     async def probe(self, body, action):
+        if action=='metadata':return await self.metadata(body)
         if self.own.discovering:raise HTTPException(429,'已有验证请求正在运行')
         if not isinstance(body,dict) or set(body)-{'provider_id','base_url','api_key','protocol','image_request_mode'}:
             raise ValueError('Invalid probe')
@@ -136,3 +151,28 @@ class FullProviderSettings:
         finally:
             self.own.discovering=False
             await client.aclose()
+
+    async def metadata(self,body):
+        """Import a platform contract through the user's private guarded client."""
+        if not isinstance(body,dict) or set(body)-{'provider_id','kind','entry_id'}:raise ValueError('Invalid metadata request')
+        provider=self.models.policy.providers.get(body.get('provider_id',''))
+        if not provider or not provider.get('personal') or not provider.get('enabled'):raise HTTPException(403,'仅能读取自己的启用 Provider')
+        from instance_providers import MODEL
+        entry_id=body.get('entry_id','')
+        if not isinstance(entry_id,str) or not MODEL.fullmatch(entry_id) or '..' in entry_id:raise ValueError('Invalid entry ID')
+        if provider['protocol']!='runninghub' or body.get('kind') not in {'app','workflow'}:raise HTTPException(400,'此协议没有所选元数据接口契约')
+        from instance_executor import Execution
+        execution=Execution(self.models,provider,body['kind']+':'+entry_id,'metadata')
+        if not execution.key():raise HTTPException(400,'缺少个人 API Key')
+        self.own.discovering=True
+        try:
+            with execution.activate():
+                async with asyncio.timeout(30):
+                    if body['kind']=='app':result=await self.models.app.runninghub_app_info(entry_id)
+                    else:result=await self.models.app.fetch_runninghub_workflow(self.models.app.RunningHubWorkflowConfig(workflowId=entry_id))
+            return json.loads(self.models.policy.redact(json.dumps(result,ensure_ascii=False)))
+        except HTTPException:raise
+        except Exception:raise HTTPException(502,'元数据读取失败；未提交生成任务') from None
+        finally:
+            self.own.discovering=False
+            await execution.close()

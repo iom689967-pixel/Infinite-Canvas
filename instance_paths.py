@@ -22,6 +22,13 @@ class _InstanceLogStream:
         self.original, self.log, self.lock = original, log, lock
 
     def write(self, value):
+        from instance_executor import EXECUTION
+        execution = EXECUTION.get()
+        if execution:
+            for secret in execution.secrets.values():
+                if secret:
+                    from instance_model_policy import secret_variants
+                    for encoded in secret_variants(secret):value=value.replace(encoded,'[redacted]')
         with self.lock:
             self.log.write(value)
             self.log.flush()

@@ -659,7 +659,8 @@
         const savedChatSettings = readChatSettings();
         let conversations = [];
         let currentConversation = null;
-        let mode = 'agent';
+        const personalApiInstance=Boolean(document.getElementById('instance-context'));
+        let mode = personalApiInstance ? 'chat' : 'agent';
         let provider = savedChatSettings.provider || 'comfly';
         let msModel = savedChatSettings.msModel || '';
         let activeChatModel = savedChatSettings.activeChatModel || '';
@@ -775,11 +776,13 @@
             return (list || []).map(item => String(item || '').trim()).filter(item => item && !seen.has(item) && seen.add(item));
         }
         function chatProviders(){
+            if(personalApiInstance) return (apiProviders || []).filter(p=>(p.chat_models || []).length);
             const list = (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
             if(config.ms_chat_models?.length && !list.some(p => p.id === 'modelscope')) list.push({id:'modelscope', name:'ModelScope', chat_models:config.ms_chat_models, image_models:[]});
             return list.length ? list : [{id:'comfly', name:'API', chat_models:[config.chat_model || 'gpt-4o-mini'], image_models:[config.image_model || 'gpt-image-2']}];
         }
         function imageProviders(){
+            if(personalApiInstance) return (apiProviders || []).filter(p=>(p.image_models || []).length);
             const list = (apiProviders || []).filter(p => p.enabled !== false && (p.image_models || []).length);
             return list.length ? list : [{id:'comfly', name:'API', image_models:[config.image_model || 'gpt-image-2'], chat_models:[config.chat_model || 'gpt-4o-mini']}];
         }
@@ -795,7 +798,7 @@
         }
         function modelListForCurrent(kind=activePickerKind()){
             const item = providerById(currentProviderId(kind), kind);
-            return uniqueModels(kind === 'image' ? item.image_models : item.chat_models);
+            return uniqueModels(kind === 'image' ? item?.image_models : item?.chat_models);
         }
         function currentModel(kind=activePickerKind()){
             return kind === 'image' ? activeImageModel : (provider === 'modelscope' ? (msModel || activeChatModel) : activeChatModel);
@@ -1038,8 +1041,8 @@
                 : `<div class="model-picker-empty">暂无平台</div>`;
             const models = modelListForCurrent(kind);
             modelList.innerHTML = models.length
-                ? models.map(m => `<button class="model-picker-option ${m === currentMdl ? 'active' : ''}" onclick="setActiveModel('${escapeHtml(m)}','${kind}');toggleModelPicker(false)"><span>${escapeHtml(shortModelName(m))}</span>${m === currentMdl ? '<i data-lucide="check"></i>' : ''}</button>`).join('')
-                : `<div class="model-picker-empty">暂无模型</div>`;
+                ? models.map(m => {const cap=providerById(currentPid,kind)?.capabilities?.[kind==='image' ? 'image' : 'llm']?.[m];const blocked=personalApiInstance && cap && !cap.executable;return `<button ${blocked ? 'disabled' : ''} class="model-picker-option ${m === currentMdl ? 'active' : ''}" onclick="setActiveModel('${escapeHtml(m)}','${kind}');toggleModelPicker(false)"><span>${escapeHtml(personalApiInstance ? m : shortModelName(m))}${blocked ? ' · '+escapeHtml(cap.reason) : ''}</span>${m === currentMdl ? '<i data-lucide="check"></i>' : ''}</button>`;}).join('')
+                : `<div class="model-picker-empty">尚未添加此用途的模型，请到 API 设置配置</div>`;
             lucide.createIcons();
         }
 
@@ -1509,6 +1512,12 @@
         });
 
         async function sendMessage(){
+            if(personalApiInstance){
+                const kind=mode==='image' ? 'image' : 'llm';
+                const p=providerById(kind==='image' ? activeImageProvider : provider,kind==='image' ? 'image' : 'chat');
+                const cap=p?.capabilities?.[kind]?.[kind==='image' ? activeImageModel : activeChatModel];
+                if(!cap?.executable){alert(cap?.reason || '尚未添加此用途的个人模型，请到 API 设置配置');return;}
+            }
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if(!message) return;

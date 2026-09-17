@@ -11,7 +11,9 @@ import json
 from pathlib import Path
 import re
 import socket
-from urllib.parse import urlsplit
+import copy
+import time
+from urllib.parse import urlsplit, unquote, quote, quote_plus, parse_qs
 
 import httpx
 from fastapi import HTTPException
@@ -19,10 +21,18 @@ from fastapi import HTTPException
 OUTBOUND_ENDPOINTS = ContextVar('instance_model_outbound', default=frozenset())
 
 
+def secret_variants(secret):
+    """Cover raw, URL and JSON literal representations of private values."""
+    if not secret:return set()
+    return {secret,quote(secret,safe=''),quote_plus(secret),
+            json.dumps(secret,ensure_ascii=False)[1:-1],
+            json.dumps(secret,ensure_ascii=True)[1:-1]}
+
+
 def failure(code, status=403):
     messages = {
-        'not_configured': '模型调用尚未配置，请联系本机管理员',
-        'not_allowed': 'Provider、模型或请求类型未获批准',
+        'not_configured': '请在个人 API 设置中添加 Provider、凭证和模型用途',
+        'not_allowed': 'Provider 已停用、模型用途未配置或缺少适配契约/凭证',
         'limits': '请求参数超出管理员允许范围',
         'reference': '参考图必须是本实例已上传的图片',
         'busy': '实例并发已满，或有待确认的上游任务，请先查询原任务',
@@ -30,6 +40,7 @@ def failure(code, status=403):
         'timeout': '上游等待超时；未自动重复提交',
         'upstream': '上游请求失败，内部响应已隐藏',
         'download': '上游媒体地址或内容不符合安全规则',
+        'task_incomplete': '任务未完成；请查询或恢复原任务，不会自动重新生成',
         'conflict': '请求标识已使用，不能替换其内容',
         'storage_full': '当前工作区存储空间已满。',
         'server_storage_full': '服务器存储资源不足，暂时停止新的内容写入。',
@@ -170,8 +181,9 @@ class ModelPolicy:
         elif endpoint[0] != 'https' or (endpoint[2] != 443 and endpoint not in self.private_targets):
             raise RuntimeError('Live endpoints require HTTPS on port 443')
 
-    def credential(self, provider):
-        path = self.paths.data_root / '.auth' / provider['credential_file']
+    def credential(self, provider, field='api_key'):
+        ref = provider.get('secret_refs', {}).get(field, provider.get('credential_file', '') if field == 'api_key' else '')
+        path = self.paths.data_root / '.auth' / ref
         try:
             self.private_file(path)
             value = path.read_text().strip()
@@ -185,33 +197,86 @@ class ModelPolicy:
         if not self.providers:
             raise failure('not_configured', 503)
         provider = self.providers.get(provider_id)
-        protocols = {'gemini', 'openai'} if kind == 'llm' else {'kie'}
-        if not provider or not provider.get('enabled', True) or provider['protocol'] not in protocols or model not in provider['models']:
+        if not provider or not provider.get('enabled', True):
+            raise failure('not_allowed')
+        if provider.get('personal'):
+            cap = provider['capabilities'].get(kind, {}).get(model)
+            if not cap or not cap['executable']:
+                raise HTTPException(403, {'code':'not_allowed', 'message':cap['reason'] if cap else '未配置此模型用途'})
+            return provider, provider['model_uses'][kind][model]
+        # Shared administrator providers retain their explicit cost/permission policy.
+        if kind != ('llm' if provider['protocol'] == 'gemini' else 'image') or model not in provider['models']:
             raise failure('not_allowed')
         return provider, provider['models'][model]
 
     def catalog(self):
         result = []
         for p in self.providers.values():
+            if p.get('personal'):
+                settings = p['settings']
+                public = {k:v for k,v in settings.items() if k not in {'api_key','wallet_api_key','volcengine_access_key_id','volcengine_secret_access_key'} and not k.startswith('clear_')}
+                public.update(personal=True, capabilities=self.public_capabilities(p), model_limits=p['models'],
+                              has_key=bool(p.get('credential_file')), configured=True)
+                result.append(public)
+                continue
             if not p.get('enabled', True) or not p['models']:
                 continue
             result.append({'id': p['id'], 'name': p.get('name', p['id']), 'protocol': p['protocol'], 'enabled': True,
                            'chat_models': list(p['models']) if p['protocol'] in {'gemini', 'openai'} else [],
                            'image_models': list(p['models']) if p['protocol'] == 'kie' else [], 'video_models': [],
                            'model_limits': p['models']})
+            # Only explicitly approved shared models enter these categories;
+            # the shared parser supplies UI metadata without widening the ACL.
+            from provider_capabilities import capabilities
+            result[-1]['capabilities']=capabilities(result[-1],{'api_key'})
         return {'api_providers': result, 'chat_models': [m for p in result for m in p['chat_models']],
-                'image_models': [m for p in result for m in p['image_models']], 'video_models': []}
+                'image_models': [m for p in result for m in p['image_models']],
+                'video_models': [m for p in result for m in p['video_models']]}
+
+    def verification_store(self):
+        path=self.paths.data_root/'.auth/model-verifications.json'
+        if path.is_symlink():raise failure('not_allowed')
+        return path,json.loads(path.read_text()) if path.exists() else {}
+
+    def mark_verified(self,provider,model,purpose):
+        if not provider.get('personal'):return
+        from instance_providers import task_provider_revision,atomic_private
+        path,records=self.verification_store()
+        records[provider['id']+'|'+purpose+'|'+model]=dict(revision=task_provider_revision(self,provider),mode=self.mode,at=time.time())
+        atomic_private(path,json.dumps(records))
+
+    def public_capabilities(self,provider):
+        from instance_providers import task_provider_revision
+        caps=copy.deepcopy(provider['capabilities'])
+        _,records=self.verification_store()
+        revision=None
+        for purpose,models in caps.items():
+            for model,cap in models.items():
+                record=records.get(provider['id']+'|'+purpose+'|'+model,{})
+                if record:
+                    if revision is None:revision=task_provider_revision(self,provider)
+                    if record.get('revision')==revision:
+                        cap['verified']=record.get('mode')=='live'
+                        cap['mock_verified']=record.get('mode')=='mock'
+                        if cap['verified'] and cap['executable']:cap['state']='call_verified'
+        return caps
 
     def redact(self, text, *, used_credential=''):
         text = str(text)
         if used_credential:
-            text = text.replace(used_credential, '[redacted]')
+            for value in secret_variants(used_credential):text=text.replace(value,'[redacted]')
         for p in self.providers.values():
+            for field in p.get('secret_refs', {}):
+                try:
+                    secret = self.credential(p,field)
+                    for encoded in secret_variants(secret):text=text.replace(encoded,'[redacted]')
+                except HTTPException:
+                    pass
             try:
                 key = self.credential(p)
             except HTTPException:
                 key = ''
-            for value in (key, p['base_url'], p.get('upload_base_url', ''), p['credential_file']):
+            for value in secret_variants(key) | {p['base_url'],p.get('upload_base_url',''),p['credential_file']}:
                 if value:
                     text = text.replace(value, '[redacted]')
         return text
@@ -234,30 +299,50 @@ class GuardedClient:
                 raise ValueError()
             if not self.provider.get('personal') and endpoint not in {origin(v) for v in self.provider.get('media_origins', [])}:
                 raise ValueError()
-            if self.policy.credential(self.provider) in url or (self.used_credential and self.used_credential in url):
+            secrets = []
+            for field in self.provider.get('secret_refs', {}) or {'api_key': self.provider.get('credential_file','')}:
+                try: secrets.append(self.policy.credential(self.provider) if field=='api_key' else self.policy.credential(self.provider, field))
+                except HTTPException: pass
+            destination=unquote(str(url))
+            if any(value in destination for key in secrets+[self.used_credential] for value in secret_variants(key)):
                 raise ValueError()
         except (ValueError, TypeError):
             raise failure('download', 502)
         return True
 
-    async def request(self, method, url, **kwargs):
+    async def prepare(self, method, url, kwargs):
+        execution = getattr(self, 'execution', None)
         if getattr(self, 'query_only', False) and method.upper() not in {'GET', 'HEAD'}:
             raise failure('not_allowed')
         diagnostic = getattr(self, 'reference_diagnostic', None)
         if diagnostic:
             diagnostic('http')
         endpoint = origin(url)
-        headers = dict(kwargs.pop('headers', {}))
-        has_auth = any(k.lower() in {'authorization', 'x-goog-api-key'} for k in headers)
+        headers = dict(getattr(self, 'default_headers', {})) | dict(kwargs.pop('headers', {}))
+        kwargs.pop('follow_redirects', None)
+        has_auth = any(k.lower() in {'authorization', 'x-goog-api-key','x-api-key'} for k in headers)
+        if execution:
+            body = kwargs.get('json') or kwargs.get('data') or {}
+            has_auth = has_auth or (isinstance(body, dict) and any(v and body.get('apiKey') == v for v in execution.secrets.values()))
         if has_auth:
             allowed = {origin(self.provider['base_url'])}
             if self.kie_upload_base_url:
                 allowed.add(origin(self.kie_upload_base_url))
-            if endpoint not in allowed:
+            signed_target=False
+            if execution and getattr(execution,'signed_asset',False):
+                parsed=urlsplit(str(url));query=parse_qs(parsed.query)
+                target=(endpoint==('https','open.volcengineapi.com',443) and parsed.path=='/') or (self.policy.mode=='mock' and endpoint==origin(self.provider['base_url']) and parsed.path==urlsplit(self.provider['base_url']).path.rstrip('/')+'/asset-api')
+                signed_target=(target and set(query)=={'Action','Version'} and query['Action'][0] in {'ListAssetGroups','CreateAssetGroup','CreateAsset','GetAsset'} and query['Version']==['2024-01-01'])
+                if signed_target:
+                    authorization=next((v for k,v in headers.items() if k.lower()=='authorization'),'')
+                    signed_target=authorization.startswith('HMAC-SHA256 Credential='+execution.key('volcengine_access_key_id')+'/')
+                    if self.policy.mode!='mock' and any(execution.key(f) and execution.key(f) in str(headers) for f in ('api_key','wallet_api_key','volcengine_secret_access_key')):signed_target=False
+                if not signed_target:raise failure('download',502)
+            if endpoint not in allowed and not signed_target:
                 raise failure('download', 502)
         else:
             self.validate_media_url(url)
-            if method.upper() not in {'GET', 'HEAD'}:
+            if method.upper() not in {'GET', 'HEAD'} and not (execution and str(url) in getattr(execution,'anonymous_uploads',())):
                 raise failure('download', 502)
         if self.policy.mode == 'mock':
             if endpoint[0] != 'http' or endpoint[1:] not in self.policy.paths.upstreams:
@@ -280,8 +365,16 @@ class GuardedClient:
                 raise failure('download', 502)
             if diagnostic:
                 diagnostic('dns', destination='approved_private' if private else 'public')
+        return execution,diagnostic,headers,addresses
+
+    async def request(self, method, url, **kwargs):
+        execution,diagnostic,headers,addresses=await self.prepare(method,url,kwargs)
         context = OUTBOUND_ENDPOINTS.set(frozenset(addresses))
         try:
+            if execution:
+                await execution.before(method, url, kwargs)
+            if 'json' in kwargs and len(json.dumps(kwargs['json'],ensure_ascii=False).encode()) > 32*1024*1024:
+                raise failure('limits',400)
             if diagnostic:
                 diagnostic('http')
             # Do not carry an upstream Set-Cookie into uploads or media downloads either.
@@ -304,6 +397,7 @@ class GuardedClient:
                         diagnostic('redirect', redirect_count=1)
                     raise failure('download', 502)
                 data = bytearray()
+                event_buffer=b''
                 body_bytes_read = 0
                 if diagnostic:
                     diagnostic('body_read', body_read_started=True, body_bytes_read=0)
@@ -313,6 +407,16 @@ class GuardedClient:
                         if len(data) + len(chunk) > 32*1024*1024:
                             raise failure('download', 502)
                         data.extend(chunk)
+                        if execution and execution.observer and 'text/event-stream' in response.headers.get('content-type',''):
+                            event_buffer+=chunk
+                            while b'\n' in event_buffer:
+                                line,event_buffer=event_buffer.split(b'\n',1)
+                                if not line.startswith(b'data:'):continue
+                                try:event=json.loads(line[5:].strip())
+                                except (ValueError,UnicodeError):continue
+                                if isinstance(event,dict) and event.get('type') in {'response.created','response.completed','response.failed'} and isinstance(event.get('response'),dict):
+                                    synthetic=httpx.Response(response.status_code,json=event['response'],request=response.request)
+                                    await execution.after(method,url,kwargs,synthetic)
                 finally:
                     if diagnostic:
                         diagnostic('body_read', body_read_started=True, body_bytes_read=body_bytes_read)
@@ -323,9 +427,12 @@ class GuardedClient:
                 buffered_headers = response.headers.copy()
                 for name in ('content-encoding', 'content-length', 'transfer-encoding'):
                     buffered_headers.pop(name, None)
-                return httpx.Response(response.status_code, headers=buffered_headers, content=bytes(data),
+                buffered = httpx.Response(response.status_code, headers=buffered_headers, content=bytes(data),
                                       request=response.request,
                                       extensions={'http_version': response.extensions.get('http_version', b'HTTP/1.1')})
+                if execution:
+                    await execution.after(method, url, kwargs, buffered)
+                return buffered
         except Exception as exc:
             if diagnostic and hasattr(diagnostic, 'failed'):
                 diagnostic.failed(exc)
@@ -341,7 +448,34 @@ class GuardedClient:
 
     @asynccontextmanager
     async def stream(self, method, url, **kwargs):
-        yield await self.request(method, url, **kwargs)
+        if not kwargs.pop('guarded_live',False):
+            yield await self.request(method, url, **kwargs)
+            return
+        execution,diagnostic,headers,addresses=await self.prepare(method,url,kwargs)
+        context=OUTBOUND_ENDPOINTS.set(frozenset(addresses))
+        try:
+            if execution:await execution.before(method,url,kwargs)
+            self.client.cookies.clear()
+            async with self.client.stream(method,url,headers=headers,**kwargs) as original:
+                if 300 <= original.status_code < 400:raise failure('download',502)
+                class BoundedDecoded(httpx.AsyncByteStream):
+                    async def __aiter__(self):
+                        size=0
+                        async for chunk in original.aiter_bytes():
+                            size+=len(chunk)
+                            if size>32*1024*1024:raise failure('download',502)
+                            yield chunk
+                decoded_headers=original.headers.copy()
+                for name in ('content-encoding','content-length','transfer-encoding'):decoded_headers.pop(name,None)
+                yield httpx.Response(original.status_code,headers=decoded_headers,stream=BoundedDecoded(),request=original.request)
+        finally:
+            OUTBOUND_ENDPOINTS.reset(context)
 
     async def aclose(self):
         await self.client.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.aclose()

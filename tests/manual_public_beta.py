@@ -21,6 +21,8 @@ import httpx
 from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from test_instance_models import ModelMock
+if '--personal-network' in sys.argv:
+    from test_personal_network_adapters import NetworkMock as ModelMock
 from test_instance_isolation import free_port
 from public_beta_store import BetaConfig, GatewayStore
 from public_beta_ipc import SupervisorClient
@@ -31,6 +33,7 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
     root=Path(temporary).resolve();port=free_port()
     mock=ThreadingHTTPServer(('127.0.0.1',0),ModelMock)
     key=secrets.token_urlsafe(32);password=secrets.token_urlsafe(24)
+    if '--personal-network' in sys.argv:key='fake-browser-network-key';password='Temporary-browser-test-password-42'
     mock.calls,mock.jobs,mock.media=[],{},{}
     mock.credentials={hashlib.sha256(key.encode()).hexdigest():'alice'}
     image=BytesIO();Image.new('RGB',(48,64),'#477abd').save(image,'PNG');mock.image=image.getvalue()
@@ -44,6 +47,7 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
          'PUBLIC_BETA_MOCK_UPSTREAMS':f'127.0.0.1:{mock.server_port}','PYTHONDONTWRITEBYTECODE':'1',
          'PUBLIC_BETA_SUPERVISOR_SOCKET':str(root/'gateway/ctl.sock'),
          'PUBLIC_BETA_BACKUP_ROOT':str(root/'backups')}
+    if '--personal-network' in sys.argv:env['MIO_MAIL_MODE']='mock'
     record={'root':str(root),'origin':f'http://127.0.0.1:{port}','mock_origin':mock.origin}
     marker=Path('/private/tmp/mio-beta-browser-current.json');marker.write_text(json.dumps(record));marker.chmod(0o600)
     with open(root/'gateway.log','w') as log:
@@ -74,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix='mio-beta-browser-') as temporary:
                         users=db.execute('SELECT username,status FROM users').fetchall()
                         instances=db.execute('SELECT data_root,pid FROM instances').fetchall()
                     print(json.dumps({'users':users,'instance_count':len(instances),'unique_pids':len({p for _,p in instances if p}),
-                        'mock_create_count':sum(k=='create' for k,_,_ in mock.calls),'real_model_calls':0,
+                        'mock_create_count':sum(k in {'create','network-submit','text'} for k,_,_ in mock.calls),'real_model_calls':0,
                         'gateway_log_secret_free':not any(v in (root/'gateway.log').read_text() for v in (key,password))}),flush=True)
         finally:
             proc.terminate()

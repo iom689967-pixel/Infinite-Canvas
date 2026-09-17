@@ -1,8 +1,9 @@
-"""Static Kie image-model whitelist and request adapters.
+"""Kie image presets and explicit input templates.
 
-Only the two UI model ids below are accepted from the application. Kie's
-internal Market model ids are selected here and are never accepted directly
-from a browser request.
+The legacy router uses the two UI IDs below. Personal Provider capabilities
+may select a known input template for another exact upstream ID; this preset
+list is not the public users' model permission whitelist. Internal Market
+routes below retain the legacy preset contract.
 """
 
 from copy import deepcopy
