@@ -137,6 +137,8 @@ python -m pip check
 
 ## 正常维护、回滚与后续部署顺序
 
+已获明确批准、且只剩精确指定历史未知记录时，可使用[受限单次维护中断](bounded-maintenance-interruption.md)。它直接兼容f598原生门禁，保留记录与restart_safe=false；不得用它代替原drain或reconcile的证明条件。
+
 1. 只读现场核实 beta/目标关系和目标 CI、systemd WorkingDirectory/ExecStart/venv、Gateway/Supervisor/全部 running Worker 的 PID/starttime/UID/数据根/SHA；注册状态/人数/容量/磁盘/健康/原任务。beta 有新提交/分叉则停止，不覆盖或 force push。
 2. 已有原生门禁用 draining；首次旧版先准备并 validate Mio 入口屏障。保存维护状态和 Caddy 权威来源。通知用户保存画布。注册可保持原 open 配置，因为门禁真正阻止注册；不靠关闭注册挡生成，也不更改容量、安全阀、真实 Key。
 3. 保留原收据查询/恢复/下载，禁止自动补交。连续证据不足或未知状态未核对时停止，不重启。原生 drain 成功后进入 sealed；旧版按上一节明确证据/额外批准边界处理，不用底层测试接口自签排空。

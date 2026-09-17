@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import subprocess
 import tempfile
 import time
 
@@ -256,9 +257,22 @@ def main(argv=None):
     child.add_argument('--id',required=True);child.add_argument('--evidence-file',required=True)
     child.add_argument('--uncertainty',action='store_true')
     child.add_argument('--gateway-db',required=True);child.add_argument('--instances-root',required=True)
+    child=commands.add_parser('seal-for-interruption')
+    child.add_argument('--gateway-db',required=True);child.add_argument('--instances-root',required=True)
+    child.add_argument('--approval-file',required=True);child.add_argument('--source-release',required=True)
+    child.add_argument('--target-release',required=True)
+    child.add_argument('--timeout',type=float,default=0)
     args = parser.parse_args(argv)
     try:
         admin(args.root, args.sandbox)
+        if args.operation == 'seal-for-interruption':
+            if args.sandbox:
+                raise PermissionError('中断授权命令不支持sandbox')
+            from maintenance_interruption import seal_for_interruption
+            value=seal_for_interruption(args.root,args.gateway_db,args.instances_root,
+                args.approval_file,args.source_release,args.target_release,args.timeout)
+            print(json.dumps(value,ensure_ascii=False))
+            return 0 if value['interruption_authorized'] else 3
         if args.operation == 'init':
             initialize(args.root, worker_uid=args.worker_uid, worker_gid=args.worker_gid)
             value = {'phase': 'draining', 'initialized': True}
@@ -284,7 +298,9 @@ def main(argv=None):
                          if args.operation == 'drain' else inspect(gate, roots, legacy_blockers=blockers))
         print(json.dumps(value, ensure_ascii=False))
         return 3 if value.get('timed_out') else 0
-    except (PermissionError, OSError, ValueError, sqlite3.Error, MaintenanceUnavailable):
+    except (PermissionError, OSError, ValueError, sqlite3.Error, MaintenanceUnavailable, subprocess.SubprocessError):
+        if args.operation == 'seal-for-interruption':
+            print(json.dumps({'error': '中断授权检查或持久化失败，停止升级并核查实际门禁状态','restart_safe':False,'interruption_authorized':False}));return 2
         print(json.dumps({'error': '维护状态或排空证据不可用，停止升级', 'restart_safe': False}, ensure_ascii=False))
         return 2
 

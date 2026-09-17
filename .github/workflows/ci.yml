@@ -34,6 +34,20 @@ jobs:
       - name: Validate installed dependencies
         run: python -m pip check
 
+      - name: Install interruption rehearsal Caddy fixture
+        run: python scripts/install_rehearsal_caddy.py "$RUNNER_TEMP/mio-interruption-caddy"
+
+      - name: Rehearse bounded interruption on unmodified f598 as real root
+        run: sudo "$(command -v python)" tests/rehearse_interruption_upgrade.py --caddy "$RUNNER_TEMP/mio-interruption-caddy" --evidence "$RUNNER_TEMP/mio-interruption-evidence.json"
+
+      - name: Preserve bounded interruption evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-interruption-evidence
+          path: ${{ runner.temp }}/mio-interruption-evidence.json
+          if-no-files-found: error
+
       - name: Run project checks
         run: ./scripts/check.sh
 
