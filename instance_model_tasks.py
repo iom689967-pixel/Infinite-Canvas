@@ -142,8 +142,8 @@ class ControlledModels(NetworkTasks):
         execution = Execution(self, provider, payload.model, 'llm')
         self.llm_active += 1
         selected_provider = execution.provider
-        client = execution.client()
         try:
+            client = execution.client()
             if payload.system_prompt:
                 messages.insert(0, {'role': 'system', 'content': payload.system_prompt})
             content = [{'type': 'text', 'text': payload.message}]
@@ -172,18 +172,26 @@ class ControlledModels(NetworkTasks):
             client.used_credential = credential
             # httpx read timeouts alone reset for each chunk; also bound total waiting time.
             with execution.activate():
-                async with asyncio.timeout(limits['timeout_seconds'] if provider.get('personal') else min(self.app.CANVAS_LLM_TIMEOUT, limits['timeout_seconds'])):
+                async with asyncio.timeout(__import__('model_budgets').for_execution('llm',limits['timeout_seconds']).total):
                     auth = {'x-goog-api-key': credential} if selected_provider['protocol'] == 'gemini' else {'Authorization': 'Bearer '+credential}
                     response = await client.post(url, headers=auth | {'Content-Type':'application/json'}, json=body)
+            execution.diagnostic.provider_status=response.status_code
             response.raise_for_status()
-            text = self.app.text_from_chat_response(response.json())
+            from llm_contracts import parse_response
+            result = parse_response(response.json())
+            text = result.text
+            execution.finish_maintenance_submission()
             self.policy.mark_verified(provider,payload.model,'llm')
-            return {'text': self.policy.redact(text, used_credential=credential), 'model':payload.model, 'raw_usage':None}
+            return {'text': self.policy.redact(text, used_credential=credential), 'model':payload.model, 'raw_usage':result.usage}
         except (TimeoutError, httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            from llm_contracts import ContractError
+            if isinstance(exc,ContractError) and exc.complete:execution.finish_maintenance_submission()
             raise execution.diagnostic.from_exception(exc) from None
         finally:
             self.llm_active -= 1
-            await execution.close()
+            import anyio
+            with anyio.CancelScope(shield=True):
+                async with asyncio.timeout(5):await execution.close()
 
     def validate_image(self, payload):
         configured=self.policy.providers.get(payload.provider_id,{})

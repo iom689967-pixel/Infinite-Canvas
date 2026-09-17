@@ -15,7 +15,7 @@ class StrictTextMock(network.NetworkMock):
         self.server.calls.append(('strict-text',self.identity(),body))
         case=getattr(self.server,'text_case','success')
         status,body={'success':(200,{'choices':[{'message':{'content':'  fixture text  '}}],'usage':{'total_tokens':7}}),'auth':(401,{'error':{'message':'FAKE_KEY prompt Cookie private'}}),'routing':(503,{'error':{'code':'no_available_accounts'}}),'rate':(429,{'error':{}}),'business':(200,{'error':{'code':'bad','message':'PRIVATE_PROMPT'}}),'empty':(200,{'choices':[{'message':{'content':''}}]}),'array':(200,[])}[case]
-        return self.reply(body,status)
+        return self.reply(json.dumps(body).encode(),status)
     def reject(self,reason):
         self.server.unmatched=getattr(self.server,'unmatched',[])+[reason]
         return self.reply({'error':{'code':'unexpected_mock_request'}},400)
@@ -42,3 +42,8 @@ class StabilityExecutionTests(unittest.TestCase):
             r=self.f.request('A','POST','/api/canvas-llm',json=dict(provider=provider,model=model,message='keep'))
             self.assertEqual(r.status_code,403)
         self.assertEqual(self.f.mock.calls,[])
+    def test_invalid_json_success_is_rejected(self):
+        for case,category in [('business','business_error'),('empty','empty_result'),('array','response_structure')]:
+            self.f.mock.text_case=case;r=self.call()
+            self.assertEqual(r.status_code,502,r.text);self.assertEqual(r.json()['detail']['category'],category)
+        self.assertEqual(len(self.f.mock.calls),3)

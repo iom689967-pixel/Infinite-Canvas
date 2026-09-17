@@ -52,7 +52,9 @@ class Execution:
         # Local executor timeout declarations cannot relax the Instance boundary.
         targets=dict(self.stored)
         if self.provider['protocol']!='kie':targets.pop('upload_base_url',None)
-        client = GuardedClient(self.policy, targets, timeout=1800)
+        from model_budgets import for_execution
+        budget=for_execution(self.purpose)
+        client = GuardedClient(self.policy, targets, timeout=budget.httpx())
         client.default_headers = dict(kwargs.get('headers', {}))
         client.execution = self
         client.used_credential = self.key()
@@ -150,7 +152,7 @@ class Execution:
         # An upstream proxy 5xx/408 is not evidence the original remote LLM
         # stopped; retain its receipt for administrator reconciliation.
         if (self.purpose == 'llm' and self.classify(method, url) == 'submit'
-            and response.status_code < 500 and response.status_code != 408):
+            and 400 <= response.status_code < 500 and response.status_code != 408):
             self.finish_maintenance_submission()
         if self.observer:
             await self.observer('after', self.classify(method, url), method, str(url), kwargs, response)
@@ -170,7 +172,8 @@ class Execution:
             EXECUTION.reset(token)
 
     async def close(self):
-        for client in self.clients:
+        clients,self.clients=self.clients,[]
+        for client in clients:
             await client.aclose()
 
     async def save_image(self, image_data, prefix='api_', category='output'):

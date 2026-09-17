@@ -17236,7 +17236,7 @@ async def _canvas_llm_impl(payload: CanvasLLMRequest, request_id: str, started_a
     return {"text": text, "model": model, "raw_usage": chat_usage_from_response(raw_data)}
 
 @app.post("/api/canvas-llm")
-async def canvas_llm(payload: CanvasLLMRequest):
+async def canvas_llm(payload: CanvasLLMRequest, request: Request = None):
     require_instance_provider(payload.provider, payload.model)
     request_id = task_namespace(payload.request_id or uuid.uuid4().hex)
     started_at = time.monotonic()
@@ -17252,6 +17252,9 @@ async def canvas_llm(payload: CanvasLLMRequest):
         CANVAS_LLM_ACTIVE_REQUESTS[request_id] = current_task
     try:
         if PATHS.explicit and (PATHS.public_beta or INSTANCE_MODELS.policy.providers):
+            if request is not None:
+                from personal_llm_stream import await_with_disconnect
+                return await await_with_disconnect(INSTANCE_MODELS.llm(payload),request)
             return await INSTANCE_MODELS.llm(payload)
         return await _canvas_llm_impl(payload, request_id, started_at)
     except asyncio.CancelledError as exc:
@@ -18889,11 +18892,8 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
     if PATHS.explicit and (PATHS.public_beta or INSTANCE_MODELS.policy.providers):
-        async def controlled_stream():
-            try:
-                async for event in INSTANCE_MODELS.stream_chat(payload,request,x_user_id):yield event
-            except HTTPException as exc:yield sse_event({'type':'error','detail':exc.detail})
-        return StreamingResponse(controlled_stream(),media_type='text/event-stream')
+        from personal_llm_stream import ClosingStreamingResponse
+        return ClosingStreamingResponse(INSTANCE_MODELS.stream_chat(payload,request,x_user_id),media_type='text/event-stream')
     require_instance_provider(payload.provider, payload.model)
     if payload.mode == "image":
         raise HTTPException(status_code=400, detail="图片模式请使用 /api/chat")

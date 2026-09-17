@@ -59,6 +59,8 @@ class Diagnostic:
         logging.getLogger('mio.model').warning('%s',json.dumps(dict(detail,elapsed_ms=round((time.monotonic()-self.started)*1000)),ensure_ascii=False))
         return HTTPException(status_code=status,detail=detail,headers={'X-Mio-Event-Id':self.event_id})
     def from_exception(self,exc):
+        from llm_contracts import ContractError
+        if isinstance(exc,ContractError):return self.error(exc.category,phase='parse')
         if isinstance(exc,HTTPException):
             if isinstance(exc.detail,dict) and exc.detail.get('event_id'):return exc
             code=exc.detail.get('code') if isinstance(exc.detail,dict) else None

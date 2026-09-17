@@ -12,71 +12,9 @@ from instance_providers import task_provider_revision
 from instance_network_operations import NetworkOperations
 
 class NetworkTasks(NetworkOperations):
-    async def stream_chat(self,payload,request,user_id=''):
-        if payload.mode=='image':raise HTTPException(400,'图片聊天请使用图片任务入口')
-        if payload.ms_model:raise HTTPException(400,'请选择个人 Provider 并填写精确模型 ID，不使用全局 ModelScope 路径')
-        provider,limits=self.policy.allowed(payload.provider,payload.model,'llm')
-        owner=self.app.safe_user_id(user_id,request)
-        conversation=self.app.load_conversation(owner,payload.conversation_id) if payload.conversation_id else self.app.new_conversation(owner,self.app.display_title(payload.message))
-        messages=[{'role':m['role'],'content':m['content']} for m in conversation.get('messages',[]) if m.get('role') in {'user','assistant'} and isinstance(m.get('content'),str)]
-        if sum(len(m['content']) for m in messages)+len(payload.message)+len(payload.system_prompt)>limits['max_text_chars']:raise failure('limits',400)
-        self.references([r.url for r in payload.reference_images],limits)
-        self.check_capacity()
-        execution=Execution(self,provider,payload.model,'llm')
-        self.llm_active+=1
-        try:
-            with execution.activate():
-                content=[{'type':'text','text':payload.message}]+[{'type':'image_url','image_url':{'url':self.app.reference_to_data_url(r.model_dump())}} for r in payload.reference_images]
-                if payload.system_prompt:messages.insert(0,{'role':'system','content':payload.system_prompt})
-                messages.append({'role':'user','content':content})
-                url,body=self.app.chat_upstream_request(execution.provider,provider['base_url'],payload.model,messages,stream=True)
-                headers=self.app.api_headers(provider=execution.provider)
-                client=execution.client();text='';carry=''
-                secrets=[]
-                for p in self.policy.providers.values():
-                    for field in p.get('secret_refs',{}) or {'api_key':p.get('credential_file','')}:
-                        try:
-                            value=self.policy.credential(p,field)
-                            secrets.extend(secret_variants(value))
-                        except HTTPException:pass
-                guard=max([len(value) for value in secrets] or [1])-1
-                yield self.app.sse_event({'type':'meta','conversation':conversation})
-                async with asyncio.timeout(limits['timeout_seconds'] if provider.get('personal') else min(self.app.CANVAS_LLM_TIMEOUT,limits['timeout_seconds'])):
-                    if execution.provider['protocol']=='gemini':
-                        response=await client.post(url,headers=headers,json=body);response.raise_for_status()
-                        text=self.policy.redact(self.app.text_from_chat_response(response.json()))
-                        yield self.app.sse_event({'type':'delta','delta':text})
-                    else:
-                        async with client.stream('POST',url,headers=headers,json=body,guarded_live=True) as response:
-                            response.raise_for_status()
-                            if 'text/event-stream' not in response.headers.get('content-type',''):
-                                raw=await response.aread()
-                                carry=self.policy.redact(self.app.text_from_chat_response(json.loads(raw)))
-                            async for line in response.aiter_lines():
-                                if not line.startswith('data:'):continue
-                                line=line[5:].strip()
-                                if line=='[DONE]':break
-                                try:data=json.loads(line)
-                                except ValueError:continue
-                                carry+=self.app.text_delta_from_chat_chunk(data)
-                                for value in secrets:carry=carry.replace(value,'[redacted]')
-                                if len(carry)>guard:
-                                    delta=carry[:-guard] if guard else carry
-                                    carry=carry[-guard:] if guard else ''
-                                    text+=delta;yield self.app.sse_event({'type':'delta','delta':delta})
-                            if carry:text+=carry;yield self.app.sse_event({'type':'delta','delta':carry})
-            execution.finish_maintenance_submission()  # Complete upstream JSON/SSE, not response headers.
-            if not text.strip():raise failure('upstream',502)
-            assistant=dict(id=__import__('uuid').uuid4().hex,role='assistant',content=text,created_at=self.app.now_ms(),model=payload.model,raw_usage=None)
-            conversation.setdefault('messages',[]).extend([dict(id=__import__('uuid').uuid4().hex,role='user',content=payload.message,attachments=[r.model_dump() for r in payload.reference_images],created_at=self.app.now_ms()),assistant])
-            conversation['updated_at']=self.app.now_ms();self.app.save_conversation(owner,conversation)
-            self.policy.mark_verified(provider,payload.model,'llm')
-            yield self.app.sse_event({'type':'done','conversation':conversation,'message':assistant})
-        except (HTTPException,httpx.HTTPError,TimeoutError,ValueError,TypeError,KeyError):
-            yield self.app.sse_event({'type':'error','detail':failure('upstream',502).detail})
-        finally:
-            self.llm_active-=1
-            await execution.close()
+    def stream_chat(self,payload,request,user_id=''):
+        from personal_llm_stream import stream_personal_chat
+        return stream_personal_chat(self,payload,request,user_id)
 
     def create_midjourney(self,payload,action='submit'):
         provider=self.policy.providers.get(payload.provider_id)

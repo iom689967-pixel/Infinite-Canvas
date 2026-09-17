@@ -327,23 +327,36 @@ def create_app(config, *, mailer=None):
                 total+=len(chunk)
                 if total>config.max_upload+1024**2: raise BetaError('请求超过上传上限',413)
                 yield chunk
-        long_generation=request.url.path in {'/api/online-image','/api/canvas-video','/api/chat','/api/chat/agent','/api/ms/generate','/api/angle/generate','/generate'}
-        client=httpx.AsyncClient(trust_env=False,follow_redirects=False,timeout=httpx.Timeout(1830 if long_generation else 120,connect=3))
+        from model_budgets import for_route
+        from personal_llm_stream import ClosingStreamingResponse
+        budget=for_route(request.method,request.url.path)
+        deadline=asyncio.get_running_loop().time()+budget.gateway_total
+        client=httpx.AsyncClient(trust_env=False,follow_redirects=False,timeout=budget.httpx(gateway=True))
         url=httpx.URL(origin).copy_with(path=request.url.path,query=request.url.query.encode())
         try:
-            upstream=await client.send(client.build_request(request.method,url,headers=headers,content=chunks() if request.method not in {'GET','HEAD'} else None),stream=True)
-        except Exception:
+            async with asyncio.timeout_at(deadline):
+                upstream=await client.send(client.build_request(request.method,url,headers=headers,content=chunks() if request.method not in {'GET','HEAD'} else None),stream=True)
+        except (TimeoutError,httpx.TimeoutException):
+            await client.aclose()
+            from model_diagnostics import Diagnostic
+            error=Diagnostic().error('timeout',status=504,phase='timeout')
+            return JSONResponse({'detail':error.detail},status_code=504,headers=error.headers)
+        except BaseException:
             await client.aclose();raise
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             store.revoke(request.cookies.get(COOKIE,''))
-        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified','content-range','accept-ranges','x-mio-maintenance','retry-after'}}
+        copied={k:v for k,v in upstream.headers.items() if k.lower() in {'content-type','content-length','content-encoding','content-disposition','x-instance-namespace','content-security-policy','etag','last-modified','content-range','accept-ranges','x-mio-maintenance','retry-after','x-mio-event-id'}}
         location=upstream.headers.get('location')
         if location:
             if location.startswith('/') and not location.startswith('//'): copied['location']=location
             else: await upstream.aclose();await client.aclose();raise BetaError('工作区重定向不可用',502)
         async def relay():
             try:
-                async for chunk in upstream.aiter_raw():
+                iterator=upstream.aiter_raw().__aiter__()
+                while True:
+                    try:
+                        async with asyncio.timeout_at(deadline):chunk=await anext(iterator)
+                    except StopAsyncIteration:break
                     yield chunk
             finally:
                 import anyio
@@ -351,7 +364,7 @@ def create_app(config, *, mailer=None):
                     async with asyncio.timeout(5):
                         await upstream.aclose()
                         await client.aclose()
-        response=StreamingResponse(relay(),status_code=upstream.status_code,headers=copied)
+        response=ClosingStreamingResponse(relay(),status_code=upstream.status_code,headers=copied)
         for value in upstream.headers.get_list('set-cookie'): response.headers.append('set-cookie',outward_cookie(value))
         if request.url.path=='/api/auth/logout' and upstream.status_code==200:
             response.delete_cookie(COOKIE,path='/',httponly=True,secure=config.secure,samesite='strict')
