@@ -798,7 +798,7 @@ function sanitizeVideoNodeProviderModel(node){
     else if(!models.includes(node.model)) node.model = models[0] || '';
 }
 function videoModelOptions(selectedModel, providerId){
-    if(personalApiInstance && selectedModel && !providerVideoModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'video');
+    if(personalApiInstance && selectedModel && !providerVideoModels(providerId).includes(selectedModel)) return [selectedModel,...providerVideoModels(providerId)].map(model=>capabilityModelOption(model,selectedModel,providerId,'video')).join('');
     const models = providerVideoModels(providerId);
     if(!models.length){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
@@ -1113,7 +1113,7 @@ function normalizeApiNodeLayout(node){
     if(Number(node.w || 0) === 418) node.w = 380;
 }
 function imageModelOptions(selectedModel, providerId){
-    if(personalApiInstance && selectedModel && !providerImageModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'image');
+    if(personalApiInstance && selectedModel && !providerImageModels(providerId).includes(selectedModel)) return [selectedModel,...providerImageModels(providerId)].map(model=>capabilityModelOption(model,selectedModel,providerId,'image')).join('');
     if(!imageApiProviders().length){
         return `<option value="" disabled selected>${tr('canvas.noApiProvidersHint') || '暂无 API 平台，请到 API 设置添加'}</option>`;
     }
@@ -1127,7 +1127,7 @@ function imageModelOptions(selectedModel, providerId){
     return `${hasSelected || !selectedValue ? '' : (personalApiInstance ? capabilityModelOption(selectedValue,selectedValue,providerId,'image') : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`)}${options}`;
 }
 function chatModelOptions(selectedModel, providerId=''){
-    if(personalApiInstance && selectedModel && !providerChatModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'llm');
+    if(personalApiInstance && selectedModel && !providerChatModels(providerId).includes(selectedModel)) return [selectedModel,...providerChatModels(providerId)].map(model=>capabilityModelOption(model,selectedModel,providerId,'llm')).join('');
     const models = providerId ? providerChatModels(providerId) : allChatModels();
     if(!models.length){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
@@ -8244,8 +8244,8 @@ function renderLLMBody(node){
     const mode = node.mode || 'node';
     node.llmProvider = resolveChatProviderId(node.llmProvider || (personalApiInstance ? '' : 'comfly'));
     const llmProv = node.llmProvider;
-    if(llmProv === 'modelscope') node.model = node.llmMsModel || node.model;
-    if(!providerChatModels(llmProv).includes(node.model)) node.model = providerChatModels(llmProv)[0] || node.model;
+    if(!personalApiInstance && llmProv === 'modelscope') node.model = node.llmMsModel || node.model;
+    if(!node.model || (!personalApiInstance && !providerChatModels(llmProv).includes(node.model))) node.model = providerChatModels(llmProv)[0] || node.model;
     const modelOpts = chatModelOptions(node.model, llmProv);
     const imgs = llmInputImages(node);
     const videos = llmInputVideos(node);
@@ -8280,14 +8280,14 @@ function renderLLMBody(node){
         node.llmProvider = e.target.value;
         const models = providerChatModels(node.llmProvider);
         node.model = models[0] || '';
-        if(node.llmProvider === 'modelscope') node.llmMsModel = node.model;
+        if(!personalApiInstance && node.llmProvider === 'modelscope') node.llmMsModel = node.model;
         render();
         scheduleSave();
     };
     modelSelect.onchange = e => {
         e.stopPropagation();
         node.model = e.target.value;
-        if((node.llmProvider||'comfly') === 'modelscope') node.llmMsModel = e.target.value;
+        if(!personalApiInstance && (node.llmProvider||'comfly') === 'modelscope') node.llmMsModel = e.target.value;
         scheduleSave();
     };
     wrap.querySelector('.llm-sys-toggle').onclick = e => { e.stopPropagation(); node.showSystem = !node.showSystem; render(); scheduleSave(); };
@@ -11053,6 +11053,8 @@ async function runRhModelNode(node, opts={}){
     const prompt = media.prompt || '';
     const refs = imageRefsOnly(media.refs || []);
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
+    try { if(personalApiInstance) window.PersonalModelSelection.assertPrompt(apiProviders,gen.apiProvider,gen.model,prompt || 'Edit the reference images.',refs.length); }
+    catch(error){if(opts.cascade)throw error;showErrorModal(error.message);return;}
     const count = Math.max(1, Math.min(8, Number(node.count || 1)));
     let out = outputForNode(node, 500);
     const run = runSnapshot(node, prompt || 'Edit the reference images.', refs);
@@ -12036,6 +12038,8 @@ async function runGenerator(genId, opts={}){
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
     const refs = uniqueCanvasReferenceImages([...sources.flatMap(s => s.refs || []), ...canvasRefs]);
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
+    try { if(personalApiInstance) window.PersonalModelSelection.assertPrompt(apiProviders,gen.apiProvider,gen.model,prompt || 'Edit the reference images.',refs.length); }
+    catch(error){if(opts.cascade)throw error;showErrorModal(error.message);return;}
     const referenceLimit = await canvasReferenceLimitForNode(gen);
     if(refs.length > referenceLimit){
         const error = new Error(`${resolveImageModel(gen.model)} 最多支持 ${referenceLimit} 张参考图，当前有 ${refs.length} 张`);
@@ -12290,6 +12294,8 @@ async function runGeneratorLegacy(genId, opts={}){
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
     const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
+    try { if(personalApiInstance) window.PersonalModelSelection.assertPrompt(apiProviders,gen.apiProvider,gen.model,prompt || 'Edit the reference images.',refs.length); }
+    catch(error){if(opts.cascade)throw error;showErrorModal(error.message);return;}
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const pendingIds = Array.from({length:count}, () => uid('p'));
@@ -14404,6 +14410,7 @@ function findPendingTask(taskId){
 }
 async function createCanvasImageTask(payload, options={}){
     assertPersonalSelection(payload.provider_id,payload.model,'image');
+    if(personalApiInstance) window.PersonalModelSelection.assertPrompt(apiProviders,payload.provider_id,payload.model,payload.prompt,(payload.reference_images || []).length);
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},

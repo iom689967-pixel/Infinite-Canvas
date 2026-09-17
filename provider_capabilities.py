@@ -50,6 +50,8 @@ def resolve(settings, model, purpose):
             result['reason'] = '缺少 Kie 模型 input 契约；请选择已有模板适配器'
         else:
             result.update(executable=True, adapter=template, asynchronous=True)
+            from providers.prompt_limits import resolve_prompt_capability
+            result['prompt_limits']={kind:resolve_prompt_capability('kie',model,count) for kind,count in [('text',0),('image',1)]}
     elif protocol == 'runninghub' and purpose != 'llm':
         kind, _, entry_id = model.partition(':')
         result['asynchronous'] = True

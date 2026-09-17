@@ -7,7 +7,7 @@ from test_smart_generation_polling_incremental_ui import function_source, run_no
 
 class ControlledModelFrontendTests(unittest.TestCase):
     def test_administrator_ids_and_one_batch_submission(self):
-        functions='\n'.join(function_source(n) for n in ('isKieProviderId','assertPersonalSelection','runApiGeneration'))
+        functions='\n'.join(function_source(n) for n in ('isKieProviderId','validateKieSettings','assertPersonalSelection','runApiGeneration'))
         result=run_node("""
 const personalApiInstance=true,providerConfigError='',window=require('./static/js/personal-model-selection.js');
 const apiProviders=[{id:'atelier-images',protocol:'kie',image_models:['gpt-image-2'],capabilities:{image:{'gpt-image-2':{executable:true}}},model_limits:{'gpt-image-2':{max_images:2}}}];

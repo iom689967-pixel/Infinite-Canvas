@@ -103,7 +103,7 @@ class FullSettingsTests(unittest.TestCase):
         self.assertEqual(data['protocol'],'gemini');self.assertEqual(data['chat_models'],['gemini-text'])
         self.save(self.item('kie',api_key=self.f.keys['A']));before=len(self.f.mock.calls)
         data=self.f.ok('A','POST',API+'/fetch-models',json={'provider_id':'personal-full','base_url':self.f.mock.origin,'protocol':'kie'})
-        self.assertEqual(data['image_models'],['gpt-image-2','nano-banana-pro']);self.assertEqual(len(self.f.mock.calls),before)
+        self.assertEqual(data['image_models'],['gpt-image-2','nano-banana-pro','gpt-image-2.5-flare','gpt-image-2.5-sunburst']);self.assertEqual(len(self.f.mock.calls),before)
     def test_probe_does_not_forward_stored_key_after_target_change(self):
         self.save(self.item('openai',api_key=self.f.keys['A']))
         p={'provider_id':'personal-full','base_url':self.f.mock.origin+'/changed','protocol':'openai'}
@@ -157,7 +157,7 @@ class FullSettingsTests(unittest.TestCase):
         saved=self.save(item)
         for action in ['probe-async','fetch-models']:
             result=self.f.ok('A','POST',API+'/'+action,json={'provider_id':item['id'],'base_url':item['base_url'],'protocol':'kie'})
-            self.assertTrue(result['ok']);self.assertEqual(result['image_models'],item['image_models'])
+            self.assertTrue(result['ok']);self.assertEqual(result['image_models'],['gpt-image-2','nano-banana-pro','gpt-image-2.5-flare','gpt-image-2.5-sunburst'])
         self.f.stop('A');self.f.start('A')
         restored=self.f.ok('A','GET',API)['providers'][0]
         self.assertEqual(restored,saved);self.assertTrue(restored['has_key'])

@@ -62,3 +62,11 @@ class StabilityExecutionTests(unittest.TestCase):
         self.n.save(purpose='llm',name='exact-gpt',base_url=self.f.mock.origin+'/v1',id='modelscope')
         r=self.f.request('A','POST','/api/canvas-llm',json=dict(provider='modelscope',model='exact-gpt',message='fixture text'))
         self.assertEqual(r.status_code,200,r.text);self.assertEqual(self.f.mock.calls[-1][1],'A')
+
+    def test_kie_long_final_prompt_rejects_before_upload_or_submit(self):
+        self.n.save(protocol='kie',name='gpt-image-2',base_url=self.f.mock.origin)
+        media=self.f.upload('A');before=len(self.f.mock.calls)
+        response=self.f.request('A','POST','/api/canvas-image-tasks',json=dict(provider_id='same-personal-id',model='gpt-image-2',prompt='x'*20001,reference_images=[{'url':media}],request_id='long-prompt'))
+        self.assertEqual(response.status_code,400,response.text)
+        self.assertEqual(response.json()['detail']['code'],'model_prompt_too_long')
+        self.assertEqual(len(self.f.mock.calls),before)

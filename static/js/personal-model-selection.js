@@ -17,6 +17,19 @@
         const message=reason(providers,id,model,purpose,loadError);
         if(message){const error=new Error(message);error.code='model_selection_invalid';throw error;}
     }
+    function assertPrompt(providers,id,model,prompt,referenceCount=0){
+        const cap=(providers||[]).find(p=>p.id===id)?.capabilities?.image?.[model];
+        const rule=cap?.prompt_limits?.[referenceCount ? 'image' : 'text'];
+        const count=Array.from(String(prompt || '')).length;
+        if(rule?.limit && count>rule.limit){
+            const error=new Error(`当前模型最多支持 ${rule.limit} 字符，最终 Prompt 为 ${count} 字符；请缩短后重试`);
+            error.code='model_prompt_too_long';throw error;
+        }
+    }
+    function errorMessage(detail,fallback='请求未完成，请查看事件编号或检查配置'){
+        if(detail && typeof detail==='object' && typeof detail.message==='string')return detail.message+(detail.event_id ? ` · 事件 ${detail.event_id}` : '');
+        return typeof detail==='string' ? detail : fallback;
+    }
     function preserve(value,defaultValue){return value || defaultValue || '';}
-    root.PersonalModelSelection=Object.freeze({reason,assertAvailable,preserve});
+    root.PersonalModelSelection=Object.freeze({reason,assertAvailable,assertPrompt,errorMessage,preserve});
 })(typeof module==='object'?module.exports:window);

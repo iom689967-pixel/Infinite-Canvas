@@ -39,3 +39,15 @@ JSON业务错误/空结果/错误结构分别拒绝，不再把200等同成功�
 新增无身份副作用的 URL/messages/参数构造与响应解析；Instance 继续注入 owned Provider、私有凭证和 GuardedClient。bare base 补版本，已有版本不重复；模型精确透传，system/history/current 顺序固定，Gemini 视频不重复追加。公网参考图保留原字节策略，没有模仿 owner 的缩图转码。显式 token/temperature 保留。RunningHub 官方文本跨域只有已列官方来源和固定 HTTPS 文本目标，自定义中转保持原域。
 
 独立 golden 断言覆盖 URL、消息、MIME、图片顺序、参数和凭证目标；真实 Instance 严格 TCP mock 覆盖原 PNG、显式参数与自定义 modelscope Provider ID。46 项网络执行器回归通过；此前 27 项文本/取消/超时测试通过。未调用真实模型。
+
+## 第四批 D07（及端到端复核补齐 D02/D04）
+
+Kie 2.5 Flare/Sunburst 使用各自 text-to-image/image-to-image 路由、input_urls 与 background 模板。已确认的 20k 只绑定 Kie GPT Image 2 和 Nano Banana Pro 的实际路由；2.5/未知模型没有编造上限，借用模板的自定义精确模型 ID 不继承模板名限制。同名 OpenAI-compatible 模型也不套 Kie 限制。按公网最终原文（含空白、Unicode code point）前置检查，参考上传/提交均在其后；通用编辑与保存 100k 不降级。非 public-beta 通用图片/视频 schema 默认由20k/4k升到100k；public-beta已有请求体安全上限保留。
+
+Focus 输入100k；并发能力请求共享 pending Promise，刷新使旧结果失效，缓存键保留 Provider ID 大小写。Kie 参数仅初始化空值；明确选择的比例/分辨率不再静默替换，提交前解释冲突。历史的通用 outputFormat=png 在没有格式参数的 Kie 模板中不下发，也不改写保存设置。
+
+实际浏览器复核发现普通 LLM 重绘、Smart 图片/视频参数重绘仍有旧 fallback，已补齐：现有模型与 Provider 原 ID 保留，缺失项有原因且允许主动重选。自定义 volcengine/modelscope ID 不再触发非个人版本的特殊重写。
+
+任务执行错误安全分类贯通到原任务查询/恢复；CDN失败归本地保存，不冒充 Provider 原始状态。保留真实可知状态、未知upstream=null；事件编号随同一任务失败保留，查询仍校验ownership。聊天流 UI 必须见 done 才完成，取消/EOF保留输入和标识部分输出；在线生图/聊天页不再把结构化错误显示为对象字符串。
+
+旧断言更新清单：Kie预设目录由2→4（两个设置发现测试及三个Kie测试），依据已审计2.5模板；LLM503笼统code=upstream→upstream_unavailable且provider_status=503，依据D02；前端提取函数测试加载新增的真实校验依赖。无测试删除/跳过。

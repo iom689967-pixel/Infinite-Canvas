@@ -227,7 +227,8 @@ const activeSmartGenerationRuns = new Map();
 const cancellingSmartGenerationIds = new Set();
 const activePromptLLMRuns = new Map();
 const kieCapabilityCache = new Map();
-const kieCapabilityLoading = new Set();
+const kieCapabilityLoading = new Map();
+let kieCapabilityEpoch=0;
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -1143,7 +1144,7 @@ function applyRecentSmartSettingsForCurrentMode(){
     sanitizeSmartApiSelection(settings);
 }
 function clearVolcengineSelectionOutsideVolcengine(target=settings){
-    if(!target || typeof target !== 'object' || target.engine === 'volcengine') return target;
+    if(personalApiInstance || !target || typeof target !== 'object' || target.engine === 'volcengine') return target;
     if(target.provider_id === 'volcengine') target.provider_id = '';
     if(target.videoProvider === 'volcengine') target.videoProvider = '';
     return target;
@@ -2541,15 +2542,15 @@ function toggleZoomPreview(){
 function imageProviders(){
     return (apiProviders || []).filter(p => (document.getElementById('instance-context') || (p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine')) && (p.image_models || []).length);
 }
-function isKieProviderId(providerId){
+function isKieProviderId(providerId, model=settings.model){
     const provider = apiProviders.find(item => item.id === providerId);
-    return provider ? provider.protocol === 'kie' : String(providerId || '').trim().toLowerCase() === 'kie';
+    return provider ? (provider.capabilities?.image?.[model]?.protocol || provider.model_protocols?.['image|'+model] || provider.model_protocols?.[model] || provider.protocol) === 'kie' : String(providerId || '').trim().toLowerCase() === 'kie';
 }
 function kieCapabilityKey(providerId=settings.provider_id, model=settings.model){
-    return `${String(providerId || '').trim().toLowerCase()}:${String(model || '').trim()}`;
+    return `${String(providerId || '').trim()}:${String(model || '').trim()}`;
 }
 function currentKieCapability(sourceSettings=settings){
-    if(!isKieProviderId(sourceSettings?.provider_id) || !sourceSettings?.model) return null;
+    if(!isKieProviderId(sourceSettings?.provider_id,sourceSettings?.model) || !sourceSettings?.model) return null;
     return kieCapabilityCache.get(kieCapabilityKey(sourceSettings.provider_id, sourceSettings.model)) || null;
 }
 function kieCapabilityField(schema, key){
@@ -2560,37 +2561,32 @@ function kieFieldValues(field){
 }
 function normalizeKieSettings(schema, sourceSettings=settings){
     if(!schema || !sourceSettings) return;
-    const ratioField = kieCapabilityField(schema, 'aspect_ratio');
-    const resolutionField = kieCapabilityField(schema, 'resolution');
-    const formatField = kieCapabilityField(schema, 'output_format');
-    const resolutions = kieFieldValues(resolutionField);
-    const requestedResolution = String(sourceSettings.resolution || '').toUpperCase();
-    sourceSettings.resolution = resolutions.includes(requestedResolution) ? requestedResolution : String(resolutionField?.default || resolutions[0] || '1K');
-    const ratios = kieFieldValues(ratioField);
-    const excluded = resolutionField?.aspect_ratio_exclusions?.[sourceSettings.resolution] || [];
-    const allowedRatios = ratios.filter(value => !excluded.includes(value));
-    sourceSettings.aspectRatio = allowedRatios.includes(sourceSettings.aspectRatio)
-        ? sourceSettings.aspectRatio
-        : String(ratioField?.default && allowedRatios.includes(ratioField.default) ? ratioField.default : (allowedRatios[0] || 'auto'));
-    if(formatField){
-        const formats = kieFieldValues(formatField);
-        sourceSettings.outputFormat = formats.includes(sourceSettings.outputFormat)
-            ? sourceSettings.outputFormat
-            : String(formatField.default || formats[0] || 'png');
-    } else {
-        sourceSettings.outputFormat = '';
+    for(const [key,fieldKey] of [['aspectRatio','aspect_ratio'],['resolution','resolution'],['outputFormat','output_format']]){
+        const field=kieCapabilityField(schema,fieldKey);
+        if(field && !sourceSettings[key]) sourceSettings[key]=String(field.default || kieFieldValues(field)[0] || '');
     }
 }
+function validateKieSettings(schema, sourceSettings){
+    for(const [key,fieldKey] of [['aspectRatio','aspect_ratio'],['resolution','resolution'],['outputFormat','output_format']]){
+        const field=kieCapabilityField(schema,fieldKey);
+        const value=key==='resolution' ? String(sourceSettings[key] || '').toUpperCase() : sourceSettings[key];
+        if(field && !kieFieldValues(field).includes(value)) throw new Error(`当前模型不支持参数 ${fieldKey}=${value}，请主动调整`);
+    }
+    const excluded=kieCapabilityField(schema,'resolution')?.aspect_ratio_exclusions?.[String(sourceSettings.resolution || '').toUpperCase()] || [];
+    if(excluded.includes(sourceSettings.aspectRatio)) throw new Error('所选分辨率不支持当前比例，请主动调整；不会自动降低画质');
+}
 async function ensureKieCapability(providerId=settings.provider_id, model=settings.model){
-    if(!isKieProviderId(providerId) || !model) return null;
+    if(!isKieProviderId(providerId,model) || !model) return null;
     const key = kieCapabilityKey(providerId, model);
     if(kieCapabilityCache.has(key)) return kieCapabilityCache.get(key);
-    if(kieCapabilityLoading.has(key)) return null;
-    kieCapabilityLoading.add(key);
+    if(kieCapabilityLoading.has(key)) return kieCapabilityLoading.get(key);
+    const epoch=kieCapabilityEpoch;
+    const pending=(async () => {
     try {
         const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
         if(!response.ok) throw new Error(await response.text());
         const schema = await response.json();
+        if(epoch!==kieCapabilityEpoch) return null;
         kieCapabilityCache.set(key, schema);
         if(settings.provider_id === providerId && settings.model === model) normalizeKieSettings(schema, settings);
         scheduleDynamicParamsRefresh(0);
@@ -2599,8 +2595,11 @@ async function ensureKieCapability(providerId=settings.provider_id, model=settin
         toast((error?.message || 'Kie 参数加载失败').slice(0, 160));
         return null;
     } finally {
-        kieCapabilityLoading.delete(key);
+        if(epoch===kieCapabilityEpoch) kieCapabilityLoading.delete(key);
     }
+    })();
+    kieCapabilityLoading.set(key,pending);
+    return pending;
 }
 function volcengineProvider(){
     return (apiProviders || []).find(p => p.id === 'volcengine' && p.enabled !== false) || {
@@ -3019,7 +3018,7 @@ function renderVideoModelControl(models){
         <button class="smart-pill" type="button"><i data-lucide="film"></i><span class="sub">${escapeHtml(settings.videoModel || tr('smart.model'))}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.videoModel'))}</div>
-            <div class="model-list">
+            <div class="model-list">${personalApiInstance ? `<div class="muted-note">${escapeHtml(window.PersonalModelSelection.reason(apiProviders,settings.videoProvider,settings.videoModel,'video',providerConfigError))}</div>` : ''}
                 ${models.map(m => `<button type="button" class="direct-option ${m === settings.videoModel ? 'active' : ''}" ${personalModelButtonAttributes(m,settings.videoProvider,'video')} data-smart-param="videoModel" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(m)}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noVideoModel'))}</div>`}
             </div>
         </div>
@@ -3261,9 +3260,9 @@ function renderDynamicParams(){
 }
 function renderApiParams(){
     const providers = imageProviders();
-    if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
+    if(!settings.provider_id || (!personalApiInstance && !providers.some(p => p.id === settings.provider_id))) settings.provider_id = providers[0]?.id || '';
     const models = filterJimengImageModels(providerImageModels(settings.provider_id));
-    if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    if(!settings.model || (!personalApiInstance && !models.includes(settings.model))) settings.model = models[0] || '';
     if(isKieProviderId(settings.provider_id)){
         const schema = currentKieCapability();
         if(!schema) ensureKieCapability(settings.provider_id, settings.model);
@@ -3299,9 +3298,9 @@ function renderJimengUpscaleControl(){
 }
 function renderApiVideoParams(){
     const providers = videoApiProviders();
-    if(!settings.videoProvider || !providers.some(p => p.id === settings.videoProvider)) settings.videoProvider = providers[0]?.id || 'comfly';
+    if(!settings.videoProvider || (!personalApiInstance && !providers.some(p => p.id === settings.videoProvider))) settings.videoProvider = providers[0]?.id || (personalApiInstance ? '' : 'comfly');
     const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
+    if(!settings.videoModel || (!personalApiInstance && !models.includes(settings.videoModel))) settings.videoModel = models[0] || (personalApiInstance ? '' : 'veo3-fast');
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -3323,7 +3322,7 @@ function renderVolcengineParams(){
     const providers = [provider];
     const models = providerImageModels('volcengine');
     settings.provider_id = 'volcengine';
-    if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    if(!settings.model || (!personalApiInstance && !models.includes(settings.model))) settings.model = models[0] || '';
     normalizeApiSizeSettings('');
     const outpaintLocked = settings.outpaintResolutionLocked === true;
     dynamicParams.innerHTML = `
@@ -3339,7 +3338,7 @@ function renderVolcengineVideoParams(){
     const providers = [provider];
     const models = volcengineVideoModels();
     settings.videoProvider = 'volcengine';
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'seedance-1.0-pro';
+    if(!settings.videoModel || (!personalApiInstance && !models.includes(settings.videoModel))) settings.videoModel = models[0] || 'seedance-1.0-pro';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -3630,7 +3629,7 @@ function renderModelControl(models){
         <button class="smart-pill" type="button"><i data-lucide="sparkles"></i><span class="sub">${escapeHtml(labelFor(settings.model) || tr('smart.model'))}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.imageModel'))}</div>
-            <div class="model-list">
+            <div class="model-list">${personalApiInstance ? `<div class="muted-note">${escapeHtml(window.PersonalModelSelection.reason(apiProviders,settings.provider_id,settings.model,'image',providerConfigError))}</div>` : ''}
                 ${models.map(m => `<button type="button" class="direct-option ${m === settings.model ? 'active' : ''}" ${personalModelButtonAttributes(m,settings.provider_id,'image')} data-smart-param="model" data-smart-value="${escapeHtml(m)}"><span>${escapeHtml(labelFor(m))}</span></button>`).join('') || `<div class="muted-note">${escapeHtml(tr('smart.noImageModel'))}</div>`}
             </div>
         </div>
@@ -4787,6 +4786,8 @@ async function loadConfig(){
         const cfg = await response.json();
         if(personalApiInstance && !Array.isArray(cfg.api_providers)) throw new Error('配置格式错误');
         providerConfigError='';
+        kieCapabilityEpoch++;kieCapabilityCache.clear();kieCapabilityLoading.clear();
+        smartCanvasReferenceCapabilityCache.clear();
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
@@ -9774,7 +9775,7 @@ function focusEditUiHtml(){
             <section class="focus-edit-section"><div class="focus-edit-section-head"><h3>参考元素</h3>${reference && !running ? '<button type="button" data-focus-reselect>重新选择</button>' : ''}</div>
                 ${reference ? `<div class="focus-edit-reference-card"><span class="focus-edit-reference-preview">${referencePreview}</span><span class="focus-edit-reference-copy"><strong>${escapeHtml(reference.label)}</strong><small>${escapeHtml(source?.title || reference.sourceNodeId || '来源图片')}</small><em>Approximate region · ${(reference.point.x * 100).toFixed(1)}%, ${(reference.point.y * 100).toFixed(1)}%</em></span>${running ? '' : '<button type="button" data-focus-remove title="删除参考元素"><i data-lucide="trash-2"></i></button>'}</div>` : '<button type="button" class="focus-edit-pick-hint" data-focus-reselect><i data-lucide="mouse-pointer-2"></i><span>请在画布中点击其他图片的局部内容</span></button>'}
             </section>
-            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction maxlength="4000" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
+            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction maxlength="${PROMPT_TEXT_MAX_LENGTH}" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
             <footer>${running ? `<button type="button" class="focus-edit-cancel" data-focus-cancel ${cancelling ? 'disabled' : ''}>${cancelling ? '正在取消…' : '取消任务'}</button>` : '<span>执行时会同时提交目标图、参考元素视觉与文字指令。</span>'}<button type="button" class="focus-edit-run" data-focus-run ${!reference || !focusEditSession.instruction.trim() || running ? 'disabled' : ''}>${running ? '编辑中…' : '执行焦点编辑'}</button></footer>
         </aside>${candidate}`;
 }
@@ -19792,7 +19793,7 @@ async function runPromptLLMNode(nodeId){
             signal:controller.signal
         }).then(async r => {
             if(!r.ok){
-                const error = new Error(r.status === 504
+                const error = new Error(!personalApiInstance && r.status === 504
                     ? tr('smart.promptLlmTimeout')
                     : await responseErrorMessage(r, tr('smart.promptLlmFailed')));
                 if(r.status === 499) error.promptLLMCancelled = true;
@@ -19830,11 +19831,12 @@ function comfyFieldKind(field){
 }
 async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=null){
     assertPersonalSelection(runSettings.provider_id,runSettings.model,'image');
+    if(personalApiInstance) window.PersonalModelSelection.assertPrompt(apiProviders,runSettings.provider_id,runSettings.model,prompt,imageRefsOnly(refs).length);
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
-    const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
-    if(isKieProviderId(runSettings.provider_id) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
-    if(kieSchema) normalizeKieSettings(kieSchema, runSettings);
+    const kieSchema = isKieProviderId(runSettings.provider_id,runSettings.model) ? (currentKieCapability(runSettings) || await ensureKieCapability(runSettings.provider_id,runSettings.model)) : null;
+    if(isKieProviderId(runSettings.provider_id,runSettings.model) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
+    if(kieSchema){ normalizeKieSettings(kieSchema, runSettings); validateKieSettings(kieSchema,runSettings); }
     const imageRefs = imageRefsOnly(refs);
     const kieRefLimit = Number(kieCapabilityField(kieSchema, 'reference_images')?.max || kieSchema?.reference_image_limit || 0);
     const referenceLimit = kieSchema ? kieRefLimit : SMART_REFERENCE_IMAGE_MAX;
@@ -19849,7 +19851,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
         size:sizeForRun(runSettings),
         aspect_ratio:kieSchema ? runSettings.aspectRatio : (API_RATIO_VALUES[runSettings.ratio] || (runSettings.ratio === 'custom' ? String(runSettings.customRatio || '').trim() : '')),
         resolution:kieSchema ? String(runSettings.resolution || '').toUpperCase() : (['1k','2k','4k'].includes(apiResolution) ? apiResolution : ''),
-        output_format:kieSchema ? String(runSettings.outputFormat || '') : '',
+        output_format:kieCapabilityField(kieSchema,'output_format') ? String(runSettings.outputFormat || '') : '',
         quality:runSettings.quality || 'auto',
         n:1,
         reference_images:imageRefs
