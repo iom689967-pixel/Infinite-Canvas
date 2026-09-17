@@ -49,6 +49,12 @@ class InstanceAuthMiddleware:
         return "denied"
 
     async def reply(self, scope, receive, send, response):
+        from maintenance_routes import classify
+        if response.status_code in {401,403} and classify(scope.get('method',''),scope.get('path','')) in {'llm','llm_stream','agent','caption','classification','image','video','upload'}:
+            from model_diagnostics import Diagnostic
+            error=Diagnostic().error('site_auth' if response.status_code==401 else 'permission',status=response.status_code,phase='validation')
+            response=JSONResponse({'detail':error.detail},response.status_code,headers=error.headers)
+
         if scope.get('_instance_namespace'):
             response.headers['X-Instance-Namespace'] = scope['_instance_namespace']
         response.headers.update({"Cache-Control": "no-store, private", "Pragma": "no-cache",

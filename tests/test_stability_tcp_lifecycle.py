@@ -29,6 +29,8 @@ class StreamMock(StrictTextMock):
         def chunk(data):
             b=data.encode();self.wfile.write(('%x\r\n'%len(b)).encode()+b+b'\r\n');self.wfile.flush()
         try:
+            if case=='slow_token':time.sleep(.15)
+            if case=='first_timeout':time.sleep(.5)
             chunk('data: '+json.dumps({'choices':[{'delta':{'content':'part '*30}}]})+'\n\n')
             if case=='idle':time.sleep(.5)
             elif case in {'cancel','total'}:
@@ -101,3 +103,11 @@ class GatewayStreamLifecycleTests(unittest.IsolatedAsyncioTestCase):
         result=await self.tcp.post('/api/canvas-llm',json=self.payload('slow'))
         self.assertEqual(result.status_code,200,result.text)
         self.assertEqual(len(self.upstream.calls),2)
+
+    async def test_first_stream_token_has_a_bounded_idle_budget(self):
+        success=await self.tcp.post('/api/chat/stream',json=self.payload('slow_token'))
+        self.assertIn('"type": "done"',success.text);await self.drained()
+        timeout=await self.tcp.post('/api/chat/stream',json=self.payload('first_timeout'))
+        self.assertIn('"category": "timeout"',timeout.text);self.assertNotIn('"type": "done"',timeout.text);await self.drained()
+        self.assertEqual(inspect(self.gate,[])['unknown_llm_responses'],1)
+        self.assertEqual(len(self.upstream.calls),2);self.assertEqual(getattr(self.upstream,'unmatched',[]),[])

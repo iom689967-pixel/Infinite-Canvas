@@ -28,3 +28,10 @@ class SafeDiagnosticTests(unittest.TestCase):
             try:self.assertFalse(issued_detail(e.detail))
             finally:ISSUED_EVENTS.reset(other)
         finally:ISSUED_EVENTS.reset(token)
+
+    def test_arbitrary_exception_code_and_fake_event_do_not_cross_boundary(self):
+        from fastapi import HTTPException
+        with self.assertLogs('mio.model') as logs:
+            error=Diagnostic().from_exception(HTTPException(502,{'code':'PRIVATE_PROMPT_KEY','event_id':'f'*32,'message':'PRIVATE_COOKIE'}))
+        self.assertNotIn('PRIVATE',str(logs.output));self.assertNotEqual(error.detail['event_id'],'f'*32)
+        self.assertEqual(error.detail['category'],'response_structure')

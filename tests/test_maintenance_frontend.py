@@ -30,7 +30,7 @@ const callCanvasLLM=async()=>{calls++;throw Object.assign(new Error('维护'),{c
         result=js.run_node("""
 const input={value:'  原输入  '},btn={disabled:false};let refs=[{url:'/assets/owned.png'}],calls=0;
 const document={getElementById:id=>id==='messageInput'?input:id==='sendBtn'?btn:{}};
-const personalApiInstance=false,mode='chat';let currentConversation={id:'c',messages:[]};
+let activeChatController=null;const personalApiInstance=false,mode='chat';let currentConversation={id:'c',messages:[]};
 const chatSizeFromPrompt=()=>'',renderRefs=()=>{},autoGrow=()=>{},scrollBottom=()=>{},
 chatResolutionForRequest=()=>'',currentChatAspectRatio=()=>'',renderMessages=()=>{},tr=x=>x;
 const addMessageBubble=()=>({bubble:{classList:{add:()=>{}}}});

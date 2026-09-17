@@ -317,7 +317,7 @@ class MaintenanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             response.append(message)
         await wrapped(scope, receive, record)
         self.assertEqual(bodies, []); self.assertEqual(response[0]['status'], 503)
-        self.assertEqual(json.loads(response[1]['body']), {'detail': DETAIL})
+        self.assertEqual({k:json.loads(response[1]['body'])['detail'][k] for k in DETAIL}, DETAIL);self.assertRegex(json.loads(response[1]['body'])['detail']['event_id'],r'^[a-f0-9]{32}$')
         finish.set(); await task; self.assertEqual(self.gate.status()['active'], 0)
 
     async def test_missing_state_fails_closed_before_application_network_work(self):

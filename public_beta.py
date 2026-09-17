@@ -67,7 +67,13 @@ def create_app(config, *, mailer=None):
         if request.method not in {'GET','HEAD','OPTIONS'} and request.headers.get('origin')!=config.origin:
             return JSONResponse({'detail':'请求来源不受信任'},403)
         try: response=await call_next(request)
-        except BetaError as exc: response=JSONResponse({'detail':exc.message},exc.status)
+        except BetaError as exc:
+            from maintenance_routes import classify
+            if exc.status in {401,403} and classify(request.method,request.url.path) in {'llm','llm_stream','agent','caption','classification','image','video','upload'}:
+                from model_diagnostics import Diagnostic
+                error=Diagnostic().error('site_auth' if exc.status==401 else 'permission',status=exc.status,phase='validation')
+                response=JSONResponse({'detail':error.detail},exc.status,headers=error.headers)
+            else:response=JSONResponse({'detail':exc.message},exc.status)
         except Exception: response=JSONResponse({'detail':'服务暂时不可用，请稍后再试'},503)
         cache = assets.cache_control(request.url.path, request.url.query, request.method,
                                      response.status_code, 'set-cookie' in response.headers)

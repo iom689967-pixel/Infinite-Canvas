@@ -140,6 +140,8 @@ class NetworkMock(fixtures.PersonalMock):
             return self.reply(self.server.image,content_type='image/png')
         tid=path.rsplit('/',1)[-1]
         if tid in self.server.jobs and tid.startswith('mock-'):
+            normalized=re.sub(r'^/(openai|gemini|apimart|runninghub)(?=/)', '', path)
+            if not re.fullmatch(r'/(?:v1/|api/v3/)?(?:tasks|images/tasks|videos(?:/generations)?|responses|midjourney|seedance2/private-avatar|contents/generations/tasks)/mock-[0-9]+',normalized):return self.reject('query path')
             job=self.server.jobs[tid]
             if job['owner']!=self.identity():return self.reply({},403)
             self.server.calls.append(('network-query',job['owner'],{'path':path}))

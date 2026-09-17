@@ -42,6 +42,13 @@ const cmd=async o=>{fixture.stdin.write(JSON.stringify(o)+'\n');return next()};l
  // Invalid existing model remains after real renderer, then user may reselect.
  await normal.evaluate(()=>{const n=nodes.find(n=>n.id==='browser-llm');n.llmProvider='same-personal-id';n.model='deleted-model';render()});assert.equal(await normal.evaluate(()=>nodes.find(n=>n.id==='browser-llm').model),'deleted-model');
  await normal.locator('.llm-model').first().selectOption('novel-model-v2030');assert.equal(await normal.evaluate(()=>nodes.find(n=>n.id==='browser-llm').model),'novel-model-v2030');
+
+ // Real image node actions and original-node fill, saved and reloaded.
+ const imageNormal=await normal.evaluate(()=>{const gen=addGeneratorNode({x:500,y:100});gen.apiProvider='same-personal-id';gen.model='novel-model-v2030';gen.resolution='1k';nodes.push({id:'browser-image-prompt',type:'prompt',x:100,y:600,text:'synthetic garment'});connections.push({id:'browser-edge',from:'browser-image-prompt',to:gen.id});render();return gen.id;});
+ await normal.locator(`.node[data-id="${imageNormal}"] .gen-btn`).first().click();await normal.waitForFunction(id=>nodes.find(n=>n.id===id)?.generatedOutputs?.length>0,imageNormal);await normal.evaluate(()=>saveCanvas());await normal.reload();await normal.waitForFunction(id=>typeof nodes!=='undefined'&&nodes.find(n=>n.id===id)?.generatedOutputs?.length>0,imageNormal);
+ const imageSmart=await smart.evaluate(()=>{const n=createGenerationNode('image',{x:700,y:300});n.runSettings={...n.runSettings,engine:'api',apiKind:'image',provider_id:'same-personal-id',model:'novel-model-v2030',resolution:'1k',ratio:'square',count:1};settings={...settings,...n.runSettings};selectedId=n.id;render();promptInput.textContent='synthetic garment';promptInput.dispatchEvent(new Event('input',{bubbles:true}));return n.id;});
+ await smart.locator('#runBtn').click();await smart.waitForFunction(id=>nodes.find(n=>n.id===id)?.images?.length>0,imageSmart);await smart.evaluate(()=>saveCanvas());await smart.reload();await smart.waitForFunction(id=>typeof nodes!=='undefined'&&nodes.find(n=>n.id===id)?.images?.length>0,imageSmart);
+ evidence.image_nodes_original_fill_refresh=true;
  // Submit once, fail local CDN download, recover only original receipt in each canvas.
  for(const [tab,kind] of [[normal,'normal'],[smart,'smart']]){
   await tab.evaluate(()=>saveCanvas());await cmd({op:'download',fail:true});const before=await cmd({op:'evidence'});
@@ -51,7 +58,7 @@ const cmd=async o=>{fixture.stdin.write(JSON.stringify(o)+'\n');return next()};l
   const result=await tab.evaluate(async([id,kind])=>kind==='normal'?waitCanvasImageTaskResult(id):pollSmartCanvasTask(id),[taskId,kind]);assert.ok(result.images[0].startsWith('/'));
   await tab.evaluate(async id=>{await fetch('/api/canvas-image-tasks/'+id+'/refresh',{method:'POST'});},taskId);
   const after=await cmd({op:'evidence'});assert.equal(after.submits,before.submits+1);const media=await tab.request.get(cfg.A+result.images[0]);assert.equal(media.status(),200);
-  const history=await tab.evaluate(()=>fetch('/api/history').then(r=>r.json()));fs.writeFileSync(out+'/history-'+kind+'.json',JSON.stringify(history));evidence.pages.find(p=>p.kind===kind).original_result_recovery=true;
+  const history=await tab.evaluate(()=>fetch('/api/history').then(r=>r.json()));assert.equal(history.filter(h=>h.task_id===taskId).length,1);fs.writeFileSync(out+'/history-'+kind+'.json',JSON.stringify(history));evidence.pages.find(p=>p.kind===kind).original_result_recovery=true;
  }
  // Actual streaming chat: click send, observe partial output, click stop.
  await page.goto(cfg.A+'/static/gpt-chat.html');await page.waitForFunction(()=>typeof config!=='undefined'&&config.api_providers?.some(p=>p.id==='same-personal-id'));

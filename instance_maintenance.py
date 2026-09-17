@@ -247,7 +247,10 @@ Their planned restart disconnect remains visible to deployment operators.
         except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailable):
             lease = None
         if lease is None:
-            response = JSONResponse({'detail': DETAIL}, 503, headers={
+            from model_diagnostics import Diagnostic
+            error=Diagnostic().error('maintenance',status=503,phase='validation')
+            response = JSONResponse({'detail': error.detail}, 503, headers={
+                'X-Mio-Event-Id':error.detail['event_id'],
                 'Cache-Control': 'no-store', 'X-Mio-Maintenance': '1', 'Retry-After': '60'})
             return await response(scope, receive, send)
         token = CURRENT_ACTIVITY.set(lease)

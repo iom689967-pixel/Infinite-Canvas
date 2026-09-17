@@ -49,6 +49,7 @@ class Diagnostic:
         self.provider_status=None
     def error(self,category,*,status=502,code=None,phase='response',provider_status=None):
         if category not in MESSAGES:category='response_structure'
+        if code not in MESSAGES and code not in LEGACY_CATEGORY:code=category
         if phase not in {'validation','submit','response','parse','save','stream','cancel','timeout'}:phase='response'
         if provider_status is not None:self.provider_status=provider_status if type(provider_status) is int and 100<=provider_status<=599 else None
         detail=dict(code=code or category,category=category,message=MESSAGES[category],event_id=self.event_id,

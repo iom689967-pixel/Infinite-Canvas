@@ -7,8 +7,10 @@
     const originalFetch = window.fetch.bind(window);
     let session = null;
     let loggedOut = false;
-    function maintenanceError() {
-        const error = new Error('工作区维护中，暂时不能提交新任务，请稍后再试。');
+    function maintenanceError(eventId) {
+        const id=/^[a-f0-9]{32}$/.test(eventId || '') ? eventId : '';
+        const error = new Error('工作区维护中，暂时不能提交新任务，请稍后再试。'+(id ? ` · 事件 ${id}` : ''));
+        if(id)error.event_id=id;
         error.code = 'maintenance';
         return error;
     }
@@ -34,7 +36,7 @@
     const startup = window.WorkspaceStartup || (parentSession ? window.parent.WorkspaceStartup : null);
     const bootstrap = parentSession ? parentSession.ready : startup ? startup.ready : originalFetch('/api/auth/me', {credentials: 'same-origin', cache: 'no-store'})
         .then(async response => {
-            if (response.status === 503 && response.headers.get('X-Mio-Maintenance') === '1') throw maintenanceError();
+            if (response.status === 503 && response.headers.get('X-Mio-Maintenance') === '1') throw maintenanceError(response.headers.get('X-Mio-Event-Id'));
             if (!response.ok) { loginRequired(); throw new Error('请先登录'); }
             return response.json();
         });
@@ -71,7 +73,7 @@
         const response = await originalFetch(input, {...options, headers, credentials: 'same-origin',
             cache: programResource ? (options.cache || 'default') : 'no-store'});
         if (response.status === 503 && response.headers.get('X-Mio-Maintenance') === '1') {
-            throw maintenanceError(); // Keep caller input; never retry or enqueue a rejected operation.
+            throw maintenanceError(response.headers.get('X-Mio-Event-Id')); // Keep caller input; never retry or enqueue a rejected operation.
         }
         const namespace = response.headers.get('X-Instance-Namespace');
         if (response.status === 401 || (namespace && namespace !== identity.storage_namespace)) {

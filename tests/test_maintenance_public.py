@@ -61,7 +61,7 @@ class PublicMaintenanceTests(unittest.IsolatedAsyncioTestCase):
                       '/api/instance/provider-settings/test-connection','/api/instance/provider-settings/probe-async',
                       '/api/beta/register'):
             response=await self.client.post(route,json={})
-            self.assertEqual(response.status_code,503,route);self.assertEqual(response.json(),{'detail':DETAIL})
+            self.assertEqual(response.status_code,503,route);self.assertEqual({k:response.json()['detail'][k] for k in DETAIL},DETAIL);self.assertRegex(response.json()['detail']['event_id'],r'^[a-f0-9]{32}$')
         self.assertFalse(any(k in {'text','create','upload','network-submit','network-upload'} for k,_,_ in mock.calls[before:]))
         self.assertEqual((await self.client.get('/api/config')).status_code,200)
         mock.finish_waiting=True
@@ -87,7 +87,7 @@ class PublicMaintenanceTests(unittest.IsolatedAsyncioTestCase):
     async def test_untrusted_admission_header_cannot_bypass_gateway_gate(self):
         await self.register();await self.enter();set_phase(self.gate,'draining')
         response=await self.client.post('/api/canvas-llm',json={},headers={'X-Mio-Maintenance-Parent':'invented'})
-        self.assertEqual(response.status_code,503);self.assertEqual(response.json(),{'detail':DETAIL})
+        self.assertEqual(response.status_code,503);self.assertEqual({k:response.json()['detail'][k] for k in DETAIL},DETAIL);self.assertRegex(response.json()['detail']['event_id'],r'^[a-f0-9]{32}$')
 
     async def test_full_json_sse_and_unknown_llm_submit_use_actual_controlled_client(self):
         with patch.object(personal,'NetworkMock',DropTextMock):
