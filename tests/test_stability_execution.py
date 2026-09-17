@@ -10,8 +10,9 @@ class StrictTextMock(network.NetworkMock):
         raw=self.rfile.read(int(self.headers.get('Content-Length','0')))
         try:body=json.loads(raw)
         except ValueError:return self.reject('non-json')
-        expected={'model','messages'}|({'stream'} if body.get('stream') else set())
-        if path!='/v1/chat/completions' or set(body)!=expected or body.get('model')!='exact-gpt' or not isinstance(body.get('messages'),list) or not self.identity():return self.reject('request-contract')
+        options=getattr(self.server,'text_options',{})
+        expected={'model','messages'}|set(options)|({'stream'} if body.get('stream') else set())
+        if any(body.get(k)!=v for k,v in options.items()) or path!='/v1/chat/completions' or set(body)!=expected or body.get('model')!='exact-gpt' or not isinstance(body.get('messages'),list) or not self.identity():return self.reject('request-contract')
         self.server.calls.append(('strict-text',self.identity(),body))
         case=getattr(self.server,'text_case','success')
         status,body={'success':(200,{'choices':[{'message':{'content':'  fixture text  '}}],'usage':{'total_tokens':7}}),'auth':(401,{'error':{'message':'FAKE_KEY prompt Cookie private'}}),'routing':(503,{'error':{'code':'no_available_accounts'}}),'rate':(429,{'error':{}}),'business':(200,{'error':{'code':'bad','message':'PRIVATE_PROMPT'}}),'empty':(200,{'choices':[{'message':{'content':''}}]}),'array':(200,[])}[case]
@@ -47,3 +48,17 @@ class StabilityExecutionTests(unittest.TestCase):
             self.f.mock.text_case=case;r=self.call()
             self.assertEqual(r.status_code,502,r.text);self.assertEqual(r.json()['detail']['category'],category)
         self.assertEqual(len(self.f.mock.calls),3)
+
+    def test_explicit_parameters_and_original_media_bytes(self):
+        import base64
+        ref=self.f.upload()
+        self.f.mock.text_options={'max_tokens':777,'temperature':.2}
+        r=self.call(images=[ref],max_output_tokens=777,temperature=.2)
+        self.assertEqual(r.status_code,200,r.text)
+        body=self.f.mock.calls[-1][2]
+        self.assertEqual(body['messages'],[{'role':'user','content':[{'type':'text','text':'fixture text'},{'type':'image_url','image_url':{'url':'data:image/png;base64,'+base64.b64encode(self.f.mock.image).decode()}}]}])
+        self.assertEqual(r.json()['raw_usage'],{'total_tokens':7})
+    def test_provider_id_does_not_select_global_modelscope(self):
+        self.n.save(purpose='llm',name='exact-gpt',base_url=self.f.mock.origin+'/v1',id='modelscope')
+        r=self.f.request('A','POST','/api/canvas-llm',json=dict(provider='modelscope',model='exact-gpt',message='fixture text'))
+        self.assertEqual(r.status_code,200,r.text);self.assertEqual(self.f.mock.calls[-1][1],'A')

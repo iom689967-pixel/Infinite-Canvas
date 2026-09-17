@@ -57,12 +57,14 @@ class Diagnostic:
         events=ISSUED_EVENTS.get()
         if events is not None:events[self.event_id]=dict(detail)
         logging.getLogger('mio.model').warning('%s',json.dumps(dict(detail,elapsed_ms=round((time.monotonic()-self.started)*1000)),ensure_ascii=False))
-        return HTTPException(status_code=status,detail=detail,headers={'X-Mio-Event-Id':self.event_id})
+        error=HTTPException(status_code=status,detail=detail,headers={'X-Mio-Event-Id':self.event_id})
+        error._mio_safe_error=True
+        return error
     def from_exception(self,exc):
         from llm_contracts import ContractError
         if isinstance(exc,ContractError):return self.error(exc.category,phase='parse')
         if isinstance(exc,HTTPException):
-            if isinstance(exc.detail,dict) and exc.detail.get('event_id'):return exc
+            if getattr(exc,'_mio_safe_error',False):return exc
             code=exc.detail.get('code') if isinstance(exc.detail,dict) else None
             category='maintenance' if code=='maintenance' else LEGACY_CATEGORY.get(code,'permission' if exc.status_code in {401,403} else 'invalid_parameters' if exc.status_code<500 else 'response_structure')
             return self.error(category,status=exc.status_code,code=code,phase='validation')

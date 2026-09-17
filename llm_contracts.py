@@ -96,3 +96,89 @@ class SSEText:
         if self.lines or not self.complete:raise ContractError('incomplete_stream')
         if not self.text.strip():raise ContractError('empty_result',complete=True)
         return TextResult(self.text,self.usage)
+
+# Existing network protocols only. Official RunningHub text traffic has one
+# explicit cross-origin contract; custom relays keep their configured origin.
+RH_OFFICIAL_HOSTS=frozenset({'runninghub.ai','www.runninghub.ai','api.runninghub.ai','runninghub.cn','www.runninghub.cn','api.runninghub.cn','llm.runninghub.ai'})
+RH_TEXT_URL='https://llm.runninghub.ai/v1/chat/completions'
+
+def approved_runninghub_text_target(base,url):
+    from urllib.parse import urlsplit
+    p=urlsplit(base)
+    return (p.scheme=='https' and p.hostname in RH_OFFICIAL_HOSTS and p.port in (None,443)
+            and not p.username and not p.password and not p.query and not p.fragment and url==RH_TEXT_URL)
+
+def chat_base(protocol,base):
+    from urllib.parse import urlsplit,urlunsplit
+    p=urlsplit(base)
+    if p.scheme not in {'https','http'} or not p.hostname or p.username or p.password or p.query or p.fragment:raise ContractError('invalid_parameters')
+    if protocol=='runninghub' and approved_runninghub_text_target(base,RH_TEXT_URL):return RH_TEXT_URL.removesuffix('/chat/completions')
+    path=p.path.rstrip('/')
+    if path.endswith('/chat/completions'):path=path.removesuffix('/chat/completions')
+    if protocol=='gemini':
+        while any(path.endswith(s) for s in ('/v1beta/models','/v1/models','/v1beta','/v1')):
+            suffix=next(s for s in ('/v1beta/models','/v1/models','/v1beta','/v1') if path.endswith(s));path=path[:-len(suffix)]
+        path+='/v1beta'
+    else:
+        suffix='/api/v3' if protocol=='volcengine' else '/v1'
+        # An explicit alternative version (e.g. /v2) is a user's exact API root.
+        import re
+        if not path.endswith(suffix) and not re.search(r'/v\d+(?:beta\d*)?$',path):path+=suffix
+    return urlunsplit((p.scheme,p.netloc,path,'',''))
+
+def compose_messages(system,history,current,images=(),videos=()):
+    import copy
+    messages=copy.deepcopy(history)
+    if system:messages.insert(0,{'role':'system','content':system})
+    content=[{'type':'text','text':current}]
+    content.extend({'type':'image_url','image_url':{'url':v}} for v in images)
+    content.extend({'type':'video_url','video_url':{'url':v}} for v in videos)
+    messages.append({'role':'user','content':content})
+    return messages
+
+def gemini_body(messages):
+    import mimetypes
+    from urllib.parse import urlsplit
+    contents=[];system=[]
+    for message in messages:
+        role=message['role'];content=message['content']
+        parts=[]
+        for p in content if isinstance(content,list) else [{'type':'text','text':content}]:
+            if p.get('type')=='text':parts.append({'text':p['text']});continue
+            kind=p.get('type');media=p.get(kind,{})
+            url=media.get('url') if isinstance(media,dict) else media
+            if kind not in {'image_url','video_url'} or not isinstance(url,str):raise ContractError('invalid_parameters')
+            if url.startswith('data:') and ';base64,' in url:
+                header,encoded=url.split(';base64,',1);parts.append({'inlineData':{'mimeType':header[5:],'data':encoded}})
+            elif url.startswith(('https://','http://')):
+                mime=mimetypes.guess_type(urlsplit(url).path)[0] or ('video/mp4' if kind=='video_url' else 'image/png')
+                parts.append({'fileData':{'mimeType':mime,'fileUri':url}})
+            else:raise ContractError('invalid_parameters')
+        if role=='system':system.extend(parts)
+        else:contents.append({'role':'model' if role=='assistant' else 'user','parts':parts})
+    body={'contents':contents}
+    if system:body['systemInstruction']={'parts':system}
+    return body
+
+def build_request(protocol,base,model,messages,*,stream=False,max_output_tokens=None,temperature=None):
+    import copy,math
+    from urllib.parse import quote
+    if protocol not in {'openai','gemini','volcengine','runninghub','apimart'}:raise ContractError('invalid_parameters')
+    if not isinstance(model,str) or not model or any(ord(c)<32 for c in model):raise ContractError('invalid_parameters')
+    root=chat_base(protocol,base)
+    if protocol=='gemini':
+        # 'models/' is a Gemini resource prefix, not a fallback/model alias.
+        resource=model.removeprefix('models/')
+        url=root+'/models/'+quote(resource,safe='')+':generateContent';body=gemini_body(messages)
+        params=body.setdefault('generationConfig',{}) if max_output_tokens is not None or temperature is not None else None
+    else:
+        url=root+'/chat/completions';body={'model':model,'messages':copy.deepcopy(messages)};params=body
+        if stream:body['stream']=True
+        elif protocol=='apimart':body['stream']=False
+    if max_output_tokens is not None:
+        if type(max_output_tokens) is not int or max_output_tokens<=0:raise ContractError('invalid_parameters')
+        params['maxOutputTokens' if protocol=='gemini' else 'max_tokens']=max_output_tokens
+    if temperature is not None:
+        if type(temperature) not in {int,float} or not math.isfinite(temperature):raise ContractError('invalid_parameters')
+        params['temperature']=temperature
+    return url,body

@@ -4367,34 +4367,14 @@ def unwrap_apimart_response(raw):
     return raw
 
 def text_from_chat_response(data):
-    data = unwrap_apimart_response(data)
-    candidates = data.get("candidates") or []
-    if candidates:
-        content = candidates[0].get("content") or {}
-        parts = content.get("parts") or []
-        return "\n".join(
-            str(part.get("text") or "")
-            for part in parts
-            if isinstance(part, dict) and part.get("text")
-        )
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(item.get("text") or item.get("content") or "")
-        return "\n".join(part for part in parts if part)
-    return str(content)
+    from llm_contracts import parse_response
+    return parse_response(data).text
+
 
 def chat_usage_from_response(data):
-    data = unwrap_apimart_response(data) if isinstance(data, dict) else {}
-    return data.get("usage") or data.get("usageMetadata")
+    from llm_contracts import safe_usage, checked_object
+    return safe_usage(checked_object(data))
+
 
 def gemini_part_from_openai_content(part):
     if not isinstance(part, dict):
@@ -4441,17 +4421,10 @@ def gemini_contents_from_openai_messages(messages):
     return body
 
 def chat_upstream_request(provider, chat_base, model, messages, *, stream=False):
-    """Build one request for the provider's already-selected chat protocol."""
-    if effective_protocol(provider, model) == "gemini":
-        root = gemini_api_root_url(chat_base)
-        model_name = urllib.parse.quote(gemini_model_name(model), safe="")
-        return f"{root}/v1beta/models/{model_name}:generateContent", gemini_contents_from_openai_messages(messages)
-    body = {"model": model, "messages": messages}
-    if stream:
-        body["stream"] = True
-    elif is_apimart_provider(provider):
-        body["stream"] = False
-    return f"{chat_base}/chat/completions", body
+    from llm_contracts import build_request
+    protocol = EXECUTION.get().provider['protocol'] if EXECUTION.get() else effective_protocol(provider, model)
+    return build_request(protocol, chat_base, model, messages, stream=stream)
+
 
 def request_url_for_log(url):
     """Keep only the route needed for diagnostics, never URL credentials/query tokens."""

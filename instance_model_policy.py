@@ -334,6 +334,10 @@ class GuardedClient:
             allowed = {origin(self.provider['base_url'])}
             if self.kie_upload_base_url:
                 allowed.add(origin(self.kie_upload_base_url))
+            if execution and execution.purpose=='llm' and execution.provider['protocol']=='runninghub':
+                from llm_contracts import approved_runninghub_text_target
+                if approved_runninghub_text_target(self.provider['base_url'],str(url)):
+                    allowed.add(endpoint)
             signed_target=False
             if execution and getattr(execution,'signed_asset',False):
                 parsed=urlsplit(str(url));query=parse_qs(parsed.query)

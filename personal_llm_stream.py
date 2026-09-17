@@ -67,11 +67,12 @@ async def stream_personal_chat(models,payload,request,user_id=''):
                     if chunk:text+=chunk;await emit({'type':'delta','delta':chunk})
             budget=for_execution('llm',limits['timeout_seconds'])
             with execution.activate():
-                content=[{'type':'text','text':payload.message}]+[{'type':'image_url','image_url':{'url':models.app.reference_to_data_url(r.model_dump())}} for r in payload.reference_images]
-                if payload.system_prompt:messages.insert(0,{'role':'system','content':payload.system_prompt})
-                messages.append({'role':'user','content':content})
-                url,body=models.app.chat_upstream_request(execution.provider,provider['base_url'],payload.model,messages,stream=True)
-                headers=models.app.api_headers(provider=execution.provider);client=execution.client();usage=None
+                from llm_contracts import compose_messages, build_request
+                messages=compose_messages(payload.system_prompt,messages,payload.message,
+                    [models.app.reference_to_data_url(r.model_dump()) for r in payload.reference_images])
+                url,body=build_request(execution.provider['protocol'],provider['base_url'],payload.model,messages,stream=True,
+                    max_output_tokens=getattr(payload,'max_output_tokens',None),temperature=getattr(payload,'temperature',None))
+                headers=({'x-goog-api-key':execution.key()} if execution.provider['protocol']=='gemini' else {'Authorization':'Bearer '+execution.key()}) | {'Content-Type':'application/json'};client=execution.client();usage=None
                 async with asyncio.timeout(budget.total):
                     if execution.provider['protocol']=='gemini':
                         response=await client.post(url,headers=headers,json=body);diagnostic.provider_status=response.status_code;response.raise_for_status()

@@ -33,3 +33,9 @@ JSON业务错误/空结果/错误结构分别拒绝，不再把200等同成功�
 真实ASGI断开：llm_active before=1 / after=0，未出现跨context退出错误。真实隔离Gateway→Instance→mock TCP：连续两次流断开后活动归零，两个未知记录仍在，后续两个并发文本请求正常；慢首响应、idle/total timeout和无终止EOF均验收。测试只将时间预算缩小（.25秒读空闲/.65秒总时长）以重现同一逻辑，不改业务执行结果、不增加测试HTTP接口。正式TEXT为连接10秒、首响应/读空闲300秒、总1800秒；Gateway总预算留清理余量，普通读取180秒、探测60秒，不无限等待。
 
 17项ASGI/JSON/错误/维护回归通过；TCP独立3项加入最终完整回归。历史owner缺陷仅保留before结果。本地owner进程/源码未修改。
+
+## 第三批 D03
+
+新增无身份副作用的 URL/messages/参数构造与响应解析；Instance 继续注入 owned Provider、私有凭证和 GuardedClient。bare base 补版本，已有版本不重复；模型精确透传，system/history/current 顺序固定，Gemini 视频不重复追加。公网参考图保留原字节策略，没有模仿 owner 的缩图转码。显式 token/temperature 保留。RunningHub 官方文本跨域只有已列官方来源和固定 HTTPS 文本目标，自定义中转保持原域。
+
+独立 golden 断言覆盖 URL、消息、MIME、图片顺序、参数和凭证目标；真实 Instance 严格 TCP mock 覆盖原 PNG、显式参数与自定义 modelscope Provider ID。46 项网络执行器回归通过；此前 27 项文本/取消/超时测试通过。未调用真实模型。

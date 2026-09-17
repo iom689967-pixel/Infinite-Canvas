@@ -144,30 +144,15 @@ class ControlledModels(NetworkTasks):
         selected_provider = execution.provider
         try:
             client = execution.client()
-            if payload.system_prompt:
-                messages.insert(0, {'role': 'system', 'content': payload.system_prompt})
-            content = [{'type': 'text', 'text': payload.message}]
-            for url in payload.images:
-                content.append({'type': 'image_url', 'image_url': {'url': self.app.reference_to_data_url({'url':url})}})
-            for url in payload.videos:
-                content.append({'type':'video_url','video_url':{'url':self.app.reference_to_data_url({'url':url})}})
-            messages.append({'role': 'user', 'content': content})
-            url, body = self.app.chat_upstream_request(selected_provider, provider['base_url'], payload.model, messages)
+            from llm_contracts import compose_messages, build_request
+            messages = compose_messages(payload.system_prompt, messages, payload.message,
+                [self.app.reference_to_data_url({'url':url}) for url in payload.images],
+                [self.app.reference_to_data_url({'url':url}) for url in payload.videos])
             tokens = getattr(payload,'max_output_tokens',None)
             if not provider.get('personal'):
                 tokens=min(tokens or limits['max_output_tokens'],limits['max_output_tokens'])
-            if tokens:
-                if selected_provider['protocol']=='gemini':body.setdefault('generationConfig',{})['maxOutputTokens']=tokens
-                else:body['max_tokens']=tokens
-            temperature=getattr(payload,'temperature',None)
-            if temperature is not None:
-                if selected_provider['protocol']=='gemini':body.setdefault('generationConfig',{})['temperature']=temperature
-                else:body['temperature']=temperature
-            if payload.videos and selected_provider['protocol']=='gemini':
-                for url in payload.videos:
-                    data=self.app.reference_to_data_url({'url':url})
-                    mime,encoded=data.split(';base64,',1)
-                    body['contents'][-1]['parts'].append({'inlineData':{'mimeType':mime.removeprefix('data:'),'data':encoded}})
+            url, body = build_request(selected_provider['protocol'], provider['base_url'], payload.model,
+                messages, max_output_tokens=tokens, temperature=getattr(payload,'temperature',None))
             credential = execution.key()
             client.used_credential = credential
             # httpx read timeouts alone reset for each chunk; also bound total waiting time.
