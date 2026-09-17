@@ -38,7 +38,7 @@ jobs:
         run: python scripts/install_rehearsal_caddy.py "$RUNNER_TEMP/mio-interruption-caddy"
 
       - name: Rehearse bounded interruption on unmodified f598 as real root
-        run: sudo "$(command -v python)" tests/rehearse_interruption_upgrade.py --caddy "$RUNNER_TEMP/mio-interruption-caddy" --evidence "$RUNNER_TEMP/mio-interruption-evidence.json"
+        run: sudo "$(command -v python)" -B tests/rehearse_interruption_upgrade.py --caddy "$RUNNER_TEMP/mio-interruption-caddy" --evidence "$RUNNER_TEMP/mio-interruption-evidence.json"
 
       - name: Preserve bounded interruption evidence
         if: always()
