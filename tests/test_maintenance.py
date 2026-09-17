@@ -325,9 +325,15 @@ class MaintenanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def app(*args):
             calls.append('network')
         wrapped = MaintenanceMiddleware(app, root=self.root)
-        (self.root/'state.json').unlink()
         async def noop(*args):
             pass
+        for value in ([],{'schema':1,'phase':'open','epoch':'invalid'}, {'schema':1,'phase':[],'epoch':1}):
+            (self.root/'state.json').write_text(json.dumps(value))
+            response=[]
+            async def record(message):response.append(message)
+            await wrapped({'type':'http','method':'POST','path':'/api/canvas-llm'},noop,record)
+            self.assertEqual(response[0]['status'],503)
+        (self.root/'state.json').unlink()
         await wrapped({'type': 'http', 'method': 'POST', 'path': '/api/canvas-llm'}, noop, noop)
         self.assertEqual(calls, [])
 
@@ -354,3 +360,28 @@ class MaintenanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.gate.status()['active'], 0)
         finally:
             finish.set(); CURRENT_ACTIVITY.reset(token)
+
+    async def test_canceled_thread_future_keeps_receipt_until_actual_thread_finishes(self):
+        parent=self.gate.admit('one','image');token=CURRENT_ACTIVITY.set(parent)
+        entered,finish=threading.Event(),threading.Event();internal=[]
+        original=asyncio.create_task
+        def capture(coro):
+            task=original(coro);internal.append(task);return task
+        def write():
+            entered.set();finish.wait(5)
+        try:
+            with patch('instance_maintenance.asyncio.create_task',side_effect=capture):
+                waiter=original(tracked_to_thread(write))
+                while not entered.is_set():await asyncio.sleep(.01)
+            internal[0].cancel()
+            with self.assertRaises(asyncio.CancelledError):await waiter
+            parent.finish();set_phase(self.gate,'draining')
+            self.assertEqual(self.gate.status()['by_phase'],{'result':1})
+            self.assertFalse(inspect(self.gate,[],seal=True)['restart_safe'])
+            finish.set()
+            for _ in range(100):
+                if self.gate.status()['active']==0:break
+                await asyncio.sleep(.01)
+            self.assertTrue(inspect(self.gate,[],seal=True)['restart_safe'])
+        finally:
+            finish.set();CURRENT_ACTIVITY.reset(token)

@@ -93,7 +93,10 @@ class Maintenance:
     def state(self):
         self.validate()
         value = json.loads((self.root/'state.json').read_text())
-        if set(value) != {'schema', 'phase', 'epoch'} or value['schema'] != 1 or value['phase'] not in {'open', 'draining', 'sealed'}:
+        if (not isinstance(value,dict) or set(value) != {'schema', 'phase', 'epoch'}
+            or type(value['schema']) is not int or value['schema'] != 1
+            or not isinstance(value['phase'],str) or value['phase'] not in {'open', 'draining', 'sealed'}
+            or type(value['epoch']) is not int or value['epoch'] < 1):
             raise MaintenanceUnavailable()
         return value
 
@@ -185,12 +188,19 @@ async def tracked_to_thread(function, *args, **kwargs):
     if not parent:
         return await asyncio.to_thread(function, *args, **kwargs)
     lease = parent.gate.child(parent.instance, 'result')
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    def finished(result):
+    def actual_work():
         try:
-            result.exception()  # Consume errors when the HTTP waiter disconnected.
+            return function(*args, **kwargs)
         finally:
+            # A canceled asyncio Future cannot stop its already running thread.
+            # Only the real thread can release its write/DNS/login activity.
             lease.finish()
+    task = asyncio.create_task(asyncio.to_thread(actual_work))
+    def finished(result):
+        if not result.cancelled():
+            result.exception()  # Consume errors when the HTTP waiter disconnected.
+        # Cancellation before execution retains the receipt conservatively; a
+        # lost loop must not certify that an unobserved thread never ran.
     task.add_done_callback(finished)
     return await asyncio.shield(task)
 
