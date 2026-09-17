@@ -1,0 +1,382 @@
+[
+  {
+    "case": "image_generate",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/generations",
+        "body": {
+          "model": "gpt-image-2",
+          "prompt": "OFFLINE exact prompt",
+          "size": "1536x1024"
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result_keys": [
+        "image_items",
+        "images",
+        "model",
+        "params",
+        "prompt",
+        "provider_id",
+        "provider_name",
+        "raw_usage",
+        "request_id",
+        "task_id",
+        "timestamp",
+        "type"
+      ],
+      "model": "gpt-image-2",
+      "media": [
+        {
+          "bytes": 226,
+          "sha256": "6eacf5f4da3586879228e69e34325dcf95b11fbbe0a644dba54a13954ead5472"
+        }
+      ],
+      "has_task_id": false,
+      "history_delta": 1
+    }
+  },
+  {
+    "case": "image_edit",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/edits",
+        "body": [
+          {
+            "name": "model",
+            "value": "gpt-image-2"
+          },
+          {
+            "name": "prompt",
+            "value": "OFFLINE exact prompt"
+          },
+          {
+            "name": "size",
+            "value": "1536x1024"
+          },
+          {
+            "name": "image",
+            "value": {
+              "bytes": 8535,
+              "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+              "mime": "image/png"
+            }
+          }
+        ],
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result_keys": [
+        "image_items",
+        "images",
+        "model",
+        "params",
+        "prompt",
+        "provider_id",
+        "provider_name",
+        "raw_usage",
+        "request_id",
+        "task_id",
+        "timestamp",
+        "type"
+      ],
+      "model": "gpt-image-2",
+      "media": [
+        {
+          "bytes": 226,
+          "sha256": "6eacf5f4da3586879228e69e34325dcf95b11fbbe0a644dba54a13954ead5472"
+        }
+      ],
+      "has_task_id": false,
+      "history_delta": 1
+    }
+  },
+  {
+    "case": "image_n2",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/generations",
+        "body": {
+          "model": "gpt-image-2",
+          "prompt": "OFFLINE exact prompt",
+          "size": "1536x1024"
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/generations",
+        "body": {
+          "model": "gpt-image-2",
+          "prompt": "OFFLINE exact prompt",
+          "size": "1536x1024"
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result_keys": [
+        "image_items",
+        "images",
+        "model",
+        "params",
+        "prompt",
+        "provider_id",
+        "provider_name",
+        "raw_usage",
+        "request_id",
+        "task_id",
+        "timestamp",
+        "type"
+      ],
+      "model": "gpt-image-2",
+      "media": [
+        {
+          "bytes": 226,
+          "sha256": "6eacf5f4da3586879228e69e34325dcf95b11fbbe0a644dba54a13954ead5472"
+        },
+        {
+          "bytes": 226,
+          "sha256": "6eacf5f4da3586879228e69e34325dcf95b11fbbe0a644dba54a13954ead5472"
+        }
+      ],
+      "has_task_id": false,
+      "history_delta": 1
+    }
+  },
+  {
+    "case": "image_401",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/generations",
+        "body": {
+          "model": "gpt-image-2",
+          "prompt": "OFFLINE exact prompt",
+          "size": "1536x1024"
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "outcome": {
+      "status": 401,
+      "exception": "HTTPException",
+      "detail": "上游生图接口错误：{\"error\":{\"message\":\"offline rejected\"}}",
+      "history_delta": 0
+    }
+  },
+  {
+    "case": "download_failure",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/images/generations",
+        "body": {
+          "model": "gpt-image-2",
+          "prompt": "OFFLINE exact prompt",
+          "size": "1536x1024"
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result_keys": [
+        "image_items",
+        "images",
+        "model",
+        "params",
+        "prompt",
+        "provider_id",
+        "provider_name",
+        "raw_usage",
+        "request_id",
+        "task_id",
+        "timestamp",
+        "type"
+      ],
+      "model": "gpt-image-2",
+      "media": [],
+      "has_task_id": false,
+      "history_delta": 1
+    }
+  },
+  {
+    "case": "video_async",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/videos/generations",
+        "body": {
+          "prompt": "OFFLINE exact prompt",
+          "model": "audit-video",
+          "duration": 7,
+          "watermark": false,
+          "aspect_ratio": "16:9",
+          "ratio": "16:9",
+          "resolution": "1080p"
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/v1/videos/generations/offline-video",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:54321/media/result.mp4",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=1800.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result_keys": [
+        "raw",
+        "task_id",
+        "videos"
+      ],
+      "model": null,
+      "media": [
+        {
+          "bytes": 140,
+          "sha256": "d24a671e9558a683d2669af30d683be72cdb905b0dee2bf6150b0ba75a50d5f5"
+        }
+      ],
+      "has_task_id": true,
+      "history_delta": 0
+    }
+  }
+]

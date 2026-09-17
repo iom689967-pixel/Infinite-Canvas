@@ -1,0 +1,494 @@
+[
+  {
+    "case": "sse_done",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed text content"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "OFFLINE streamed text content"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "sse_no_done",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed text content"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "OFFLINE streamed text content"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "sse_business_error",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "接口返回了空回复。"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "sse_cut",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed text content"
+      },
+      {
+        "type": "error",
+        "detail": "请求上游接口失败：offline stream cut"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user"
+    ],
+    "saved_texts": [
+      "反推提示词"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "sse_cancel",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed text content"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user"
+    ],
+    "saved_texts": [
+      "反推提示词"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "接口返回了空回复。"
+    ],
+    "llm_active": null
+  },
+  {
+    "case": "http503",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800.0",
+        "trust_env": "default",
+        "follow_redirects": "default"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "error",
+        "detail": "上游接口错误：{\"error\":{\"message\":\"offline unavailable\"}}"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user"
+    ],
+    "saved_texts": [
+      "反推提示词"
+    ],
+    "llm_active": null
+  }
+]

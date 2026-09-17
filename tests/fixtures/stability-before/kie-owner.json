@@ -1,0 +1,392 @@
+[
+  {
+    "case": "first",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+        "body": [
+          {
+            "name": "uploadPath",
+            "value": "images/infinite-canvas"
+          },
+          {
+            "name": "fileName",
+            "value": "wide-e37858735f84.png"
+          },
+          {
+            "name": "file",
+            "value": {
+              "bytes": 7972,
+              "sha256": "e37858735f8405922104ddef7cdb3ee4e3b1c5f9bbbbc71f1120a25c45e9aec9",
+              "mime": "image/png"
+            }
+          }
+        ],
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/ref.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "https://api.kie.ai/api/v1/jobs/createTask",
+        "body": {
+          "model": "gpt-image-2-image-to-image",
+          "input": {
+            "prompt": "OFFLINE Kie prompt",
+            "aspect_ratio": "3:2",
+            "resolution": "2K",
+            "input_urls": [
+              "https://cdn.mock.example/ref.png"
+            ]
+          }
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=offline-1",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "images": 1
+    }
+  },
+  {
+    "case": "cache_second",
+    "requests": [
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/ref.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "https://api.kie.ai/api/v1/jobs/createTask",
+        "body": {
+          "model": "gpt-image-2-image-to-image",
+          "input": {
+            "prompt": "OFFLINE Kie prompt",
+            "aspect_ratio": "3:2",
+            "resolution": "2K",
+            "input_urls": [
+              "https://cdn.mock.example/ref.png"
+            ]
+          }
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=offline-2",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "images": 1
+    }
+  },
+  {
+    "case": "duplicate",
+    "requests": [
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/ref.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "https://api.kie.ai/api/v1/jobs/createTask",
+        "body": {
+          "model": "gpt-image-2-image-to-image",
+          "input": {
+            "prompt": "OFFLINE Kie prompt",
+            "aspect_ratio": "3:2",
+            "resolution": "2K",
+            "input_urls": [
+              "https://cdn.mock.example/ref.png"
+            ]
+          }
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=offline-3",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "images": 1
+    }
+  },
+  {
+    "case": "model25",
+    "requests": [
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/ref.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "https://api.kie.ai/api/v1/jobs/createTask",
+        "body": {
+          "model": "gpt-image-2-5-flare-image-to-image",
+          "input": {
+            "prompt": "OFFLINE Kie prompt",
+            "aspect_ratio": "3:2",
+            "resolution": "2K",
+            "input_urls": [
+              "https://cdn.mock.example/ref.png"
+            ],
+            "background": "auto"
+          }
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=offline-4",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "images": 1
+    }
+  },
+  {
+    "case": "prompt_over20k",
+    "requests": [],
+    "clients": [],
+    "outcome": {
+      "status": 400,
+      "exception": "ModelPromptLimitError",
+      "detail": "{\"detail\":\"当前模型 Kie GPT Image 2 最多支持 20,000 字符。当前 Prompt 为 20,001 字符，超出 1 字符，请缩短后重试。\",\"validation\":{\"code\":\"model_prompt_too_long\",\"message\":\"当前模型 Kie GPT Image 2 最多支持 20,000 字符。当前 Prompt 为 20,001 字符，超出 1 字符，请缩短后重试。\",\"provider\":\"kie\",\"model\":\"gpt-image-2-image-to-image\",\"current_length\":20001,\"limit\":20000,\"exceeded\":1}}"
+    }
+  },
+  {
+    "case": "download_failure",
+    "requests": [
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/ref.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      },
+      {
+        "method": "POST",
+        "url": "https://api.kie.ai/api/v1/jobs/createTask",
+        "body": {
+          "model": "gpt-image-2-image-to-image",
+          "input": {
+            "prompt": "OFFLINE Kie prompt",
+            "aspect_ratio": "3:2",
+            "resolution": "2K",
+            "input_urls": [
+              "https://cdn.mock.example/ref.png"
+            ]
+          }
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=offline-5",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": true
+      },
+      {
+        "method": "GET",
+        "url": "https://cdn.mock.example/result.png",
+        "body": {
+          "bytes": 0
+        },
+        "auth_present": false
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=90.0, write=120.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      },
+      {
+        "timeout": "Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)",
+        "trust_env": "default",
+        "follow_redirects": "True"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "图片已在上游生成，结果下载失败，请查询原任务恢复结果"
+    }
+  }
+]

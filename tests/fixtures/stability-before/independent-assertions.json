@@ -1,0 +1,194 @@
+[
+  {
+    "side": "owner",
+    "case": "text/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "single/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "single/gzip_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "business_error_200",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "empty_text",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "json_list",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "multiple/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "parameters/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "long_prompt/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "sse_no_done",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "sse_business_error",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "image_generate",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "image_edit",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "image_n2",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "owner",
+    "case": "download_failure",
+    "criterion": "cannot report saved success after download failure",
+    "pass": false
+  },
+  {
+    "side": "owner",
+    "case": "video_async",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "text/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "single/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "single/gzip_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "business_error_200",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false
+  },
+  {
+    "side": "public",
+    "case": "empty_text",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false
+  },
+  {
+    "side": "public",
+    "case": "json_list",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "multiple/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "parameters/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "long_prompt/json_success",
+    "criterion": "successful JSON gives fixture text",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "sse_no_done",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false
+  },
+  {
+    "side": "public",
+    "case": "sse_business_error",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "image_generate",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "image_edit",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "image_n2",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "download_failure",
+    "criterion": "cannot report saved success after download failure",
+    "pass": true
+  },
+  {
+    "side": "public",
+    "case": "video_async",
+    "criterion": "no auth forwarded on CDN GET",
+    "pass": true
+  }
+]

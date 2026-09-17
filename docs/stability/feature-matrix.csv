@@ -1,0 +1,27 @@
+﻿模块,范围,本地,公网,代码,已验证,未覆盖
+账号与身份,注册、邮箱验证、登录、退出、Session,owner 无公网注册；本机身份,Gateway 邮箱验证码、私有 Session/CSRF、Instance handoff；重启使 Instance Session 失效,public_beta*.py；instance_auth.py:69；instance_http.py:57,157 项回归含认证、邮件 mock；线上 mio 会话只读可用,真实注册/发信/退出未操作；其他真实账号未登录
+隔离,用户、Provider、Key、任务、媒体,owner 本机共享配置/资源,实例目录与 subject 归属；shared/personal 分开；CDN 不带 Key,instance_paths.py；instance_model_policy.py；instance_model_tasks.py:83,A/B 原有回归；差分 CDN auth=false；线上两用户独立 Provider,未进行攻击性公网渗透；同 OS 用户可读所有实例不是 OS 沙箱
+首页,栏目、iframe、预热、缓存、刷新,已有统一工作台；静态资源按本地版本加载,冷启动壳、预热、内容 bundle、会话注入；存在公开程序资源与私有 API 区别,"workspace_assets.py；static/js/workspace-{startup,loading,socket}.js",源码与资产 hash；线上 Smart bundle 匹配 release；工作台回归,新冷实例性能、跨标签完整 UI 本轮未实操
+项目,项目/画布列表、创建、移动、回收站,共享项目/Canvas 文件实现,复用相同业务实现，换实例根和身份；新用户库为空,main.py:17298 起；public_beta_worker.py:7,源码 AST；157 项含工作台/保存隔离,生产增删改禁用；离线拖放项目未逐项 UI 验收
+普通 Canvas,节点创建、选择、拖拽、连线、多选、分组,成熟共享画布交互,主体共享，个人模型 selector/任务恢复不同,static/js/canvas.js；evidence/canvas.diff,完整文件差异审阅；真实 selector 差分,所有鼠标手势未逐一浏览器自动化
+Smart Canvas,节点/分组、拖拽、连线、撤销重做,成熟共享交互,主体共享；生成与 LLM 身份仍有不一致，见 D04,static/js/smart-canvas.js；evidence/smart-canvas.diff,真实 selector 差分；线上现有 smart-prompt 与错误可见,撤销重做、分组极端状态未逐项动态覆盖
+Prompt,母版、拼接、@引用、参考选择器,100k 通用；模型级 Kie 前置校验；共享引用器,通用画布100k，但模型级 Kie 校验缺失；Focus 编辑仍4000,providers/prompt_limits.py（仅 owner）；smart-canvas.js:9762,Kie 20001 字差分；提交前网络次数断言；源码,真实复杂母版/多级引用最终文本严格成功样本缺失
+LLM,纯文本、单图、多图、反推提示词,_canvas_llm_impl；URL 规范化；图片缩放转码,ControlledModels.llm 重写业务；部分 URL/媒体/usage/参数语义不同,owner main.py:17114 附近；public main.py:17087；instance_model_tasks.py:127,同输入、同响应16用例/端；6种端点配置/端,真实图片相同内容的本地成功对照不存在
+LLM 流式,GPT 对话 SSE、取消、断流,本地 stream 路径,NetworkTasks.stream_chat；凭证跨 chunk 脱敏，但结束/关闭问题,main.py:18890；instance_network_tasks.py:15；instance_model_policy.py:446,7流式用例/端 + ASGI disconnect/端,公网原始浏览器断流未触发；详见 D05 的证据边界
+图片,纯生图、图生图、编辑、批量,generate_ai_image → 保存；部分失败退回远端 URL,相同适配器 + Execution + durable ledger；不许失败自动补交,main.py:12162/14756；instance_network_tasks.py:283/330,OpenAI生成、编辑、2张、3:2/2K、下载失败差分,mask复杂编辑、所有响应模式的两端严格配对未做
+图片继续工作,重新生成、继续编辑、原节点回填,节点历史/取消 token；任务多为内存态,同 nonce 幂等，Provider revision/原节点绑定、History 去重,instance_model_tasks.py:215/240/312；canvas/smart JS,Kie duplicate 0 次新调用；原结果恢复 GET-only；既有回归,真实旧节点多代 generationHistory UI 未改动验收
+Kie,上传缓存、模板、异步任务、恢复,2.5新模板；引用标准化；硬编码 Kie API 根,仅旧2模板；保留原图；缓存按 Provider/凭证隔离；原任务恢复,providers/kie/*；instance_model_tasks.py:351,6用例/端；真实 HTTP reader 回归；D07/D08,其他Kie模型真实能力、费用、素材TTL不在本轮验证
+视频,提交、异步轮询、下载保存、时间线,多平台构造；本地视频返回，不由该路由写 History,受控 executor/ledger 保存视频并写 History；本地时间线导出禁用,main.py:16545；instance_network_tasks.py:330；instance_access.py:25,通用视频同请求3阶段差分；公共原有原生适配器mock,MP4差分使用签名fixture，仅验存储；播放/时间线未验证
+专属平台,RunningHub app/workflow、火山 Asset、APIMart Avatar/MJ,平台函数及本地辅助能力,复用 HTTP 构造，注入多种私有凭证/签名目标；专属校验,instance_network_operations.py；provider_capabilities.py,41 项网络适配回归含专属路由与隔离,未做所有专属平台两端相同输入配对；无真实上游调用
+在线生图,在线页,旧 build_online_image_result,wait_local → create/runner → owned result；返回字段有所不同,main.py:14843；instance_network_tasks.py:283,6工作流差分含History/保存结果,在线页所有按钮布局未逐一 UI 验收
+聊天,GPT聊天、图片对话、会话保存,本地默认SYSTEM_PROMPT、历史裁剪/附件规则,个人独立chat实现；成功后落会话，失败保留策略不同,main.py:18654；instance_network_tasks.py:124,流式保存差分；原有网络回归,非流式历史附件完整双端回放未覆盖
+Agent,意图、聊天、生图、编辑,本地复杂规划/决策与默认Provider,个人路径固定JSON action意图，再调用chat/image；非所有Agent策略相同,main.py:18793；instance_network_tasks.py:110,源码与公共 Agent mock,复杂多步Agent/工具回调配对未做，不能报等价
+独立工具,Z-image、角度、增强、Klein,本地Comfy/云端不同入口,Z-image/角度个人ModelScope异步；enhance/klein明确禁用,instance-ui.js:44；main.py:19222/19317/19407,源码路由+41公共适配器回归,这些独立页面的完整浏览器操作未逐个验收
+素材,素材库、上传、导入URL、移动、描述/分类,本地路径/网络访问能力较宽,实例所有权、配额、受控下载；caption/classify进入个人LLM,instance_access.py:31；main.py:13265/18185；instance_network_operations.py,工作台、隔离、网络专项回归,生产上传/自动描述未执行；慢上传全链双端对照缺失
+库与Workflow,Prompt库、Workflow、导入导出,带内置库，允许本机路径,新账号库为空；个人文件导入导出；机器路径、任意本地执行禁止,main.py:17538/17624；instance_paths.py；public_beta_worker.py,源码、工作台/认证回归,每种ZIP/XLSX格式双端回放未做
+Provider,配置、目录拉取、手填、逐模型用途/协议,API/.env + data/api_providers.json；部分特殊ID行为,FullProviderSettings → compile_personal → capabilities → catalog；配置≠调用验证,provider_schema.py；instance_provider_settings.py；instance_providers.py,线上mio3/3/3；既有全配置/A-B回归；D03/D04,真实保存广播本轮未触发；不改真实Provider
+参数,默认项、尺寸、比例、张数、质量,多处按模型名/平台转换、夹值或默认,个人通用模型不按推荐名单限制；保留明确适配契约与资源边界,instance_executor.py:82；provider_capabilities.py；instance_network_tasks.py:147,3:2/2K、2张差分；41回归参数案例,不能推断所有上游支持任意参数；D03/D07
+结果,History、Preview、下载、恢复,本地History/媒体；有远端URL回退,durable结果、原节点绑定、按task去重；Range/归属读取,instance_model_tasks.py；main.py:3780/3905/12698,同响应保存hash一致；Kie恢复；157回归,生产History写入/新结果Preview未执行
+个人体验,主题、语言、UI设置、存储,共享UI/localStorage,注入实例/账号命名空间；机器存储设置隐藏,instance-storage.js；instance-session.js；instance-ui.js,源码/现有JS测试映射,主题/语言逐项切换未操作
+运行维护,容量、并发、维护、启动、备份、版本加载,launchd、owner venv，无公测Gate,Gateway/Supervisor/独立Instance、维护journal、资源保护、online backup,public_beta*.py；instance_maintenance.py,现场进程/路径/门禁/容量读取；D05/D06,不重启、不排空、不重演生产备份恢复
+本地专属,ComfyUI、CLI、Shell、源码更新、服务器文件,本地可用范围取决于本机安装/登录,明确disabled/admin，不能为功能一致向公网开放,instance_access.py；instance_paths.py,路由权限完整清单173条；认证回归,本轮未调用任何本地CLI模型、Shell业务或更新入口

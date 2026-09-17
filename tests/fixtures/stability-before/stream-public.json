@@ -1,0 +1,498 @@
+[
+  {
+    "case": "sse_done",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed"
+      },
+      {
+        "type": "delta",
+        "delta": " text content"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "OFFLINE streamed text content"
+    ],
+    "llm_active": 0
+  },
+  {
+    "case": "sse_no_done",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed"
+      },
+      {
+        "type": "delta",
+        "delta": " text content"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "OFFLINE streamed text content"
+    ],
+    "llm_active": 0
+  },
+  {
+    "case": "sse_business_error",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "error",
+        "detail": {
+          "code": "upstream",
+          "message": "上游请求失败，内部响应已隐藏"
+        }
+      }
+    ],
+    "error": null,
+    "saved_roles": [],
+    "saved_texts": [],
+    "llm_active": 0
+  },
+  {
+    "case": "sse_cut",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed"
+      },
+      {
+        "type": "error",
+        "detail": {
+          "code": "upstream",
+          "message": "上游请求失败，内部响应已隐藏"
+        }
+      }
+    ],
+    "error": null,
+    "saved_roles": [],
+    "saved_texts": [],
+    "llm_active": 0
+  },
+  {
+    "case": "sse_cancel",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE streamed"
+      }
+    ],
+    "error": null,
+    "saved_roles": [],
+    "saved_texts": [],
+    "llm_active": 1
+  },
+  {
+    "case": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "delta",
+        "delta": "OFFLINE JSON text"
+      },
+      {
+        "type": "done"
+      }
+    ],
+    "error": null,
+    "saved_roles": [
+      "user",
+      "assistant"
+    ],
+    "saved_texts": [
+      "反推提示词",
+      "OFFLINE JSON text"
+    ],
+    "llm_active": 1
+  },
+  {
+    "case": "http503",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "exact system"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "events": [
+      {
+        "type": "meta"
+      },
+      {
+        "type": "error",
+        "detail": {
+          "code": "upstream",
+          "message": "上游请求失败，内部响应已隐藏"
+        }
+      }
+    ],
+    "error": null,
+    "saved_roles": [],
+    "saved_texts": [],
+    "llm_active": 1
+  }
+]

@@ -1,0 +1,998 @@
+[
+  {
+    "case": "text",
+    "fixture": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "gzip_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "http401",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'upstream', 'message': '上游请求失败，内部响应已隐藏'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "http503",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'upstream', 'message': '上游请求失败，内部响应已隐藏'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "business_error_200",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "empty_text",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "non_json",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'upstream', 'message': '上游请求失败，内部响应已隐藏'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "empty_body",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'upstream', 'message': '上游请求失败，内部响应已隐藏'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "sse_instead_json",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'upstream', 'message': '上游请求失败，内部响应已隐藏'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "timeout",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 504,
+      "exception": "HTTPException",
+      "detail": "{'code': 'timeout', 'message': '上游等待超时；未自动重复提交'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "disconnect",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 502,
+      "exception": "HTTPException",
+      "detail": "{'code': 'network', 'message': '上游网络异常；未自动重复提交'}"
+    }
+  },
+  {
+    "case": "single",
+    "fixture": "json_list",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 500,
+      "exception": "AttributeError",
+      "detail": ""
+    }
+  },
+  {
+    "case": "multiple",
+    "fixture": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "system",
+              "content": "  系统原文  "
+            },
+            {
+              "role": "user",
+              "content": "历史问题"
+            },
+            {
+              "role": "assistant",
+              "content": "历史回复"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 8535,
+                      "sha256": "3193deb51a570f8131f9e6888ecf43d0179cb9221d22a58d1cd32c63c052147d",
+                      "size": [
+                        2048,
+                        1024
+                      ],
+                      "mode": "RGB"
+                    }
+                  }
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": {
+                      "data_mime": "image/png",
+                      "bytes": 7740,
+                      "sha256": "6b72c54e75bf7ae6922734b70cc1032c775167addfe633bb6f9c9559ceb65113",
+                      "size": [
+                        1600,
+                        900
+                      ],
+                      "mode": "RGBA"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "parameters",
+    "fixture": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "反推提示词"
+                }
+              ]
+            }
+          ],
+          "max_tokens": 777,
+          "temperature": 0.2
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  },
+  {
+    "case": "long_prompt",
+    "fixture": "json_success",
+    "requests": [
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:54321/v1/chat/completions",
+        "body": {
+          "model": "gpt-6",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                }
+              ]
+            }
+          ]
+        },
+        "auth_present": true
+      }
+    ],
+    "clients": [
+      {
+        "timeout": "1800",
+        "trust_env": "False",
+        "follow_redirects": "False"
+      }
+    ],
+    "outcome": {
+      "status": 200,
+      "result": {
+        "text": "  OFFLINE RESULT  ",
+        "model": "gpt-6",
+        "raw_usage": null
+      }
+    }
+  }
+]

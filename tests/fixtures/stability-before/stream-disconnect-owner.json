@@ -1,0 +1,8 @@
+{
+  "version": "owner",
+  "transport_calls": 1,
+  "disconnect_delivered": true,
+  "error": null,
+  "llm_active_after": null,
+  "has_done": false
+}

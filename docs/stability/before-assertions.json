@@ -1,0 +1,74 @@
+[
+  {
+    "side": "owner",
+    "case": "business_error_200",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D05"
+  },
+  {
+    "side": "owner",
+    "case": "empty_text",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D05"
+  },
+  {
+    "side": "owner",
+    "case": "json_list",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D05"
+  },
+  {
+    "side": "owner",
+    "case": "sse_no_done",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D05"
+  },
+  {
+    "side": "owner",
+    "case": "sse_business_error",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D05"
+  },
+  {
+    "side": "owner",
+    "case": "download_failure",
+    "criterion": "cannot report saved success after download failure",
+    "pass": false,
+    "disposition": "owner_only_record_no_change",
+    "root_cause": "D08"
+  },
+  {
+    "side": "public",
+    "case": "business_error_200",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false,
+    "disposition": "fix_public",
+    "root_cause": "D05"
+  },
+  {
+    "side": "public",
+    "case": "empty_text",
+    "criterion": "invalid/empty protocol result must not report success",
+    "pass": false,
+    "disposition": "fix_public",
+    "root_cause": "D05"
+  },
+  {
+    "side": "public",
+    "case": "sse_no_done",
+    "criterion": "without terminal success or with business error must not emit done",
+    "pass": false,
+    "disposition": "fix_public",
+    "root_cause": "D05"
+  }
+]
