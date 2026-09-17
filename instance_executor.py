@@ -145,7 +145,10 @@ class Execution:
                 self.maintenance_submission = (activity.gate, activity.gate.uncertain_llm(activity.instance))
 
     async def after(self, method, url, kwargs, response):
-        if self.purpose == 'llm' and self.classify(method, url) == 'submit':
+        # An upstream proxy 5xx/408 is not evidence the original remote LLM
+        # stopped; retain its receipt for administrator reconciliation.
+        if (self.purpose == 'llm' and self.classify(method, url) == 'submit'
+            and response.status_code < 500 and response.status_code != 408):
             self.finish_maintenance_submission()
         if self.observer:
             await self.observer('after', self.classify(method, url), method, str(url), kwargs, response)

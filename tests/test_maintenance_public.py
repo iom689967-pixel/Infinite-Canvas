@@ -15,6 +15,9 @@ from test_personal_network_adapters import NetworkMock
 
 class DropTextMock(NetworkMock):
     def do_POST(self):
+        if self.path.endswith('/chat/completions') and getattr(self.server,'error_text',0):
+            self.rfile.read(int(self.headers.get('Content-Length','0')))
+            return self.reply({'error':'mock-only ambiguous upstream failure'},self.server.error_text)
         if self.path.endswith('/chat/completions') and getattr(self.server,'drop_text',False):
             self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
         return super().do_POST()
@@ -98,9 +101,13 @@ class PublicMaintenanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code,200,response.text)
             self.assertIn('MOCK',response.text)
             self.assertEqual(inspect(self.gate,[])['unknown_llm_responses'],0)
-        mock.drop_text=True
+        for status in (500,408):
+            mock.error_text=status
+            response=await self.client.post('/api/canvas-llm',json=dict(provider='text',model='exact-future-id',message='mock'))
+            self.assertGreaterEqual(response.status_code,400,response.text)
+        mock.error_text=0;mock.drop_text=True
         response=await self.client.post('/api/canvas-llm',json=dict(provider='text',model='exact-future-id',message='mock'))
         self.assertEqual(response.status_code,502,response.text)
         set_phase(self.gate,'draining');result=inspect(self.gate,[],seal=True)
-        self.assertEqual(result['active'],0);self.assertEqual(result['unknown_llm_responses'],1)
+        self.assertEqual(result['active'],0);self.assertEqual(result['unknown_llm_responses'],3)
         self.assertFalse(result['restart_safe'])
