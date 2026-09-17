@@ -238,6 +238,8 @@ class InstanceAuthMiddleware:
         query.append(("client_id", principal["subject"]))
         scope["query_string"] = urllib.parse.urlencode(query).encode()
         context = PRINCIPAL.set(principal)
+        from model_diagnostics import ISSUED_EVENTS, issued_detail
+        diagnostics_context = ISSUED_EVENTS.set({})
         started, stopped, failed, redact_error = False, False, False, False
 
         async def private_send(message):
@@ -276,13 +278,10 @@ class InstanceAuthMiddleware:
                 try:
                     payload = json.loads(message.get('body', b''))
                     detail = payload['detail']
-                    if self.own_providers and detail.get('code')=='task_incomplete':
-                        task_id=detail.get('task_id')
-                        self.own_providers.models.owned(task_id)
-                        if payload=={'detail':dict(model_access_failure('task_incomplete').detail,task_id=task_id)}:
-                            failed=False
-                            return await send(message)
-                    if payload == {'detail':model_access_failure(detail['code']).detail}:
+                    if issued_detail(detail):
+                        if 'task_id' in detail:
+                            if not self.own_providers:raise ValueError()
+                            self.own_providers.models.owned(detail['task_id'])
                         failed = False
                         return await send(message)
                 except (ValueError, KeyError, TypeError, HTTPException):
@@ -308,6 +307,7 @@ class InstanceAuthMiddleware:
                 await self.reply(scope, receive, send, JSONResponse({'detail':exc.detail}, exc.status_code))
         finally:
             if quota: quota.sync()
+            ISSUED_EVENTS.reset(diagnostics_context)
             PRINCIPAL.reset(context)
 
     async def websocket(self, scope, receive, send, token, principal):

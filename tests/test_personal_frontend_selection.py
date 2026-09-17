@@ -29,14 +29,14 @@ const image={type:'generator',apiProvider:'own',model:'missing-exact-id'};
 const video={type:'video',apiProvider:'deleted-provider',model:'missing-video-id'};
 sanitizeImageNodeProviderModel(image);sanitizeVideoNodeProviderModel(video);
 const missing=capabilityModelOption('missing-exact-id','missing-exact-id','own','image');
-process.stdout.write(JSON.stringify({image,video,chatProvider:resolveChatProviderId('deleted-provider'),emptyChat:resolveChatModel('','deleted-provider'),defaultProvider:resolveImageProviderId('comfly'),missing,sharedOption:capabilityModelOption('approved-text','approved-text','shared','llm')}));
+process.stdout.write(JSON.stringify({image,video,chatProvider:resolveChatProviderId('deleted-provider'),emptyChat:resolveChatModel('','deleted-provider'),defaultProvider:resolveImageProviderId(''),legacyNamedProvider:resolveImageProviderId('comfly'),missing,sharedOption:capabilityModelOption('approved-text','approved-text','shared','llm')}));
 """)
         self.assertEqual(value['image']['model'],'missing-exact-id')
         self.assertEqual(value['video']['apiProvider'],'deleted-provider')
         self.assertEqual(value['video']['model'],'missing-video-id')
         self.assertEqual(value['chatProvider'],'deleted-provider')
         self.assertEqual(value['emptyChat'],'')
-        self.assertEqual(value['defaultProvider'],'own')
+        self.assertEqual(value['defaultProvider'],'own');self.assertEqual(value['legacyNamedProvider'],'comfly')
         self.assertIn('disabled',value['missing']);self.assertIn('尚未配置',value['missing'])
         self.assertNotIn('disabled',value['sharedOption'])
 

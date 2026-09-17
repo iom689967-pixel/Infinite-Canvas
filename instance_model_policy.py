@@ -46,7 +46,12 @@ def failure(code, status=403):
         'storage_full': '当前工作区存储空间已满。',
         'server_storage_full': '服务器存储资源不足，暂时停止新的内容写入。',
     }
-    return HTTPException(status_code=status, detail={'code': code, 'message': messages[code]})
+    from model_diagnostics import safe_failure
+    error = safe_failure(code, status)
+    error.detail['message'] = messages[code]
+    from model_diagnostics import ISSUED_EVENTS
+    if ISSUED_EVENTS.get() is not None:ISSUED_EVENTS.get()[error.detail['event_id']]=dict(error.detail)
+    return error
 
 
 def origin(value):

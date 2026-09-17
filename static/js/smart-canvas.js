@@ -871,6 +871,9 @@ function canvasForStorage(){
 }
 function apiErrorMessage(data, fallback='请求失败'){
     if(!data) return fallback;
+    if(personalApiInstance && data?.detail?.event_id){
+        return `${data.detail.message || fallback}（事件 ${data.detail.event_id}）`;
+    }
     if(typeof data === 'string') return data || fallback;
     const detail = data.detail ?? data.error ?? data.message;
     if(typeof detail === 'string') return detail || fallback;
@@ -897,7 +900,7 @@ async function responseErrorMessage(response, fallback='请求失败'){
     } catch(e) {
         try {
             const text = await response.text();
-            return text || fallback;
+            return personalApiInstance ? fallback : (text || fallback);
         } catch(_) {
             return fallback;
         }
@@ -2809,10 +2812,12 @@ function sortRunningHubFields(fields){
         return String(a.nodeId || '').localeCompare(String(b.nodeId || ''), undefined, {numeric:true}) || String(a.fieldName || '').localeCompare(String(b.fieldName || ''));
     });
 }
+let providerConfigError = '';
 function chatApiProviders(){
     return (apiProviders || []).filter(p => (document.getElementById('instance-context') || p.enabled !== false) && (p.chat_models || []).length);
 }
 function resolveChatProviderId(providerId=''){
+    if(personalApiInstance && providerId) return providerId;
     const providers = chatApiProviders();
     if(providers.some(p => p.id === providerId)) return providerId;
     return providers[0]?.id || (document.getElementById('instance-context') ? '' : 'comfly');
@@ -2822,15 +2827,17 @@ function providerChatModels(providerId){
     return [...new Set(provider?.chat_models || [])];
 }
 function resolveChatModel(model='', providerId=''){
+    if(personalApiInstance && model) return model;
     const models = providerChatModels(resolveChatProviderId(providerId));
     return models.includes(model) ? model : (models[0] || model || (document.getElementById('instance-context') ? '' : 'gpt-4o-mini'));
 }
 function chatProviderOptions(selectedId=''){
     const selected = resolveChatProviderId(selectedId);
+    if(personalApiInstance && selected && !apiProviders.some(p=>p.id===selected)) return `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} · Provider 已失效，请重选</option>` + apiProviders.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name||p.id)}</option>`).join('');
     return chatApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function personalModelOption(model,selected,providerId,purpose){
-    const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];const reason=cap&&!cap.executable?cap.reason:'';return `<option value="${escapeHtml(model)}" ${model===selected?'selected':''} ${reason?'disabled':''}>${escapeHtml(model)}${reason?' · '+escapeHtml(reason):''}</option>`;
+    const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];const reason=personalApiInstance ? window.PersonalModelSelection.reason(apiProviders,providerId,model,purpose,providerConfigError) : (cap&&!cap.executable?cap.reason:'');return `<option value="${escapeHtml(model)}" ${model===selected?'selected':''} ${reason?'disabled':''}>${escapeHtml(model)}${reason?' · '+escapeHtml(reason):''}</option>`;
 }
 function personalModelButtonAttributes(model,providerId,purpose){const cap=apiProviders.find(p=>p.id===providerId)?.capabilities?.[purpose]?.[model];return cap&&!cap.executable?`disabled title="${escapeHtml(cap.reason)}"`:'';}
 function chatModelOptions(selectedModel='', providerId=''){
@@ -4770,9 +4777,16 @@ function bindDynamicParams(){
         };
     });
 }
+function assertPersonalSelection(id,model,purpose){
+    if(personalApiInstance) window.PersonalModelSelection.assertAvailable(apiProviders,id,model,purpose,providerConfigError);
+}
 async function loadConfig(){
     try {
-        const cfg = await fetch('/api/config').then(r => r.json());
+        const response = await fetch('/api/config');
+        if(!response.ok) throw new Error('配置加载失败');
+        const cfg = await response.json();
+        if(personalApiInstance && !Array.isArray(cfg.api_providers)) throw new Error('配置格式错误');
+        providerConfigError='';
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
@@ -4790,6 +4804,7 @@ async function loadConfig(){
         sanitizeSmartApiSelection(settings);
         updateProviderModels();
     } catch(e) {
+        providerConfigError='模型配置加载失败，请刷新或重新登录';
         toast(tr('smart.toastApiSettingsFail'));
     }
 }
@@ -19756,6 +19771,7 @@ async function runPromptLLMNode(nodeId){
     try {
         const provider = resolveChatProviderId(node.llmProvider || '');
         const model = resolveChatModel(node.llmModel || '', provider);
+        assertPersonalSelection(provider,model,'llm');
         const mediaRefs = promptNodeInputMediaForLLM(node);
         const images = imageRefsOnly(mediaRefs).map(img => img.url).filter(Boolean);
         const videos = videoRefsOnly(mediaRefs).map(video => video.url).filter(Boolean);
@@ -19770,7 +19786,7 @@ async function runPromptLLMNode(nodeId){
                 model,
                 provider,
                 request_id:requestId,
-                ms_model: provider === 'modelscope' ? model : '',
+                ms_model: !personalApiInstance && provider === 'modelscope' ? model : '',
                 system_prompt:node.llmSystemEnabled ? (systemPrompt || 'You are a helpful prompt assistant.') : ''
             }),
             signal:controller.signal
@@ -19813,6 +19829,7 @@ function comfyFieldKind(field){
     return 'setting';
 }
 async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=null){
+    assertPersonalSelection(runSettings.provider_id,runSettings.model,'image');
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
@@ -19946,6 +19963,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings,bindin
     throw new Error(tr('smart.rhTimeout'));
 }
 async function runApiVideoGeneration(prompt, refs, runSettings=settings,bindingNode=null){
+    assertPersonalSelection(runSettings.videoProvider,runSettings.videoModel,'video');
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);

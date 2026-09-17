@@ -42,6 +42,8 @@ class Execution:
         self.provider.update(self.secrets)
         self.clients = []
         self.submitted = False
+        from model_diagnostics import Diagnostic
+        self.diagnostic = Diagnostic()
 
     def key(self, field='api_key'):
         return self.secrets.get(field, '')

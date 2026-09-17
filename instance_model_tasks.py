@@ -179,14 +179,8 @@ class ControlledModels(NetworkTasks):
             text = self.app.text_from_chat_response(response.json())
             self.policy.mark_verified(provider,payload.model,'llm')
             return {'text': self.policy.redact(text, used_credential=credential), 'model':payload.model, 'raw_usage':None}
-        except (TimeoutError, httpx.TimeoutException):
-            raise failure('timeout', 504) from None
-        except httpx.HTTPStatusError:
-            raise failure('upstream', 502) from None
-        except httpx.HTTPError:
-            raise failure('network', 502) from None
-        except (ValueError, KeyError, TypeError):
-            raise failure('upstream', 502) from None
+        except (TimeoutError, httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise execution.diagnostic.from_exception(exc) from None
         finally:
             self.llm_active -= 1
             await execution.close()

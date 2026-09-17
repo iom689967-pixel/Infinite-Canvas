@@ -26,6 +26,7 @@ def authenticated_html(html, paths, principal, *, gateway_workspace=False):
     bootstrap = ('<script type="application/json" id="instance-context">'+context+'</script>'
                  '<script src="/static/js/instance-storage.js"></script>'
                  + ('<script src="/static/js/workspace-startup.js"></script>' if gateway_workspace else '') +
+                 '<script src="/static/js/personal-model-selection.js"></script>'
                  '<script src="/static/js/instance-session.js"></script>'
                  '<script src="/static/js/instance-ui.js" defer></script>'
                  '<link rel="stylesheet" href="/static/css/instance-ui.css">')

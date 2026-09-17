@@ -17,3 +17,11 @@ python tools/stability/replay.py --owner-archive /path/to/original-owner.tar --o
 必须使用新的输出目录；不导入真实owner，不修改原archive。httpx外部传输换为fixture，socket真实connect拒绝；核心业务函数不替换。旧差分保留观察性mock的历史行为；新增严格契约测试必须对未知URL/method/body失败，不能依赖旧宽松fixture证明修复。
 
 本文件随各批记录before/after、测试与未覆盖内容，最终候选CI通过后停止，另等部署授权。
+
+## 第一批 D04 / D02
+
+失效ID不再替换；新节点的默认选择只来自空选择。两种Canvas在素材处理/提交前执行同一能力检查，目录加载失败保留原选择；Smart不再按自定义Provider ID `modelscope`注入全局路径。已删除Provider/模型仍显示原ID与原因。
+
+公共错误附加服务端事件ID、分类、Canvas/provider状态；未知upstream状态为null，不从任意错误文本推定路由失败。Instance错误出口仅放行当前服务端请求上下文实际签发的安全detail，不能借伪造事件ID透出原始响应。诊断日志仅安全固定字段；上游关联未确认时明确标记not_confirmed。
+
+旧断言唯一语义变化：`comfly`作为已有精确ID也需保留；以前将它当默认哨兵，现只有空ID才选默认。旧cleanup/batch测试补齐真实选择校验依赖，未移除用例。第一批单元/selector/旧前端20项与真实Instance严格HTTP2项通过（新增事件签发隔离测试另纳最终回归）。完整TCP流取消与浏览器生命周期在后批验收。

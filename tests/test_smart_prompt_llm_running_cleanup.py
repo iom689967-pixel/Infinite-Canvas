@@ -44,6 +44,7 @@ class SmartPromptLLMRunningCleanupTests(unittest.TestCase):
             function_source(name)
             for name in (
                 "apiErrorMessage",
+                "assertPersonalSelection",
                 "responseErrorMessage",
                 "promptLLMRequestId",
                 "isPromptLLMAbortError",
@@ -54,6 +55,7 @@ class SmartPromptLLMRunningCleanupTests(unittest.TestCase):
         )
         harness = f"""
 const testCase = {json.dumps(case)};
+const personalApiInstance=false;
 const activePromptLLMRuns = new Map();
 let nodes = [
   {{

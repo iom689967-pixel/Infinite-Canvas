@@ -184,6 +184,7 @@ WORKBENCH_STATIC = frozenset([
     '/static/js/comfyui-settings.js',
     '/static/js/instance-storage.js',
     '/static/js/instance-ui.js',
+    '/static/js/personal-model-selection.js',
     '/static/klein.html',
     '/static/online.html',
     '/static/zimage.html',

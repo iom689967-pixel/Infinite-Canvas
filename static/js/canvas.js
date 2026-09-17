@@ -725,12 +725,13 @@ function chatApiProviders(){
     return providers.length || personalApiInstance ? providers : defaultApiProviders();
 }
 function resolveChatProviderId(id){
-    if(personalApiInstance && id && id !== 'comfly') return id;
+    if(personalApiInstance && id) return id;
     const providers = chatApiProviders();
     return providers.find(p => p.id === id)?.id || providers[0]?.id || (personalApiInstance ? '' : 'comfly');
 }
 function chatProviderOptions(selectedId){
     const selected = resolveChatProviderId(selectedId);
+    if(personalApiInstance && selected && !apiProviders.some(p=>p.id===selected)) return `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} · Provider 已失效，请重选</option>` + apiProviders.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name||p.id)}</option>`).join('');
     return chatApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function providerChatModels(providerId){
@@ -738,12 +739,13 @@ function providerChatModels(providerId){
     return uniqueModels(provider?.chat_models || []);
 }
 function resolveImageProviderId(id){
-    if(personalApiInstance && id && id !== 'comfly') return id;
+    if(personalApiInstance && id) return id;
     const providers = imageApiProviders();
     return (personalApiInstance && apiProviders.find(p=>p.id===id)?.id) || providers.find(p => p.id === id)?.id || providers[0]?.id || '';
 }
 function providerOptions(selectedId){
     const selected = resolveImageProviderId(selectedId);
+    if(personalApiInstance && selected && !apiProviders.some(p=>p.id===selected)) return `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} · Provider 已失效，请重选</option>` + apiProviders.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name||p.id)}</option>`).join('');
     const providers = imageApiProviders();
     if(!providers.length) return `<option value="" disabled selected>${tr('canvas.noApiProviders') || '暂无 API 平台'}</option>`;
     return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
@@ -770,12 +772,13 @@ function videoApiProviders(){
     return providers.length || personalApiInstance ? providers : defaultApiProviders();
 }
 function resolveVideoProviderId(id){
-    if(personalApiInstance && id && id !== 'comfly') return id;
+    if(personalApiInstance && id) return id;
     const providers = videoApiProviders();
     return providers.find(p => p.id === id)?.id || providers[0]?.id || (personalApiInstance ? '' : 'comfly');
 }
 function videoProviderOptions(selectedId){
     const selected = resolveVideoProviderId(selectedId);
+    if(personalApiInstance && selected && !apiProviders.some(p=>p.id===selected)) return `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} · Provider 已失效，请重选</option>` + apiProviders.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name||p.id)}</option>`).join('');
     return videoApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function providerVideoModels(providerId){
@@ -785,7 +788,7 @@ function providerVideoModels(providerId){
 }
 function sanitizeVideoNodeProviderModel(node){
     if(!node || node.type !== 'video') return;
-    node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
+    node.apiProvider = resolveVideoProviderId(node.apiProvider || (personalApiInstance ? '' : 'comfly'));
     const models = providerVideoModels(node.apiProvider);
     if(personalApiInstance){
         if(!node.model) node.model = models[0] || '';
@@ -795,6 +798,7 @@ function sanitizeVideoNodeProviderModel(node){
     else if(!models.includes(node.model)) node.model = models[0] || '';
 }
 function videoModelOptions(selectedModel, providerId){
+    if(personalApiInstance && selectedModel && !providerVideoModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'video');
     const models = providerVideoModels(providerId);
     if(!models.length){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
@@ -873,7 +877,7 @@ function normalizedImageQuality(value){
 }
 function resolveChatModel(value, providerId=''){
     const providerModels = providerId ? providerChatModels(providerId) : [];
-    if(personalApiInstance) return value || providerModels[0] || allChatModels()[0] || '';
+    if(personalApiInstance) return value || providerModels[0] || (providerId ? '' : allChatModels()[0]) || '';
     return value || providerModels[0] || allChatModels()[0] || chatModels[0] || 'gpt-4o-mini';
 }
 function showErrorModal(message, title=tr('canvas.generationFailed')){
@@ -888,6 +892,9 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
 }
 function apiErrorMessage(data, fallback='请求失败'){
     if(!data) return fallback;
+    if(personalApiInstance && data?.detail?.event_id){
+        return `${data.detail.message || fallback}（事件 ${data.detail.event_id}）`;
+    }
     if(typeof data === 'string') return data || fallback;
     const detail = data.detail ?? data.error ?? data.message;
     if(typeof detail === 'string') return detail || fallback;
@@ -916,7 +923,7 @@ async function responseErrorMessage(response, fallback='请求失败'){
     } catch(e) {
         try {
             const text = await response.text();
-            return text || fallback;
+            return personalApiInstance ? fallback : (text || fallback);
         } catch(_) {
             return fallback;
         }
@@ -1106,6 +1113,7 @@ function normalizeApiNodeLayout(node){
     if(Number(node.w || 0) === 418) node.w = 380;
 }
 function imageModelOptions(selectedModel, providerId){
+    if(personalApiInstance && selectedModel && !providerImageModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'image');
     if(!imageApiProviders().length){
         return `<option value="" disabled selected>${tr('canvas.noApiProvidersHint') || '暂无 API 平台，请到 API 设置添加'}</option>`;
     }
@@ -1119,6 +1127,7 @@ function imageModelOptions(selectedModel, providerId){
     return `${hasSelected || !selectedValue ? '' : (personalApiInstance ? capabilityModelOption(selectedValue,selectedValue,providerId,'image') : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`)}${options}`;
 }
 function chatModelOptions(selectedModel, providerId=''){
+    if(personalApiInstance && selectedModel && !providerChatModels(providerId).includes(selectedModel)) return capabilityModelOption(selectedModel,selectedModel,providerId,'llm');
     const models = providerId ? providerChatModels(providerId) : allChatModels();
     if(!models.length){
         return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
@@ -1556,10 +1565,17 @@ async function saveCanvas(){
     }
 }
 
+function assertPersonalSelection(id,model,purpose){
+    if(personalApiInstance) window.PersonalModelSelection.assertAvailable(apiProviders,id,model,purpose,providerConfigError);
+}
 async function loadConfig(){
     loadLocalModelLists();
     try {
-        const cfg = await fetch('/api/config').then(r=>r.json());
+        const response = await fetch('/api/config');
+        if(!response.ok) throw new Error('配置加载失败');
+        const cfg = await response.json();
+        if(personalApiInstance && !Array.isArray(cfg.api_providers)) throw new Error('配置格式错误');
+        providerConfigError='';
         imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
         chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
         videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
@@ -8226,7 +8242,7 @@ function renderLLMBody(node){
     const wrap = document.createElement('div');
     wrap.className = 'llm-body';
     const mode = node.mode || 'node';
-    node.llmProvider = resolveChatProviderId(node.llmProvider || 'comfly');
+    node.llmProvider = resolveChatProviderId(node.llmProvider || (personalApiInstance ? '' : 'comfly'));
     const llmProv = node.llmProvider;
     if(llmProv === 'modelscope') node.model = node.llmMsModel || node.model;
     if(!providerChatModels(llmProv).includes(node.model)) node.model = providerChatModels(llmProv)[0] || node.model;
@@ -12005,6 +12021,8 @@ function refreshGeneratorInputViews(){
 async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
+    try { assertPersonalSelection(gen.apiProvider,gen.model,'image'); }
+    catch(error){ if(opts.cascade) throw error; showErrorModal(error.message); return; }
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     let canvasRefs = [];
     try {
@@ -12324,6 +12342,8 @@ async function runGeneratorLegacy(genId, opts={}){
 async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
+    try { assertPersonalSelection(node.apiProvider,node.model,'video'); }
+    catch(error){ if(opts.cascade) throw error; showErrorModal(error.message); return; }
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const sources = orderedSources(node, generatorSources(node));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
@@ -13472,8 +13492,9 @@ async function runComfyNode(nodeId, opts={}){
     }
 }
 async function callCanvasLLM(node, message, messages=[], options={}){
-    const llmProv = resolveChatProviderId(node.llmProvider || 'comfly');
+    const llmProv = resolveChatProviderId(node.llmProvider || (personalApiInstance ? '' : 'comfly'));
     const model = resolveChatModel(node.model || node.llmMsModel, llmProv);
+    assertPersonalSelection(llmProv,model,'llm');
     const images = llmInputImages(node);
     const videos = llmInputVideos(node);
     const result = await cascadeFetch('/api/canvas-llm', {
@@ -13482,7 +13503,7 @@ async function callCanvasLLM(node, message, messages=[], options={}){
         body:JSON.stringify({
             message,
             model,
-            ms_model: llmProv === 'modelscope' ? model : '',
+            ms_model: !personalApiInstance && llmProv === 'modelscope' ? model : '',
             provider: llmProv,
             // The System switch controls whether any system message is sent.
             // Keep the default only when the user explicitly enables it.
@@ -14382,6 +14403,7 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
+    assertPersonalSelection(payload.provider_id,payload.model,'image');
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
