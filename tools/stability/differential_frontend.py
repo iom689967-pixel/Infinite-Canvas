@@ -11,9 +11,11 @@ for version in ['owner','public']:
   funcs='\n'.join(extraction.function_source(n) for n in names)
   setup="""
 let apiProviders=[{id:'custom-api',protocol:'openai',enabled:true,image_models:['gpt-image-2','gpt-image-2.5-flare','gpt-image-2.5-sunburst'],chat_models:['available-chat'],video_models:[]}];
+const window={PersonalModelSelection:{preserve:(value,initial)=>value || initial || ''}};let providerConfigError='';
 const personalApiInstance=PUBLIC, document={getElementById:()=>PUBLIC ? {}:null},managedProviderId='custom-api';
 const imageModels=[],chatModels=[],videoModels=[],localChatModels=[],hasManagedChatModels=false,DEFAULT_VIDEO_MODELS=[];
 """.replace('PUBLIC',str(version=='public').lower())
+  if version=='public':setup='const window={};'+(ROOT/'snapshots/public/static/js/personal-model-selection.js').read_text().replace("typeof module==='object'?module.exports:window",'window')+setup.replace("const window={PersonalModelSelection:{preserve:(value,initial)=>value || initial || ''}};",'')
   calls="""
 const provider=resolveChatProviderId('deleted-provider');const model=resolveChatModel('deleted-model',provider);
 console.log(JSON.stringify({imageModels:providerImageModels('custom-api'),deletedProviderResolved:provider,deletedModelResolved:model,missingModelInExistingProvider:resolveChatModel('deleted-model','custom-api')}));

@@ -30,12 +30,16 @@ async def stream_personal_chat(models,payload,request,user_id=''):
         execution=None;active=False;text='';carry='';conversation=None;assistant=None;owner=None;finished=False
         diagnostic=Diagnostic()
         async def emit(value):await queue.put(models.app.sse_event(value))
+        def save_conversation():
+            try:models.app.save_conversation(owner,conversation)
+            except Exception:raise diagnostic.error('local_save',phase='save') from None
         def persist_incomplete(category):
             if conversation is None:return
+            if assistant and assistant in conversation.get('messages',[]):conversation['messages'].remove(assistant)
             if text:
                 conversation.setdefault('messages',[]).append(dict(id=uuid.uuid4().hex,role='assistant',content=text,created_at=models.app.now_ms(),model=payload.model,incomplete=True,status=category))
             conversation['last_error']=dict(category=category,event_id=diagnostic.event_id)
-            conversation['updated_at']=models.app.now_ms();models.app.save_conversation(owner,conversation)
+            conversation['updated_at']=models.app.now_ms();save_conversation()
         try:
             if payload.mode=='image':raise HTTPException(400,'图片聊天请使用图片任务入口')
             if payload.ms_model:raise HTTPException(400,'请使用个人 Provider 的精确模型')
@@ -49,7 +53,7 @@ async def stream_personal_chat(models,payload,request,user_id=''):
             execution=Execution(models,provider,payload.model,'llm');diagnostic=execution.diagnostic
             models.llm_active+=1;active=True
             user_message=dict(id=uuid.uuid4().hex,role='user',content=payload.message,attachments=[r.model_dump() for r in payload.reference_images],created_at=models.app.now_ms())
-            conversation.setdefault('messages',[]).append(user_message);conversation['updated_at']=models.app.now_ms();models.app.save_conversation(owner,conversation)
+            conversation.setdefault('messages',[]).append(user_message);conversation['updated_at']=models.app.now_ms();save_conversation()
             await emit({'type':'meta','conversation':conversation})
             secrets=[]
             for p in models.policy.providers.values():
@@ -97,16 +101,20 @@ async def stream_personal_chat(models,payload,request,user_id=''):
             execution.finish_maintenance_submission()
             assistant=dict(id=uuid.uuid4().hex,role='assistant',content=text,created_at=models.app.now_ms(),model=payload.model,raw_usage=usage,status='completed')
             conversation['messages'].append(assistant);conversation.pop('last_error',None);conversation['updated_at']=models.app.now_ms()
-            models.app.save_conversation(owner,conversation)
+            save_conversation()
             models.policy.mark_verified(provider,payload.model,'llm');finished=True
             await emit({'type':'done','conversation':conversation,'message':assistant})
         except asyncio.CancelledError:
-            if not finished:persist_incomplete('cancelled')
+            if not finished:
+                try:persist_incomplete('cancelled')
+                except HTTPException:pass # Safe save diagnostic already recorded; preserve cancellation.
             raise
         except Exception as exc:
             if execution and isinstance(exc,ContractError) and exc.complete:execution.finish_maintenance_submission()
             error=diagnostic.from_exception(exc)
-            if not finished:persist_incomplete(error.detail['category'])
+            if not finished:
+                try:persist_incomplete(error.detail['category'])
+                except HTTPException as save_error:error=save_error
             await emit({'type':'error','detail':error.detail})
         finally:
             if active:models.llm_active-=1

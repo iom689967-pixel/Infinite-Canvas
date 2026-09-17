@@ -636,7 +636,7 @@
                 const result = await fetch('/api/online-image', {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify(reqBody)
-                }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || '生成失败'); return r.json(); });
+                }).then(async r => { if(!r.ok) throw new Error(window.PersonalModelSelection?.errorMessage((await r.json()).detail,'生成失败') || '生成失败'); return r.json(); });
                 currentResult = result; out.src = result.images[0]; out.classList.remove('hidden'); dl.href = result.images[0]; dl.classList.remove('hidden'); renderImageCard(result, true);
             } catch(err) {
                 alert(err.message || 'Generation failed'); placeholder.classList.remove('hidden');

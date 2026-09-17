@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import re
 import time
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,17 @@ SETTINGS='/api/instance/provider-settings'
 MOCK_VIDEO_B64='AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAOwbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAtt0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAACAAAAAwAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAIAAABAAAAAAJTbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAAKABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAAB/m1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAb5zdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAACAAMABIAAAASAAAAAAAAAABFUxhdmM2MS4xOS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2UnsBEAAAAMAQAAABQPEiWWAAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAABqAAAAagAAAABhzdHRzAAAAAAAAAAEAAAAKAAAEAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAYGN0dHMAAAAAAAAACgAAAAEAAAgAAAAAAQAAFAAAAAABAAAIAAAAAAEAAAAAAAAAAQAABAAAAAABAAAUAAAAAAEAAAgAAAAAAQAAAAAAAAABAAAEAAAAAAEAAAgAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAKAAAAAQAAADxzdHN6AAAAAAAAAAAAAAAKAAAC0wAAAA0AAAAMAAAADAAAAAwAAAATAAAADgAAAAwAAAAMAAAAEwAAABRzdGNvAAAAAAAAAAEAAAPgAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2MS43LjEwMAAAAAhmcmVlAAADWG1kYXQAAAKuBgX//6rcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY0IHIzMTkwIDdlZDc1M2IgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI0IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MTAgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAdZYiEABH//ufj/AptfMRxOnYY+vfW12z78GzLOU8AAAAJQZokbEEP/qqwAAAACEGeQniHfykhAAAACAGeYXRDfy4gAAAACAGeY2pDfy4hAAAAD0GaaEmoQWiZTAh3//6qsQAAAApBnoZFESw7/ykhAAAACAGepXRDfy4hAAAACAGep2pDfy4gAAAAD0GaqUmoQWyZTAhv//6pYA=='
 
 class NetworkMock(fixtures.PersonalMock):
+    # Independent fixture route inventory. Unknown routes never synthesize success.
+    def reject(self, reason):
+        self.server.unmatched=getattr(self.server,'unmatched',[])+[self.command+' '+urlsplit(self.path).path+' '+reason]
+        return self.reply({'error':{'code':'unexpected_mock_request'}},400)
+    def known_path(self,path):
+        path=re.sub(r'^/(openai|gemini|apimart|runninghub)(?=/)', '', path)
+        return bool(re.fullmatch(r'/(?:v1/|v2/|api/v3/)?(?:chat/completions|images/(?:generations(?:/async)?|edits)|responses|videos(?:/generations)?|video/create|contents/generations/tasks|uploads/(?:videos|files|images|audios)|seedance2/private-avatar|midjourney/generations(?:/(?:upscale|edits|modal))?)',path)
+            or re.fullmatch(r'/v1beta/models/[^/:]+:generateContent',path)
+            or re.fullmatch(r'/(?:openapi/v2/(?:query|novel-model-v2030|novel-video-v2030|future-video|media/upload/binary)|task/openapi/(?:create|outputs|ai-app/run|upload))',path)
+            or path in {'/custom/generate','/custom/edit','/asset-api','/anonymous/upload','/anonymous/temp.sh/upload','/v1/media/upload/binary','/media/upload/binary'})
+
     def identity(self):
         value=getattr(self,'body_key','')
         auth=self.headers.get('Authorization','')
@@ -23,6 +35,7 @@ class NetworkMock(fixtures.PersonalMock):
 
     def do_POST(self):
         if urlsplit(self.path).path in {'/api/file-stream-upload','/api/v1/jobs/createTask'}:return super().do_POST()
+        if not self.known_path(urlsplit(self.path).path):return self.reject('path')
         length=int(self.headers.get('Content-Length','0'))
         data=self.rfile.read(length)
         try: body=json.loads(data)
@@ -34,6 +47,7 @@ class NetworkMock(fixtures.PersonalMock):
                 message=BytesParser(policy=default).parsebytes(('Content-Type: '+self.headers['Content-Type']+'\r\n\r\n').encode()+data)
                 for part in message.iter_parts():
                     if part.get_filename() is None:body[part.get_param('name',header='content-disposition')]=part.get_payload(decode=True).decode()
+        if not isinstance(body,dict):return self.reject('object required')
         self.body_key=body.get('apiKey','') if isinstance(body,dict) else ''
         owner=self.identity()
         path=urlsplit(self.path).path
@@ -96,17 +110,20 @@ class NetworkMock(fixtures.PersonalMock):
         if path.endswith('/async'):
             tid='mock-'+str(len(self.server.jobs));self.server.jobs[tid]=dict(owner=owner,video=False)
             return self.reply({'task_id':tid,'status':'queued'})
-        if '/runninghub/' in path or '/apimart/' in path or '/volcengine' in path or '/videos' in path or '/video/create' in path or '/contents/generations/tasks' in path:
+        if '/openapi/v2/' in path or '/runninghub/' in path or '/apimart/' in path or '/volcengine' in path or '/videos' in path or '/video/create' in path or '/contents/generations/tasks' in path:
             tid='mock-'+str(len(self.server.jobs))
             video='video' in json.dumps(body).lower() or '/videos/generations' in path or '/video/create' in path or '/contents/generations/tasks' in path
             self.server.jobs[tid]=dict(owner=owner,video=video)
-            if '/runninghub/' in path:
+            if '/openapi/v2/' in path or '/runninghub/' in path:
                 return self.reply({'code':0,'data':{'taskId':tid}})
             return self.reply({'task_id':tid,'id':tid,'status':'queued'})
         if self.headers.get('X-ModelScope-Async-Mode'):
             tid='mock-'+str(len(self.server.jobs));self.server.jobs[tid]=dict(owner=owner,video=False,modelscope=True)
             return self.reply({'task_id':tid})
-        return self.reply({'data':[{'b64_json':encoded}]})
+        if path.endswith(('/images/generations','/images/edits')) or path in {'/custom/generate','/custom/edit'}:
+            if not body.get('model') or not isinstance(body.get('prompt'),str):return self.reject('image model/prompt')
+            return self.reply({'data':[{'b64_json':encoded}]})
+        return self.reject('missing response contract')
 
     def do_GET(self):
         path=urlsplit(self.path).path
@@ -140,6 +157,7 @@ class PersonalNetworkTests(unittest.TestCase):
         self.f=fixtures.OwnProviderTests()
         with patch.object(fixtures,'PersonalMock',NetworkMock):self.f.setUp()
         self.addCleanup(self.f.doCleanups)
+        self.addCleanup(lambda:self.assertEqual(getattr(self.f.mock,'unmatched',[]),[]))
 
     def save(self,protocol='openai',name='novel-model-v2030',purpose='image',mode='openai',owner='A',**extra):
         category={'llm':'chat_models','image':'image_models','video':'video_models'}[purpose]

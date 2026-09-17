@@ -23,10 +23,11 @@ async def transport(req):
   else:body={'bytes':len(raw)}
  captures.append({'method':req.method,'url':str(req.url),'body':fingerprint(body),'auth_present':bool(req.headers.get('authorization'))})
  path=urlsplit(str(req.url)).path
- if path.endswith('/result.png') or path.endswith('/result.mp4'):
+ if req.method=='GET' and path in {'/media/result.png','/media/result.mp4'}:
   if scenario.get('download_fail'):return httpx.Response(503,json={'error':'offline download failure'},request=req)
   return httpx.Response(200,content=mp4 if path.endswith('mp4') else png,headers={'content-type':'video/mp4' if path.endswith('mp4') else 'image/png'},request=req)
- if req.method=='GET':return httpx.Response(200,json={'id':'offline-video','status':'completed','video_url':'http://127.0.0.1:54321/media/result.mp4'},request=req)
+ if req.method=='GET' and path=='/v1/videos/generations/offline-video':return httpx.Response(200,json={'id':'offline-video','status':'completed','video_url':'http://127.0.0.1:54321/media/result.mp4'},request=req)
+ if req.method!='POST' or path not in {'/v1/images/generations','/v1/images/edits','/v1/videos/generations'}:raise AssertionError('UNMATCHED_MEDIA_CONTRACT')
  if scenario.get('status'):return httpx.Response(scenario['status'],json={'error':{'message':'offline rejected'}},request=req)
  if scenario.get('video'):return httpx.Response(200,json={'id':'offline-video','status':'queued'},request=req)
  return httpx.Response(200,json={'data':[{'url':'http://127.0.0.1:54321/media/result.png'}]},request=req)

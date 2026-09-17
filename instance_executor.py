@@ -149,6 +149,10 @@ class Execution:
                 self.maintenance_submission = (activity.gate, activity.gate.uncertain_llm(activity.instance))
 
     async def after(self, method, url, kwargs, response):
+        if not getattr(self,'saving_result',False):
+            self.diagnostic.provider_status=response.status_code
+            if response.status_code>=400:self.last_http_failure=self.diagnostic.http_error(response)
+
         # An upstream proxy 5xx/408 is not evidence the original remote LLM
         # stopped; retain its receipt for administrator reconciliation.
         if (self.purpose == 'llm' and self.classify(method, url) == 'submit'
@@ -177,6 +181,7 @@ class Execution:
             await client.aclose()
 
     async def save_image(self, image_data, prefix='api_', category='output'):
+        self.saving_result=True
         if image_data.get('type') == 'url':
             response = await self.client().get(image_data['value'])
             response.raise_for_status()
@@ -204,6 +209,7 @@ class Execution:
         return app.output_url_for(filename, category)
 
     async def save_video(self, url, prefix='video_', category='output'):
+        self.saving_result=True
         response = await self.client().get(url)
         response.raise_for_status()
         data = response.content

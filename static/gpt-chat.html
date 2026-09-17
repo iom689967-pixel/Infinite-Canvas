@@ -1511,7 +1511,14 @@
             if(e.key === 'Escape') closeImagePreview();
         });
 
+        let activeChatController=null;
+        function chatFailure(detail){
+            const error=new Error(window.PersonalModelSelection?.errorMessage(detail,tr('chat.requestFailed')) || (typeof detail==='string' ? detail : tr('chat.requestFailed')));
+            if(detail?.code)error.code=detail.code;
+            return error;
+        }
         async function sendMessage(){
+            if(activeChatController){activeChatController.abort();return;}
             if(personalApiInstance){
                 const kind=mode==='image' ? 'image' : 'llm';
                 const p=providerById(kind==='image' ? activeImageProvider : provider,kind==='image' ? 'image' : 'chat');
@@ -1557,12 +1564,12 @@
                             size: requestedSize,
                             aspect_ratio: requestAspectRatio,
                             resolution: requestResolution,
-                            model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
-                            ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
+                            model: !personalApiInstance && provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
+                            ms_model: !personalApiInstance && provider === 'modelscope' ? (msModel || activeChatModel) : '',
                             reference_images: pendingRefs,
                             provider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw chatFailure((await r.json()).detail); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1580,14 +1587,14 @@
                             size: requestedSize,
                             aspect_ratio: requestAspectRatio,
                             resolution: requestResolution,
-                            model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
-                            ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
+                            model: !personalApiInstance && provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
+                            ms_model: !personalApiInstance && provider === 'modelscope' ? (msModel || activeChatModel) : '',
                             image_model: activeImageModel || config.image_model,
                             reference_images: pendingRefs,
                             provider,
                             image_provider: activeImageProvider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw chatFailure((await r.json()).detail); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1610,7 +1617,7 @@
                             reference_images: pendingRefs,
                             provider: activeImageProvider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw chatFailure((await r.json()).detail); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1618,14 +1625,14 @@
                     await loadConversations();
                 }
             } catch(err) {
-                if(err.code === 'maintenance') {
+                if(personalApiInstance || err.code === 'maintenance') {
                     if(!input.value) input.value = draft;
                     refs = [...pendingRefs, ...refs];
                     renderRefs(); autoGrow(input);
                 }
-                renderMessages([...(currentConversation.messages || []), {role:'assistant', content:err.message || tr('chat.requestFailed')}]);
+                renderMessages([...(currentConversation.messages || []), ...(err.partialText ? [{role:'assistant',content:err.partialText+'\n[部分输出，未完成]',incomplete:true}] : []), {role:'assistant', content:err.name==='AbortError' ? '已停止本地等待；远端状态仍可能待确认，不会自动重试' : err.message || tr('chat.requestFailed')}]);
             } finally {
-                btn.disabled = false;
+                btn.disabled = false;btn.title='发送';activeChatController=null;
                 scrollBottom();
             }
         }
@@ -1635,7 +1642,10 @@
             const currentMsModel = provider === 'modelscope' ? (msModel || activeChatModel || (config.ms_chat_models?.[0] || '')) : '';
             const currentChatModel = activeChatModel || config.chat_model;
 
+            activeChatController=new AbortController();
+            const button=document.getElementById('sendBtn');button.disabled=false;button.title='停止本地等待';
             const res = await fetch('/api/chat/stream', {
+                signal:activeChatController.signal,
                 method:'POST',
                 headers:headers(),
                 body:JSON.stringify({
@@ -1643,17 +1653,18 @@
                     message,
                     system_prompt: currentSystemPrompt(),
                     mode:'chat',
-                    model: currentProvider === 'modelscope' ? currentMsModel : currentChatModel,
-                    ms_model: currentProvider === 'modelscope' ? currentMsModel : '',
+                    model: !personalApiInstance && currentProvider === 'modelscope' ? currentMsModel : currentChatModel,
+                    ms_model: !personalApiInstance && currentProvider === 'modelscope' ? currentMsModel : '',
                     provider: currentProvider,
                     reference_images: pendingRefs
                 })
             });
-            if(!res.ok) throw new Error((await res.json()).detail || tr('chat.requestFailed'));
+            if(!res.ok) throw chatFailure((await res.json()).detail);
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
-            let fullText = '';
+            let fullText = '',completed=false;
+            try {
             while(true){
                 const {value, done} = await reader.read();
                 if(done) break;
@@ -1674,8 +1685,9 @@
                         assistantBubble.text.textContent = fullText;
                         scrollBottom();
                     }
-                    if(event.type === 'error') throw new Error(event.detail || tr('chat.requestFailed'));
+                    if(event.type === 'error') throw chatFailure(event.detail);
                     if(event.type === 'done'){
+                        completed=true;
                         assistantBubble.bubble.classList.remove('streaming');
                         currentConversation = event.conversation;
                         rememberConversation(currentConversation.id);
@@ -1685,7 +1697,9 @@
                     }
                 }
             }
-            assistantBubble.bubble.classList.remove('streaming');
+            if(!completed)throw chatFailure({message:'响应流未提供完成确认；部分输出未标记成功'});
+            } catch(error){error.partialText=fullText;throw error;}
+            finally {try{await reader.cancel();}catch(_){}reader.releaseLock();assistantBubble.bubble.classList.remove('streaming');}
         }
 
         function scrollBottom(){ requestAnimationFrame(() => { const box = document.getElementById('messages'); box.scrollTop = box.scrollHeight; }); }

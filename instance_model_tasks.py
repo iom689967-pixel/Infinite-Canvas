@@ -24,6 +24,7 @@ from instance_reference_diagnostics import ReferenceDiagnostics
 from instance_storage_quota import SERVER_FULL
 from providers.kie.client import KieClient, KieAPIError
 from providers.kie.models import build_create_payload, KieValidationError
+from providers.prompt_limits import ModelPromptLimitError
 from providers.kie.tasks import poll_task, KieTaskCancelled, KieTaskError, task_status
 from providers.kie.uploads import KieReferenceUploadCache, prepare_kie_references
 
@@ -185,13 +186,17 @@ class ControlledModels(NetworkTasks):
         if provider.get('personal') and effective_protocol(provider['settings'], payload.model,'image') != 'kie':
             return self.validate_network(payload, 'image')
         if provider.get('personal') and payload.quality not in {'','auto'}:raise HTTPException(400,'所选 Kie input 模板未实现 quality 字段契约，不会忽略所选质量')
-        if provider.get('personal') and payload.adapter_parameters:raise HTTPException(400,'所选 Kie input 模板没有其它 adapter_parameters 契约；不会忽略这些参数')
+        if provider.get('personal') and set(payload.adapter_parameters or {})-{'background'}:raise HTTPException(400,'所选 Kie input 模板没有其它 adapter_parameters 契约；不会忽略这些参数')
         if not 1 <= payload.n <= limits['max_images'] or payload.operation not in {'','generate','edit'} or payload.resolution_type or payload.quality not in {'', 'auto'}:
             raise failure('limits')
         try:
             template=provider.get('capabilities',{}).get('image',{}).get(payload.model,{}).get('adapter',payload.model)
             _, adapted = build_create_payload(template, payload.prompt, [r.url for r in payload.reference_images],
-                                               payload.aspect_ratio, payload.resolution, payload.output_format)
+                                               payload.aspect_ratio, payload.resolution, payload.output_format,
+                prompt_limit_model=payload.model, preserve_prompt=bool(provider.get('personal')),
+                background=(payload.adapter_parameters or {}).get('background','auto'))
+        except ModelPromptLimitError as exc:
+            raise HTTPException(400,exc.details) from None
         except KieValidationError:
             raise failure('limits', 400) from None
         if provider.get('personal') and payload.output_format and not adapted['output_format']:raise HTTPException(400,'所选 Kie input 模板没有 output_format 字段契约；不会忽略所选格式')
@@ -291,7 +296,9 @@ class ControlledModels(NetworkTasks):
             'local_result_status':job.get('local_result_status', 'completed' if job['status']=='succeeded' else 'pending'),
             'has_upstream_task':bool(job['upstream']), 'upstream_cancel_supported':False,
             'local_wait_active':job['id'] in self.runners and not self.runners[job['id']].done(),
-            'cancel_scope':job.get('cancel_scope',''), 'error_code':job.get('error_code','')}
+            'cancel_scope':job.get('cancel_scope',''), 'error_code':job.get('error_code',''),
+            'diagnostic':dict(job['diagnostic'],canvas_status=200) if job.get('diagnostic') and job['status']!='succeeded' else None,
+            'error':(job.get('error','')+' · 事件 '+job['diagnostic']['event_id']) if job.get('diagnostic') and job['status']!='succeeded' else job.get('error','')}
 
     def get(self, task_id):
         return self.public(self.owned(task_id))
@@ -342,6 +349,9 @@ class ControlledModels(NetworkTasks):
             return await self.run_network(job, cancel, query_only=query_only)
         client = None
         submitted = False
+        kie = None
+        from model_diagnostics import Diagnostic
+        safe_diagnostic = Diagnostic()
         try:
             provider, limits = self.policy.allowed(job['provider_id'], job['model'], job.get('purpose','image'))
             if job.get('provider_revision') != task_provider_revision(self.policy, provider):
@@ -389,7 +399,9 @@ class ControlledModels(NetworkTasks):
                         raise HTTPException(409, '恢复操作禁止创建任务')
                     template=provider.get('capabilities',{}).get('image',{}).get(job['model'],{}).get('adapter',job['model'])
                     body, _ = build_create_payload(template, params['prompt'], urls,
-                        params['aspect_ratio'], params['resolution'], params['output_format'])
+                        params['aspect_ratio'], params['resolution'], params['output_format'],
+                        prompt_limit_model=job['model'], preserve_prompt=bool(provider.get('personal')),
+                        background=(params.get('adapter_parameters') or {}).get('background','auto'))
                     if template != job['model']: body['model']=job['model']
                     if provider.get('personal'):body['input']['prompt']=params['prompt']
                     job.update(status='submitting', submission_uncertain=True); self.save(job)
@@ -474,6 +486,13 @@ class ControlledModels(NetworkTasks):
             job.update(status='result_recovery_required' if recover_result else 'failed',
                        error='图片已在上游生成成功，本地结果尚未恢复' if recover_result else failure(code,502).detail['message'],
                        error_code=code, outstanding=outstanding, recovery='' if terminal_failure else self.recovery(job))
+            safe_diagnostic.provider_status=getattr(kie,'last_http_status',None)
+            if recover_result: safe=safe_diagnostic.error('local_save',phase='save')
+            elif isinstance(exc,KieAPIError):
+                category=code if code in {'network','timeout'} else 'upstream_auth' if safe_diagnostic.provider_status in {401,403} else 'rate_limit' if safe_diagnostic.provider_status==429 else 'invalid_parameters' if safe_diagnostic.provider_status and 400<=safe_diagnostic.provider_status<500 else 'business_error' if exc.raw else 'response_parse'
+                safe=safe_diagnostic.error(category)
+            else:safe=safe_diagnostic.from_exception(exc)
+            job['diagnostic']=safe.detail
             if recover_result:
                 job.update(upstream_status='success', local_result_status='pending')
                 if code == 'storage_full':

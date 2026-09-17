@@ -21,6 +21,8 @@ async def transport(req):
  try:body=json.loads(body)
  except:body={'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest()}
  captures.append({'method':req.method,'url':str(req.url),'body':body,'auth_present':bool(req.headers.get('authorization') or req.headers.get('x-goog-api-key'))})
+ if req.method!='POST' or req.url.host!='127.0.0.1' or req.url.path not in {'/v1/chat/completions','/relay/v1beta/models/gpt-6:generateContent','/v1beta/models/gpt-6:generateContent','/api/v3/chat/completions'}:raise AssertionError('UNMATCHED_LLM_CONTRACT')
+ if not isinstance(body,dict) or not ('messages' in body or 'contents' in body):raise AssertionError('UNMATCHED_LLM_BODY')
  if fixture.get('exception'):raise getattr(httpx,fixture['exception'])('offline synthetic failure',request=req)
  return httpx.Response(fixture.get('status',200),headers=fixture.get('headers',{'content-type':'application/json'}),stream=Bytes(),request=req)
 class Client(Original):

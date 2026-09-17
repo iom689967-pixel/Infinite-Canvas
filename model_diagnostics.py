@@ -91,3 +91,13 @@ class Diagnostic:
 
 def safe_failure(code,status=403):
     return Diagnostic().error(LEGACY_CATEGORY.get(code,code),status=status,code=code,phase='validation')
+
+
+def task_diagnostic(detail, *, status=502):
+    """Reissue safe persisted metadata only after callers verify task ownership."""
+    import re
+    d=Diagnostic()
+    if isinstance(detail,dict):
+        if isinstance(detail.get('event_id'),str) and re.fullmatch(r'[a-f0-9]{32}',detail['event_id']):d.event_id=detail['event_id']
+        return d.error(detail.get('category','response_structure'),status=status,code='task_incomplete',phase=detail.get('phase','response'),provider_status=detail.get('provider_status'))
+    return d.error('response_structure',status=status,code='task_incomplete')

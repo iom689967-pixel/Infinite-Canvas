@@ -226,7 +226,9 @@ class NetworkTasks(NetworkOperations):
             await asyncio.shield(runner)
         job = self.owned(task_id)
         if job['status'] != 'succeeded':
-            raise HTTPException(502, dict(failure('task_incomplete').detail,task_id=task_id))
+            from model_diagnostics import task_diagnostic
+            error=task_diagnostic(job.get('diagnostic'));error.detail['task_id']=task_id
+            raise error
         return dict(job['result'], task_id=task_id)
 
     def query_spec(self, execution, task_id, submit_url):
@@ -387,6 +389,14 @@ class NetworkTasks(NetworkOperations):
             job['failure_type'] = type(exc).__name__
             job['failure_status'] = getattr(exc,'status_code',None)
             pending=any(e.get('remote_done') and not e.get('done') for e in job['upstream'])
+            from model_diagnostics import Diagnostic
+            execution=executions[-1] if executions else None
+            diagnostic=execution.diagnostic if execution else Diagnostic()
+            safe=(diagnostic.error('local_save',phase='save') if pending or getattr(execution,'saving_result',False)
+                  else diagnostic.error('cancelled',phase='cancel') if isinstance(exc,asyncio.CancelledError)
+                  else getattr(execution,'last_http_failure',None) or diagnostic.from_exception(exc))
+            job['diagnostic']=safe.detail
+
             job.update(status='result_recovery_required' if pending else 'canceled' if isinstance(exc,asyncio.CancelledError) else 'failed',
                        error='上游结果待恢复；只处理原任务，不会再次生成' if pending else '请求未完成；不会自动重新提交',
                        recovery=self.recovery(job),outstanding=bool(job.get('submission_uncertain') or any(not e.get('remote_done') for e in job['upstream'])) and job.get('upstream_status')!='fail')

@@ -359,7 +359,7 @@ class ControlledModelTests(unittest.TestCase):
             self.assertFalse(any(key in raw for key in self.keys.values()),'credential leak')
             self.assertNotIn('base_url',raw);self.assertNotIn('credential_file',raw)
         response=self.request('A','POST','/api/canvas-llm',json={'provider':'atelier-text','model':'gemini-mock-vision','message':'HTTP_ERROR'})
-        self.assertEqual(response.status_code,502);self.assertEqual(response.json()['detail']['code'],'upstream')
+        self.assertEqual(response.status_code,502);self.assertEqual(response.json()['detail']['code'],'upstream_unavailable');self.assertEqual(response.json()['detail']['provider_status'],503)
         self.assertFalse(any(key in response.text for key in self.keys.values()),'credential leak')
         self.assertEqual(self.request('A','GET','/api/config/token').status_code,403)
         for endpoint in ('/api/local-assets/caption','/api/local-assets/classify','/api/asset-library/items/classify'):

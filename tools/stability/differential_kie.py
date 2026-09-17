@@ -26,11 +26,13 @@ async def transport(req):
     body.append({'name':name,'value':value.decode() if not part.get_filename() else {'bytes':len(value),'sha256':hashlib.sha256(value).hexdigest(),'mime':part.get_content_type()}})
  captures.append({'method':req.method,'url':str(req.url),'body':body,'auth_present':bool(req.headers.get('authorization'))})
  path=urlsplit(str(req.url)).path
- if path.endswith('/api/file-stream-upload'):return httpx.Response(200,json={'code':200,'data':{'downloadUrl':'https://cdn.mock.example/ref.png'}},request=req)
- if path.endswith('/createTask'):
+ if req.method=='POST' and path=='/api/file-stream-upload':return httpx.Response(200,json={'code':200,'data':{'downloadUrl':'https://cdn.mock.example/ref.png'}},request=req)
+ if req.method=='POST' and path=='/api/v1/jobs/createTask':
+  if set(body)!={'model','input'} or not body['input'].get('prompt'):raise AssertionError('UNMATCHED_KIE_BODY')
   counter+=1;return httpx.Response(200,json={'code':200,'data':{'taskId':'offline-'+str(counter)}},request=req)
- if path.endswith('/recordInfo'):return httpx.Response(200,json={'code':200,'data':{'state':'success','resultJson':json.dumps({'resultUrls':['https://cdn.mock.example/result.png']})}},request=req)
+ if req.method=='GET' and path=='/api/v1/jobs/recordInfo':return httpx.Response(200,json={'code':200,'data':{'state':'success','resultJson':json.dumps({'resultUrls':['https://cdn.mock.example/result.png']})}},request=req)
  if path.endswith('result.png') and scenario.get('fail_download'):return httpx.Response(503,json={'error':'offline download error'},request=req)
+ if req.method!='GET' or path not in {'/result.png','/ref.png'}:raise AssertionError('UNMATCHED_KIE_CONTRACT')
  return httpx.Response(200,content=png,headers={'content-type':'image/png'},request=req)
 async def run():
  results=[]
