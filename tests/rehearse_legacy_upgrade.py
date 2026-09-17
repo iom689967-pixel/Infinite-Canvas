@@ -117,7 +117,7 @@ class Rehearsal:
         process.wait(timeout=30)
 
     def program_loaded(self,pid,program,filename):
-        command=subprocess.check_output(['ps','-p',str(pid),'-o','command='],text=True,timeout=3)
+        command=subprocess.check_output(['ps','-ww','-p',str(pid),'-o','command='],text=True,timeout=3)
         assert str(program/filename) in command, 'Actual process still points to a different program'
         return True
 
@@ -182,6 +182,15 @@ class Rehearsal:
                     limit['timeout_seconds'] = 15
             policy['personal_providers'] = []
             (private/'model-access.json').write_text(json.dumps(policy)); (private/'model-access.json').chmod(0o600)
+        # Provisioning with an old source does not determine the later serving
+        # source. Start this real older worker before 5449 Supervisor adoption.
+        self.run(older,"""from public_beta_store import BetaConfig,GatewayStore
+from public_beta_supervisor import Supervisor
+s=Supervisor(GatewayStore(BetaConfig.from_env()))
+with s.store.db() as db:
+    uid=db.execute("SELECT id FROM users WHERE username='alice'").fetchone()[0]
+s.start(uid)
+""")
         self.start('supervisor', [sys.executable, str(old/'public_beta_daemon.py')], old)
         eventually(lambda: (self.root/'ipc/supervisor.sock').exists())
         self.start('gateway', [sys.executable, str(old/'public_beta.py')], old); self.readiness()
