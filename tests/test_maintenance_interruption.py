@@ -34,6 +34,7 @@ class InterruptionTests(unittest.TestCase):
             created_at=now-1,expires_at=now+300,remote_status_and_cost_unknown=True,
             records=[dict(id=r['id'],fingerprint=command.fingerprint(r)) for r in self.before])
         self.file=self.root/'approval.json';self.save()
+        self.real_running_source=command.running_source
         # Unit seams are not exposed in CLI. The complete old-process rehearsal
         # uses actual uid0, procfs, clean Git releases and unmodified f598 code.
         for seam,value in [('public_beta_maintenance.admin',lambda *a:None),
@@ -169,3 +170,14 @@ class InterruptionTests(unittest.TestCase):
         original=importlib.reload(public_beta_maintenance).admin
         with patch('os.geteuid',return_value=501):
             with self.assertRaises(PermissionError):original(self.control)
+
+    def test_worker_source_uses_exact_entrypoint_and_isolated_data_cwd(self):
+        with self.gate.db() as db:db.execute("UPDATE processes SET pid=999 WHERE instance='gateway'")
+        def cwd(path):return str(self.root if '/999/' in str(path) else self.data)
+        def argv(path):
+            return (b'/python\0'+str(self.root/('public_beta.py' if '/999/' in str(path) else 'public_beta_worker.py')).encode()
+                    +(b'\0' if '/999/' in str(path) else b'\0serve\0'))
+        with patch('os.readlink',cwd),patch('pathlib.Path.read_bytes',argv):
+            self.real_running_source(self.gate,self.db,self.root)
+        with patch('os.readlink',cwd),patch('pathlib.Path.read_bytes',return_value=b'/python\0/other/public_beta_worker.py\0serve\0'):
+            with self.assertRaises(ValueError):self.real_running_source(self.gate,self.db,self.root)

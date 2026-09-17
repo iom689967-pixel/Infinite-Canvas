@@ -81,16 +81,22 @@ def revision(path):
 def running_source(gate, gateway_db, source):
     from public_beta_maintenance import read_db
     with read_db(Path(gateway_db)) as db:
-        pids = [r[0] for r in db.execute("SELECT pid FROM instances WHERE status IN ('running','starting')")]
+        processes = [(r[0], Path(r[1]), source/'public_beta_worker.py', ['serve'])
+                     for r in db.execute("SELECT pid,data_root FROM instances WHERE status IN ('running','starting')")]
     with gate.db() as db:
         row = db.execute("SELECT pid FROM processes WHERE instance='gateway'").fetchone()
     if not row:
         raise ValueError('Gateway覆盖缺失')
-    pids.append(row[0])
-    for pid in pids:
+    processes.append((row[0], source, source/'public_beta.py', []))
+    for pid, cwd, entrypoint, tail in processes:
         # Production platform is Linux. No guessed or injected process identity.
-        if Path(os.readlink('/proc/'+str(int(pid))+'/cwd')).resolve() != source:
-            raise ValueError('运行进程目录与批准源版本不一致')
+        proc = Path('/proc')/str(int(pid))
+        argv = (proc/'cmdline').read_bytes().rstrip(b'\0').decode().split('\0')
+        # Instance intentionally chdirs to its isolated data root. Program source
+        # is the exact fixed entrypoint, not that data working directory.
+        if (Path(os.readlink(proc/'cwd')).resolve() != cwd.resolve()
+                or len(argv) != 2+len(tail) or argv[1:] != [str(entrypoint), *tail]):
+            raise ValueError('运行进程入口或数据目录与批准源版本不一致')
 
 
 def atomic_audit(path, value, *, exclusive=False):

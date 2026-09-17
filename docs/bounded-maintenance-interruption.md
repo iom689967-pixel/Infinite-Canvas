@@ -8,7 +8,7 @@ root 在受保护目录保存0600普通JSON文件。禁止从“现场所有未�
 
 字段严格为：schema=1、window_id（32位小写hex且从未使用）、epoch（本次draining epoch）、source_revision/target_revision（完整40位Git SHA）、created_at/expires_at（Unix秒，最多两小时）、remote_status_and_cost_unknown=true、records（恰好四个不重复的 `{id, fingerprint}`，指纹64位hex）。这是维护中断授权，不是reconcile证据。
 
-源/目标目录必须是独立干净Git检出，版本分别匹配清单；运行Gateway及所有运行Instance的procfs工作目录必须匹配源release，PID/starttime覆盖完整。工具从独立新release执行，旧进程无需先重启。回滚用新窗口、当前epoch、反向源/目标及同一批准历史集合；旧清单不可复用。
+源/目标目录必须是独立干净Git检出，版本分别匹配清单；运行Gateway及所有运行Instance的procfs固定程序入口必须匹配源release，PID/starttime覆盖完整。Gateway工作目录须为源release；Instance正常切换工作目录到自己的隔离数据根，必须与注册表根目录一致，不能误当代码目录。工具从独立新release执行，旧进程无需先重启。回滚用新窗口、当前epoch、反向源/目标及同一批准历史集合；旧清单不可复用。
 
 ```sh
 # 所有路径/epoch/SHA/记录均先现场核实。命令仅限root，拒绝--sandbox。

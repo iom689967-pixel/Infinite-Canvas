@@ -215,7 +215,7 @@ if __name__=='__main__':
             evidence=run.execute();Path(args.evidence).write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
         except Exception:
             Path(args.evidence).write_text(json.dumps([*run.evidence,{'stage':'failed','restart_safe':False,'action':'stop_upgrade'}],indent=2))
-            for name in ('gateway','supervisor','caddy'):
+            for name in ('gateway','supervisor'):
                 path=run.root/(name+'.log')
                 if path.exists():print(name,path.read_text()[-2500:],file=sys.stderr)
             raise
