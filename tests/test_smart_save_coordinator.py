@@ -3,6 +3,11 @@ import unittest
 from pathlib import Path
 
 class SmartSaveCoordinatorTests(unittest.TestCase):
+    def test_page_save_ui_contracts(self):
+        root=Path(__file__).resolve().parents[1]
+        result=subprocess.run(['node','--test',str(root/'tests/test_smart_save_ui.cjs')],capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
     def test_real_coordinator_contracts(self):
         root=Path(__file__).resolve().parents[1]
         result=subprocess.run(['node','--test',str(root/'tests/test_smart_save_coordinator.cjs')],capture_output=True,text=True,timeout=30)

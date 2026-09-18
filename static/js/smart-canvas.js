@@ -6636,6 +6636,12 @@ async function smartSaveGet(){
 function renderSmartSaveState(state){
     canvasSyncInFlight=state.inFlight;
     let panel=document.getElementById('smartSaveState');
+    // Normal autosave is silent; only states requiring attention get a panel.
+    // Keep the coordinator and leave protection independent of presentation.
+    if(['unsaved','saving','saved'].includes(state.status) && !state.storageError){
+        panel?.remove();
+        return;
+    }
     if(!panel){
         panel=document.createElement('section');panel.id='smartSaveState';panel.className='smart-save-state nodrag nopan';
         panel.setAttribute('aria-label','画布保存状态');
@@ -6645,10 +6651,10 @@ function renderSmartSaveState(state){
     const stateKey=JSON.stringify(state);
     if(panel.dataset.renderedState===stateKey)return;
     panel.dataset.renderedState=stateKey;
-    const labels={saved:'已确认保存',saving:'保存中',unsaved:'未保存',conflict:'保存冲突：本地修改已保留，自动保存已暂停',
+    const labels={conflict:'保存冲突：本地修改已保留，自动保存已暂停',
         uncertain:'保存结果待核对：服务器可能已写入，请先核对',error:'保存失败：草稿未确认',auth:'登录已失效：请重新登录后检查草稿',
         maintenance:'维护中：保存尚未确认',recovery:'发现未确认的本机草稿，请选择恢复或保留'};
-    panel.dataset.state=state.status;panel.querySelector('[role=status]').textContent=labels[state.status] || '未保存';
+    panel.dataset.state=state.status;panel.querySelector('[role=status]').textContent=labels[state.status] || (state.storageError?'本机草稿保护失败':'保存状态需要处理');
     panel.querySelector('small').textContent=state.storageError?'本机草稿保护不可用：存储失败或超过上限，请立即导出；不要关闭页面。':
         state.hasDraft?'未确认草稿已暂存于此浏览器；清除浏览器数据后无法恢复。':'本机草稿与服务器确认状态分别显示。';
     const actions=panel.querySelector('.smart-save-actions');actions.replaceChildren();
@@ -6661,7 +6667,7 @@ function renderSmartSaveState(state){
         button('保留旧草稿，继续保存当前页面',async()=>{if(await smartSaveCoordinator.keepCurrent())await saveCanvas();},state.inFlight);
         if(state.hasDraft){const note=document.createElement('small');note.textContent='当前页面也有新修改或恢复结果。请先导出，或继续保存当前页面；旧草稿会单独保留。';actions.appendChild(note);}
     }
-    if(state.status!=='saved'){
+    if(state.status!=='saved' || state.storageError){
         button('导出当前草稿',exportSmartUnsavedDraft);
         button('核对服务器',()=>smartSaveCoordinator.check(),state.inFlight);
         if(!['conflict','uncertain','recovery','auth'].includes(state.status))button('保存当前修改',async()=>{if(await smartSaveCoordinator.check())await saveCanvas();},state.inFlight);
