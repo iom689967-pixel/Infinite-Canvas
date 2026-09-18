@@ -228,6 +228,7 @@ WORKBENCH_STATIC = frozenset([
     "/static/js/image-preview.js",
     "/static/js/ltx-director-timeline.js",
     "/static/js/smart-canvas.js",
+    "/static/js/smart-save-coordinator.js",
     "/static/js/theme.js",
     "/static/js/touch-mouse.js",
     "/static/smart-canvas.html",

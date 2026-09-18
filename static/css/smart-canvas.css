@@ -2229,3 +2229,9 @@ body.smart-focus-edit-active .smart-node-floating-menu,body.smart-focus-edit-act
     .focus-edit-topbar { left:14px; right:14px; max-width:none; transform:none; }
     .focus-edit-panel { top:72px; right:12px; width:min(350px,calc(100vw - 24px)); max-height:calc(100vh - 84px); }
 }
+
+/* Save status is separate from model execution status. */
+.smart-save-state{position:fixed;left:18px;bottom:18px;z-index:1200;max-width:min(530px,90vw);padding:10px 14px;border:1px solid #9998;border-radius:12px;background:var(--bg,#fff);color:var(--text,#252525);font-size:12px;box-shadow:0 2px 10px #0001}
+.smart-save-state small{display:block;opacity:.75;margin:4px 0}.smart-save-actions{display:flex;flex-wrap:wrap;gap:6px}
+.smart-save-actions button,.smart-save-actions select{border:1px solid #9998;border-radius:6px;padding:5px 8px;background:inherit;color:inherit}
+.smart-save-state[data-state=conflict],.smart-save-state[data-state=uncertain]{border-color:#bc7324}

@@ -4,12 +4,14 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('static/js/instance-session.js', 'utf8');
 function boot({delayAuth=false, parent=null}={}) {
-    const calls = [], redirects = [];
+    const calls = [], redirects = [], rejected = [];
     const identity = {storage_namespace:'A', username:'alice', capabilities:{manage_own_providers:true}};
     let next = () => new Response('{}', {headers:{'X-Instance-Namespace':'A'}});
     let releaseAuth;
     const authGate = new Promise(resolve => {releaseAuth=resolve;});
-    const context = {URL, Request, Headers, Response, Error, parent, setInterval() {}, addEventListener() {},
+    const context = {URL, Request, Headers, Response, Error, parent,
+        CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail}},
+        dispatchEvent(event){rejected.push({...event.detail,storageActive:context.InstanceStorage.active});}, setInterval() {}, addEventListener() {},
         location:{href:'https://canvas.test/', origin:'https://canvas.test'},
         document:{getElementById:() => ({textContent:JSON.stringify(identity)}), documentElement:{style:{}}},
         InstanceStorage:{active:true, deactivate() { this.active = false; }},
@@ -23,7 +25,7 @@ function boot({delayAuth=false, parent=null}={}) {
             return next();
         }};
     context.window = context; vm.runInNewContext(source, context);
-    return {context, calls, redirects, releaseAuth, respond: fn => { next = fn; }};
+    return {context, calls, redirects, rejected, releaseAuth, respond: fn => { next = fn; }};
 }
 (async () => {
     const a = boot(); await a.context.InstanceSession.ready;
@@ -42,6 +44,8 @@ function boot({delayAuth=false, parent=null}={}) {
     const b = boot(); await b.context.InstanceSession.ready;
     b.respond(() => new Response('{}', {status:401})); await assert.rejects(b.context.fetch('/api/canvases'));
     assert.deepEqual(b.redirects, ['/login']);
+    assert.equal(b.context.InstanceSession.active,false);
+    assert.deepEqual(b.rejected,[{method:'GET',path:'/api/canvases',status:401,storageActive:true}]);
     const c = boot(); await c.context.InstanceSession.ready; await c.context.InstanceSession.logout();
     assert.equal(c.calls.at(-1).input, '/api/auth/logout');
     assert.equal(c.calls.at(-1).options.headers.get('X-CSRF-Token'), 'fake-csrf');

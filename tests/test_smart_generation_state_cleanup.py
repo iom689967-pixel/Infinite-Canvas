@@ -205,7 +205,7 @@ console.log(JSON.stringify({{success:state(success, successChanged), failed:stat
         self.assertIn("node.activeGenerationId !== attempt.id", complete)
 
     def test_09_reload_reconciles_success_and_terminal_failure_to_idle(self):
-        merge = function_source("applyMergedServerCanvas")
+        merge = function_source("smartSaveApply")
         self.assertIn("nodes.map(reconcileNodeGenerationHistory)", merge)
         for state in (self.reloaded["success"], self.reloaded["failed"]):
             self.assertTrue(state["changed"])

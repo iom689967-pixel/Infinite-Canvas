@@ -1,0 +1,915 @@
+{
+  "initial": {
+    "source_sha256": "aa442ac08c37b94a40454bd7e158372961ce226912aa8db2379984899514cbf1",
+    "requests": [
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789696821.045548,
+        "base": 1789696821034,
+        "nodes": 1,
+        "complete": 1789696821.052459,
+        "status": 200,
+        "delivered": 1789696821.0525088,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/e5f039036faf4a15a3e996d8a3e119b8",
+        "start": 1789696821.05938,
+        "base": 1789696821057,
+        "nodes": 1,
+        "complete": 1789696821.0660532,
+        "status": 200,
+        "delivered": 1789696821.066102,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c7614c59bcf44ce3a60b5da2a40f6fac",
+        "start": 1789696821.727339,
+        "base": 1789696821716,
+        "nodes": 1,
+        "complete": 1789696821.736759,
+        "status": 200,
+        "delivered": 1789696821.736806,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/88209769a3ab4d59a263cb1c1fb7796e",
+        "start": 1789696821.743689,
+        "base": 1789696821742,
+        "nodes": 1,
+        "complete": 1789696821.7503638,
+        "status": 200,
+        "delivered": 1789696821.750423,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699538.895522,
+        "base": 1789696821050,
+        "nodes": 1,
+        "complete": 1789699538.9106119,
+        "status": 200,
+        "delivered": 1789699550.9123259,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
+            "label": "B"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699550.918915,
+        "base": 1789699538905,
+        "nodes": 1,
+        "complete": 1789699550.9441988,
+        "status": 200,
+        "delivered": 1789699550.944362,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
+            "label": "C"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699588.3164139,
+        "base": 1789699550937,
+        "nodes": 1,
+        "complete": 1789699588.345767,
+        "status": 200,
+        "delivered": 1789699588.345849,
+        "texts": [
+          {
+            "length": 5,
+            "sha256": "1b0a9dbd2646d3a8c4c41a2c61f8d75e870e44a71a2d18559bf0104570c31cd2",
+            "label": "双标签 B"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699588.3260381,
+        "base": 1789699550937,
+        "nodes": 1,
+        "complete": 1789699588.347633,
+        "status": 409,
+        "delivered": 1789699588.347727,
+        "texts": [
+          {
+            "length": 5,
+            "sha256": "ae8c596be9b5226c151062070247c6c808b44f136bd02b524fa08c45235b357b",
+            "label": "双标签 C"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699797.1981802,
+        "base": 1789699588339,
+        "nodes": 1,
+        "complete": 1789699797.217487,
+        "status": 200,
+        "delivered": 1789699797.217581,
+        "texts": [
+          {
+            "length": 6,
+            "sha256": "7dda6b2386d5b715bd780a272d7fae47881450b6737b889b5329f6ce86cecaee",
+            "label": "响应丢失 D"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c969f994185842d59d8e5c46575c830b",
+        "start": 1789699865.00809,
+        "base": 1789699797211,
+        "nodes": 2,
+        "complete": 1789699865.0155678,
+        "status": 413,
+        "delivered": 1789699865.015647,
+        "texts": [
+          {
+            "length": 6,
+            "sha256": "7dda6b2386d5b715bd780a272d7fae47881450b6737b889b5329f6ce86cecaee",
+            "label": "响应丢失 D"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      }
+    ]
+  },
+  "graph": {
+    "source_sha256": "965bfe8d47efc28e8235da80a814562841bdb0739ab5ca04aa77ba6cde5b8eb7",
+    "requests": [
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789699954.7304351,
+        "base": 1789699954717,
+        "nodes": 1,
+        "complete": 1789699954.737237,
+        "status": 200,
+        "delivered": 1789699954.7374332,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c69d5cbabf5b46e6892935a59e9c8dab",
+        "start": 1789699954.744896,
+        "base": 1789699954743,
+        "nodes": 1,
+        "complete": 1789699954.7510679,
+        "status": 200,
+        "delivered": 1789699954.751116,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/803981f22e174131890018f7ffce7479",
+        "start": 1789699955.4177191,
+        "base": 1789699955404,
+        "nodes": 1,
+        "complete": 1789699955.42633,
+        "status": 200,
+        "delivered": 1789699955.426377,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a1c15c9c9d6749faa439ec6394d0a072",
+        "start": 1789699955.433069,
+        "base": 1789699955431,
+        "nodes": 1,
+        "complete": 1789699955.44016,
+        "status": 200,
+        "delivered": 1789699955.440215,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789700035.2858949,
+        "base": 1789699954734,
+        "nodes": 1,
+        "complete": 1789700035.295496,
+        "status": 200,
+        "delivered": 1789700035.295569,
+        "texts": [
+          {
+            "length": 30000,
+            "sha256": "963fabd0eb5a5f8f5b01d5d946924c3de3f0026ff3c94b37c83104b4ddc074ed",
+            "label": "synthetic-long-chinese"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789700053.429155,
+        "base": 1789700035292,
+        "nodes": 2,
+        "complete": 1789700053.4393458,
+        "status": 200,
+        "delivered": 1789700053.439436,
+        "texts": [
+          {
+            "length": 30000,
+            "sha256": "963fabd0eb5a5f8f5b01d5d946924c3de3f0026ff3c94b37c83104b4ddc074ed",
+            "label": "synthetic-long-chinese"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789700073.944756,
+        "base": 1789700053435,
+        "nodes": 2,
+        "complete": 1789700073.955073,
+        "status": 200,
+        "delivered": 1789700073.9551601,
+        "texts": [
+          {
+            "length": 30000,
+            "sha256": "963fabd0eb5a5f8f5b01d5d946924c3de3f0026ff3c94b37c83104b4ddc074ed",
+            "label": "synthetic-long-chinese"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789700158.527035,
+        "base": 1789700073951,
+        "nodes": 2,
+        "complete": 1789700158.53993,
+        "status": 200,
+        "delivered": 1789700158.5400221,
+        "texts": [
+          {
+            "length": 30000,
+            "sha256": "963fabd0eb5a5f8f5b01d5d946924c3de3f0026ff3c94b37c83104b4ddc074ed",
+            "label": "synthetic-long-chinese"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a7e98c5b2a03480bae69397fbf40ade1",
+        "start": 1789700164.325957,
+        "base": 1789700158536,
+        "nodes": 1,
+        "complete": 1789700164.335764,
+        "status": 200,
+        "delivered": 1789700164.33584,
+        "texts": [
+          {
+            "length": 30000,
+            "sha256": "963fabd0eb5a5f8f5b01d5d946924c3de3f0026ff3c94b37c83104b4ddc074ed",
+            "label": "synthetic-long-chinese"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/c69d5cbabf5b46e6892935a59e9c8dab",
+        "start": 1789700248.8791611,
+        "base": 1789700235567,
+        "nodes": 1,
+        "complete": 1789700248.888126,
+        "status": 200,
+        "delivered": 1789700248.888192,
+        "texts": [
+          {
+            "length": 17,
+            "sha256": "60aba3e4678253b4a6a3b1abbeee94fedaa69a984a0b4b4ce12b4c94ae4eb1f3",
+            "label": "普通 Canvas 不退化合成文本"
+          }
+        ]
+      }
+    ]
+  },
+  "recovery": {
+    "source_sha256": "802a81b9fd7fe7ff90a44acf85dcf78c6380b1d33b07c2cc55ba9da5ef69a099",
+    "requests": [
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700708.430673,
+        "base": 1789700708419,
+        "nodes": 1,
+        "complete": 1789700708.438874,
+        "status": 200,
+        "delivered": 1789700708.4389381,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/510f1d55070d48c881f04cb58ccc7811",
+        "start": 1789700708.4474812,
+        "base": 1789700708445,
+        "nodes": 1,
+        "complete": 1789700708.4560971,
+        "status": 200,
+        "delivered": 1789700708.456157,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a79778fe285f4ce190b8df8753d62267",
+        "start": 1789700709.232987,
+        "base": 1789700709217,
+        "nodes": 1,
+        "complete": 1789700709.241573,
+        "status": 200,
+        "delivered": 1789700709.2416298,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/7ccb6d179eec41ab86fc2ca71c95e6fc",
+        "start": 1789700709.248729,
+        "base": 1789700709247,
+        "nodes": 1,
+        "complete": 1789700709.256348,
+        "status": 200,
+        "delivered": 1789700709.2563999,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700780.3144279,
+        "base": 1789700708436,
+        "nodes": 1,
+        "complete": 1789700780.325917,
+        "status": 200,
+        "delivered": 1789700792.326997,
+        "texts": [
+          {
+            "length": 7,
+            "sha256": "0a6d4ad2b07f6c6fa1026f861389130217eb3e968145a8c81fd3dcf9ab49a8da",
+            "label": "final-B"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700792.335208,
+        "base": 1789700780322,
+        "nodes": 1,
+        "complete": 1789700792.346573,
+        "status": 200,
+        "delivered": 1789700792.346635,
+        "texts": [
+          {
+            "length": 7,
+            "sha256": "43b688817484916e81fc9e60fd660d848b90061a43f0984624b251b44a7749c7",
+            "label": "final-C"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700859.519722,
+        "base": 1789700792343,
+        "nodes": 2,
+        "complete": 1789700859.532618,
+        "status": 200,
+        "delivered": 1789700859.5326889,
+        "texts": [
+          {
+            "length": 7,
+            "sha256": "43b688817484916e81fc9e60fd660d848b90061a43f0984624b251b44a7749c7",
+            "label": "final-C"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700877.977602,
+        "base": 1789700859528,
+        "nodes": 2,
+        "complete": 1789700877.9873269,
+        "status": 200,
+        "delivered": 1789700877.98739,
+        "texts": [
+          {
+            "length": 7,
+            "sha256": "43b688817484916e81fc9e60fd660d848b90061a43f0984624b251b44a7749c7",
+            "label": "final-C"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700878.0094562,
+        "base": 1789700877983,
+        "nodes": 2,
+        "complete": 1789700878.017266,
+        "status": 200,
+        "delivered": 1789700878.017345,
+        "texts": [
+          {
+            "length": 7,
+            "sha256": "43b688817484916e81fc9e60fd660d848b90061a43f0984624b251b44a7749c7",
+            "label": "final-C"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789700878.607185,
+        "base": 1789700878014,
+        "nodes": 2,
+        "complete": 1789700878.615776,
+        "status": 200,
+        "delivered": 1789700878.6158369,
+        "texts": [
+          {
+            "length": 18,
+            "sha256": "bffac89b15370294197f68aa22dd1287d34ecdec33223b4b0b96a3f44cb3f70f",
+            "label": "final-C-并发编辑与原任务恢复"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/a66c3572e63341ec9d57eca31727e949",
+        "start": 1789701011.47772,
+        "base": 1789700878612,
+        "nodes": 2,
+        "complete": 1789701011.492843,
+        "status": 200,
+        "delivered": 1789701011.4929018,
+        "texts": [
+          {
+            "length": 18,
+            "sha256": "bffac89b15370294197f68aa22dd1287d34ecdec33223b4b0b96a3f44cb3f70f",
+            "label": "final-C-并发编辑与原任务恢复"
+          },
+          {
+            "length": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label": ""
+          }
+        ]
+      }
+    ],
+    "mock_calls": [
+      {
+        "path": "/v1/images/generations",
+        "allowed": true,
+        "model": "synthetic-image-a",
+        "at": 1789700878.004967
+      }
+    ],
+    "saved": {
+      "save-a": {
+        "smart": {
+          "id": "a66c3572e63341ec9d57eca31727e949",
+          "version": 1789701011486,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "smart-prompt",
+              "text_length": 18,
+              "text_sha256": "bffac89b15370294197f68aa22dd1287d34ecdec33223b4b0b96a3f44cb3f70f",
+              "image_count": 0,
+              "history": []
+            },
+            {
+              "id": "image-gen_1yi2i8vaokuq",
+              "type": "smart-image-generation",
+              "text_length": 0,
+              "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "image_count": 1,
+              "history": [
+                {
+                  "id": "generation_0xmnzy5aozgg",
+                  "status": "success",
+                  "taskIds": [
+                    "canvas_img_c7c39b7f74f441c4a06f2a1c4bf902a8"
+                  ]
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "from": "p",
+              "to": "image-gen_1yi2i8vaokuq",
+              "kind": "input"
+            }
+          ]
+        },
+        "classic": {
+          "id": "510f1d55070d48c881f04cb58ccc7811",
+          "version": 1789700708453,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        }
+      },
+      "save-b": {
+        "smart": {
+          "id": "a79778fe285f4ce190b8df8753d62267",
+          "version": 1789700709239,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "smart-prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        },
+        "classic": {
+          "id": "7ccb6d179eec41ab86fc2ca71c95e6fc",
+          "version": 1789700709253,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        }
+      }
+    },
+    "global_history_count": 1
+  },
+  "failures": {
+    "source_sha256": "6a12bfe33386ea7fdc50b671017d23414bf4493dc1fcd05125295293baf13f5e",
+    "requests": [
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701074.7538,
+        "base": 1789701074737,
+        "nodes": 1,
+        "complete": 1789701074.764029,
+        "status": 200,
+        "delivered": 1789701074.764148,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/bce0fd2e5cf741b3be1d72ccd181302d",
+        "start": 1789701074.7746801,
+        "base": 1789701074772,
+        "nodes": 1,
+        "complete": 1789701074.7843032,
+        "status": 200,
+        "delivered": 1789701074.784371,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/748b338abb714669beeb3061418c8efe",
+        "start": 1789701075.6131608,
+        "base": 1789701075598,
+        "nodes": 1,
+        "complete": 1789701075.6226401,
+        "status": 200,
+        "delivered": 1789701075.622704,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/8f05234614a54f6aa1a836e91758f2d5",
+        "start": 1789701075.6319628,
+        "base": 1789701075629,
+        "nodes": 1,
+        "complete": 1789701075.640627,
+        "status": 200,
+        "delivered": 1789701075.640689,
+        "texts": [
+          {
+            "length": 1,
+            "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+            "label": "A"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701150.300354,
+        "status": 503,
+        "delivered": 1789701150.3003561,
+        "rejected_before_app": true,
+        "texts": []
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701158.944606,
+        "base": 1789701074760,
+        "nodes": 1,
+        "complete": 1789701158.9661388,
+        "status": 200,
+        "delivered": 1789701158.96625,
+        "texts": [
+          {
+            "length": 9,
+            "sha256": "3bd760dc1fba831af98609f19bda072ee61c5e10003df3e1d6002da41fbc72c0",
+            "label": "维护拒绝仍保留 C"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701193.432856,
+        "status": 401,
+        "delivered": 1789701193.4328609,
+        "rejected_before_app": true,
+        "texts": []
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701358.7102468,
+        "base": 1789701158958,
+        "nodes": 1,
+        "complete": 1789701358.732024,
+        "status": 200,
+        "delivered": 1789701358.7322261,
+        "texts": [
+          {
+            "length": 13,
+            "sha256": "179a49edacc5a08b267c079b1d43b7b4c25a495b48557021d81618ee3043adf5",
+            "label": "账号 A 的未确认合成草稿"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701423.816193,
+        "status": 503,
+        "delivered": 1789701423.816194,
+        "rejected_before_app": true,
+        "texts": []
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701449.248384,
+        "base": 1789701358723,
+        "nodes": 1,
+        "complete": 1789701449.2715578,
+        "status": 200,
+        "delivered": 1789701449.271753,
+        "texts": [
+          {
+            "length": 12,
+            "sha256": "31a3b9875a2c83ed7dd9e3ae419d57bc46b52197a9894c0a86bce37c83a397f8",
+            "label": "存储失败时仍在页面的 C"
+          }
+        ]
+      },
+      {
+        "path": "/api/canvases/54f17ea6032e485e8338db5cbd14b470",
+        "start": 1789701534.946862,
+        "base": 1789701449263,
+        "nodes": 1,
+        "complete": 1789701534.967075,
+        "status": 200,
+        "delivered": 1789701569.967773,
+        "texts": [
+          {
+            "length": 11,
+            "sha256": "29087fc290a300b909d59d27d298eab6996b7d4acce1a5dfa6a30d97ff49ac65",
+            "label": "真实三十秒保存超时 C"
+          }
+        ]
+      }
+    ],
+    "mock_calls": [],
+    "saved": {
+      "save-a": {
+        "smart": {
+          "id": "54f17ea6032e485e8338db5cbd14b470",
+          "version": 1789701534960,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "smart-prompt",
+              "text_length": 11,
+              "text_sha256": "29087fc290a300b909d59d27d298eab6996b7d4acce1a5dfa6a30d97ff49ac65",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        },
+        "classic": {
+          "id": "bce0fd2e5cf741b3be1d72ccd181302d",
+          "version": 1789701074781,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        }
+      },
+      "save-b": {
+        "smart": {
+          "id": "748b338abb714669beeb3061418c8efe",
+          "version": 1789701075619,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "smart-prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        },
+        "classic": {
+          "id": "8f05234614a54f6aa1a836e91758f2d5",
+          "version": 1789701075637,
+          "nodes": [
+            {
+              "id": "p",
+              "type": "prompt",
+              "text_length": 1,
+              "text_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+              "image_count": 0,
+              "history": []
+            }
+          ],
+          "connections": []
+        }
+      }
+    }
+  },
+  "exports": [
+    {
+      "text": "存储失败时仍在页面的 C",
+      "sha256": "7f225c9d581402697164e97abc4d73d4a4aac45d6905176712f22c348f4e5aa3"
+    },
+    {
+      "text": "双标签 C",
+      "sha256": "cdcf7ca37b1daaaddb70f76e9d7a4e504372406f031619850f79d6edef953ae1"
+    }
+  ],
+  "browser_observations": {
+    "double_tab_409": {
+      "editor": "双标签 C",
+      "node": "双标签 C",
+      "confirmed_baseline": "C",
+      "remote": "双标签 B",
+      "automatic_resubmit": false,
+      "reload_recover": "双标签 C"
+    },
+    "identity": {
+      "b_scoped_drafts": 0,
+      "b_read_a_canvas_http": 404,
+      "a_relogin_restored": "账号 A 的未确认合成草稿"
+    },
+    "graph": {
+      "long_chinese_length": 30000,
+      "selected_exact_model": "synthetic-image-b",
+      "created_type": "smart-image-generation",
+      "after_delete_reload_nodes": 1,
+      "after_delete_reload_connections": 0
+    },
+    "classic_after_reload": "普通 Canvas 不退化合成文本",
+    "storage_failure_warning": true,
+    "timeout_30s_before_check": "uncertain",
+    "timeout_after_exact_get": "saved"
+  }
+}

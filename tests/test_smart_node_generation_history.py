@@ -49,7 +49,7 @@ class SmartNodeGenerationHistoryContractTests(unittest.TestCase):
 
     def test_02_history_is_optional_node_data_saved_by_existing_canvas_path(self):
         storage = function_source("canvasForStorage")
-        save = function_source("saveCanvas")
+        save = function_source("smartSaveSnapshot")
         normalize = function_source("normalizeLegacySmartNode")
         self.assertIn("JSON.parse(JSON.stringify(canvas || {}))", storage)
         self.assertIn("canvas.nodes = nodes", save)

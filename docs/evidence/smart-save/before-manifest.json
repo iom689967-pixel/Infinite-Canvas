@@ -1,0 +1,10 @@
+{
+  "baseline": "18101b14b563d2c4170d2acd46416d77187094db",
+  "source_directory": "mio-smart-save-diagnostic-20260918",
+  "sha256": {
+    "REPORT.md": "e0d7a33124ab854abc5ce154ef6ba03acef0f8c8f6280f76caccc07c114b6e6b",
+    "isolated-results.json": "382b43b1c3a329dfff3b1fce8a5e124230954b651a1002c83a12b42581c5e25c",
+    "full-browser-results.json": "b146d1698224bb4b21d7df56bba46ed1cb27d8eca51176f1e0945e447ca20bcb",
+    "browser-safe-evidence.json": "8f6558d5d3aa75d2482d682e9d59ccbe7c9868c975e794d3480cdd399f85cadc"
+  }
+}

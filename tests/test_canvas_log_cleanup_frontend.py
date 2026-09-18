@@ -122,9 +122,10 @@ eval({json.dumps(SHARED_JS)});
         self.assertIn("reloadSmartCanvasAfterLogConflict(data)", delete)
         self.assertIn("applySmartCanvasLogServerCanvas(data.canvas)", delete)
         self.assertNotIn("canvas.logs =", delete)
-        self.assertIn("serverCanvas.nodes", apply)
-        self.assertIn("serverCanvas.connections", apply)
-        self.assertIn("renderNodeGenerationHistoryPanel()", apply)
+        self.assertIn("smartSaveCoordinator?.observe(serverCanvas)", apply)
+        self.assertIn("smartSaveCoordinator.externalWrite", delete)
+        self.assertIn("nodes = (canvas.nodes || [])", function_source(SMART_JS, "smartSaveApply"))
+        self.assertIn("renderSmartCanvasLog()", function_source(SMART_JS, "smartSaveApply"))
         self.assertNotIn("applyMergedServerCanvas", apply)
 
     def test_busy_and_failure_paths_do_not_optimistically_remove_logs(self):

@@ -7,6 +7,7 @@
     const originalFetch = window.fetch.bind(window);
     let session = null;
     let loggedOut = false;
+    function authError(message){const error=new Error(message);error.code='auth';return error;}
     function maintenanceError(eventId) {
         const id=/^[a-f0-9]{32}$/.test(eventId || '') ? eventId : '';
         const error = new Error('工作区维护中，暂时不能提交新任务，请稍后再试。'+(id ? ` · 事件 ${id}` : ''));
@@ -37,12 +38,12 @@
     const bootstrap = parentSession ? parentSession.ready : startup ? startup.ready : originalFetch('/api/auth/me', {credentials: 'same-origin', cache: 'no-store'})
         .then(async response => {
             if (response.status === 503 && response.headers.get('X-Mio-Maintenance') === '1') throw maintenanceError(response.headers.get('X-Mio-Event-Id'));
-            if (!response.ok) { loginRequired(); throw new Error('请先登录'); }
+            if (!response.ok) { loginRequired(); throw authError('请先登录'); }
             return response.json();
         });
     const ready = bootstrap.then(current => {
             if (current.storage_namespace !== identity.storage_namespace) {
-                loginRequired(); throw new Error('登录身份已变化');
+                loginRequired(); throw authError('登录身份已变化');
             }
             session = current;
             return current;
@@ -54,7 +55,7 @@
         const method = String(options.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
         const programResource = url.pathname.startsWith('/static/') && /\.(js|css|woff2?|ttf|ico|png|jpe?g|gif|svg|webp)$/.test(url.pathname);
         if ((startup && !programResource) || !['GET', 'HEAD'].includes(method)) await ready;
-        if (loggedOut) throw new Error('请先登录');
+        if (loggedOut) throw authError('请先登录');
         const headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
         if (!['GET', 'HEAD'].includes(method)) headers.set('X-CSRF-Token', session.csrf);
         // The native RH workbench uses the same private Provider as API nodes.
@@ -76,12 +77,13 @@
             throw maintenanceError(response.headers.get('X-Mio-Event-Id')); // Keep caller input; never retry or enqueue a rejected operation.
         }
         const namespace = response.headers.get('X-Instance-Namespace');
+        if(response.status===401) window.dispatchEvent(new CustomEvent('instance-request-rejected',{detail:{method,path:url.pathname,status:401}}));
         if (response.status === 401 || (namespace && namespace !== identity.storage_namespace)) {
-            loginRequired(true); throw new Error('登录已失效或身份已变化');
+            loginRequired(true); throw authError('登录已失效或身份已变化');
         }
         return response;
     };
-    window.InstanceSession = Object.freeze({identity, ready, invalidate: loginRequired,
+    window.InstanceSession = Object.freeze({identity, ready, get active(){return !loggedOut;}, invalidate: loginRequired,
         can: capability => (session || identity).capabilities[capability] === true,
         async logout() {
             try {

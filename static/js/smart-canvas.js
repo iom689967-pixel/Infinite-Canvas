@@ -160,7 +160,6 @@ let portDragState = null;
 let quickConnectMenu = null;
 let pendingQuickConnection = null;
 let connectionEraseState = null;
-let saveTimer = null;
 const personalApiInstance=Boolean(document.getElementById('instance-context'));
 let apiProviders = [];
 let comfyWorkflows = [];
@@ -1345,7 +1344,8 @@ function canvasListUrlForProject(projectId){
     return `/static/canvas-list.html?project=${encodeURIComponent(pid)}`;
 }
 function backToCanvasList(){
-    savePromptDraftForCurrent();
+    smartSaveCoordinator?.mark(false);
+    if(smartSaveCoordinator?.protected() && !confirm('修改尚未确认保存。离开后请检查本机草稿；建议先导出。仍要离开？'))return;
     window.location.href = canvasListUrlForProject(canvas?.project || sourceProjectId || 'default');
 }
 function promptPlainText(){
@@ -5985,28 +5985,9 @@ function mergeSmartConnections(localConns, remoteConns, nodeIds){
     return out;
 }
 function applyMergedServerCanvas(serverCanvas){
-    if(!serverCanvas || !canvas) return false;
-    const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
-    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
-    const nodeIds = new Set(mergedNodes.map(n => n.id));
-    nodes = mergedNodes;
-    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
-    const cleanedState = clearCompletedNodeBusyStates();
-    const reconciledGenerationHistory = nodes.map(reconcileNodeGenerationHistory).some(Boolean);
-    const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
-    canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
-    if(canvas.title !== serverCanvas.title && serverCanvas.title){
-        canvas.title = serverCanvas.title;
-        const titleEl = document.getElementById('smartTitle');
-        if(titleEl) titleEl.textContent = canvas.title;
-    }
-    render();
-    if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
-    if(cleanedState || reconciledGenerationHistory || recoveredLoopOutputs) scheduleSave();
-    resumeSmartPendingTasks();
-    resumeJimengPendingNodes();
-    return true;
+    return smartSaveCoordinator?.observe(serverCanvas) || false;
 }
+
 async function mergeReloadCanvasNow(){
     if(!canvasId) return;
     if(dragState || selectionState){
@@ -6029,7 +6010,7 @@ function handleCanvasUpdatedMessage(data={}){
     if(!data || data.type !== 'canvas_updated') return;
     if(!canvasId || data.canvas_id !== canvasId) return;
     if(data.client_id && data.client_id === smartClientId) return; // 自己发的，忽略
-    if(canvasSyncInFlight) return; // 我正在保存，保存完成/409 合并会处理
+    // Observe newer remote versions even during a write; never change its confirmed base.
     const remoteUpdatedAt = Number(data.updated_at || 0);
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(canvas?.updated_at || 0)) return;
     scheduleCanvasMergeReload(200);
@@ -6039,7 +6020,7 @@ function startCanvasMetaPoll(){
     if(canvasMetaPollTimer) return;
     canvasMetaPollTimer = setInterval(async () => {
         if(!canvasId || !canvas) return;
-        if(canvasSyncInFlight || dragState || selectionState) return;
+        if(dragState || selectionState) return;
         try {
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/meta`);
             if(!res.ok) return;
@@ -6562,6 +6543,7 @@ async function loadCanvas(){
         if(!res.ok) return;
         const data = await res.json();
         canvas = data.canvas;
+        initializeSmartSave(data.canvas);
         undoStack.length = 0;
         redoStack.length = 0;
         rememberCanvasListProject(canvas.project || 'default');
@@ -6606,69 +6588,120 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
-        if(cleanedDetachedInputs || cleanedCompletedState || reconciledGenerationHistory || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
+        smartSaveCoordinator.loaded(cleanedDetachedInputs || cleanedCompletedState || reconciledGenerationHistory || recoveredLoopOutputs || hiddenCompletedTimers);
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
-function scheduleSave(){
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveCanvas, 450);
-}
-async function saveCanvas(){
-    if(!canvasId || !canvas) return;
+let smartSaveCoordinator = null;
+window.addEventListener('instance-request-rejected',event=>{
+    if(event.detail?.status===401 && event.detail.method==='PUT' && event.detail.path===`/api/canvases/${encodeURIComponent(canvasId)}`) smartSaveCoordinator?.rejectedAuth();
+});
+function smartSaveSnapshot(){
     savePromptDraftForCurrent();
-    nodes.forEach(node => {
-        node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
-    });
     canvas.nodes = nodes;
     canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
     canvas.viewport = {...viewport};
-    const storageCanvas = canvasForStorage();
-    canvasSyncInFlight = true;
-    try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:storageCanvas.title || tr('smart.title'),
-                icon:storageCanvas.icon || 'sparkles',
-                nodes:storageCanvas.nodes || [],
-                connections:storageCanvas.connections || [],
-                viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
-                logs:storageCanvas.logs || [],
-                settings:storageCanvas.settings,
-                base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
-                client_id:smartClientId
-            })
-        });
-        if(res.ok){
-            const data = await res.json();
-            if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
-        } else if(res.status === 409) {
-            // 冲突：别人先保存了。合并对方的状态（节点 id 合并、图片取并集，谁都不丢），
-            // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
-            const data = await res.json().catch(() => ({}));
-            const serverCanvas = data.detail?.canvas;
-            if(serverCanvas){
-                applyMergedServerCanvas(serverCanvas);
-                nodes.forEach(node => {
-                    node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
-                });
-                canvas.nodes = nodes;
-            } else if(data.detail?.updated_at) {
-                canvas.updated_at = data.detail.updated_at;
-            }
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(saveCanvas, 300);
-        }
-    } catch(e) {} finally {
-        canvasSyncInFlight = false;
+    return canvasForStorage();
+}
+function smartSaveApply(serverCanvas, {remote=false}={}){
+    // Replacement is allowed only by the coordinator: clean remote state or explicit recovery.
+    canvas = JSON.parse(JSON.stringify(serverCanvas));
+    nodes = (canvas.nodes || []).map(normalizeLegacySmartNode).filter(Boolean);
+    canvas.connections = canvas.connections || [];
+    if(canvas.settings){canvasDefaultSmartSettings=cloneSmartSettings(canvas.settings);settings=cloneSmartSettings(canvas.settings);}
+    if(canvas.viewport){viewport={...viewport,...canvas.viewport};applyViewport();}
+    const editorNode=nodes.find(n=>n.id===promptEditorNodeId);
+    if(editorNode && promptEditorTextarea){promptEditorTextarea.value=editorNode.text || '';updatePromptEditorCount(editorNode.text || '');}
+    else if(promptEditorNodeId){promptEditorNodeId='';if(promptEditorModal){promptEditorModal.hidden=true;promptEditorModal.classList.remove('open');}}
+    document.getElementById('smartTitle').textContent=canvas.title || tr('smart.title');
+    let repaired=false;
+    if(remote){
+        const cleaned=clearCompletedNodeBusyStates();
+        const reconciled=nodes.map(reconcileNodeGenerationHistory).some(Boolean);
+        repaired=recoverStuckLoopOutputsFromLogs() || cleaned || reconciled;
+    }
+    render();
+    if(smartLogModal?.classList.contains('open')) renderSmartCanvasLog();
+    if(repaired) scheduleSave();
+    if(remote){resumeSmartPendingTasks();resumeJimengPendingNodes();}
+}
+async function smartSaveGet(){
+    const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);
+    try{const res=await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`,{cache:'no-store',signal:controller.signal});
+        if(!res.ok)throw new Error('无法核对服务器，请保留草稿');return (await res.json()).canvas;
+    }finally{clearTimeout(timer);}
+}
+function renderSmartSaveState(state){
+    canvasSyncInFlight=state.inFlight;
+    let panel=document.getElementById('smartSaveState');
+    if(!panel){
+        panel=document.createElement('section');panel.id='smartSaveState';panel.className='smart-save-state nodrag nopan';
+        panel.setAttribute('aria-label','画布保存状态');
+        panel.innerHTML='<div role="status" aria-live="polite"></div><small></small><div class="smart-save-actions"></div>';
+        document.body.appendChild(panel);
+    }
+    const stateKey=JSON.stringify(state);
+    if(panel.dataset.renderedState===stateKey)return;
+    panel.dataset.renderedState=stateKey;
+    const labels={saved:'已确认保存',saving:'保存中',unsaved:'未保存',conflict:'保存冲突：本地修改已保留，自动保存已暂停',
+        uncertain:'保存结果待核对：服务器可能已写入，请先核对',error:'保存失败：草稿未确认',auth:'登录已失效：请重新登录后检查草稿',
+        maintenance:'维护中：保存尚未确认',recovery:'发现未确认的本机草稿，请选择恢复或保留'};
+    panel.dataset.state=state.status;panel.querySelector('[role=status]').textContent=labels[state.status] || '未保存';
+    panel.querySelector('small').textContent=state.storageError?'本机草稿保护不可用：存储失败或超过上限，请立即导出；不要关闭页面。':
+        state.hasDraft?'未确认草稿已暂存于此浏览器；清除浏览器数据后无法恢复。':'本机草稿与服务器确认状态分别显示。';
+    const actions=panel.querySelector('.smart-save-actions');actions.replaceChildren();
+    const button=(text,fn,disabled=false)=>{const el=document.createElement('button');el.type='button';el.textContent=text;el.disabled=disabled;
+        el.onclick=()=>Promise.resolve(fn()).catch(()=>toast('操作未完成，草稿仍保留，请核对服务器。'));actions.appendChild(el);};
+    if(state.status==='recovery'){
+        const select=document.createElement('select');select.setAttribute('aria-label','未确认草稿');
+        state.recoveries.forEach(d=>{const op=document.createElement('option');op.value=d.key;op.textContent=new Date(d.at).toLocaleString();select.appendChild(op);});actions.appendChild(select);
+        button('恢复本机草稿',async()=>{if(smartSaveCoordinator.restore(select.value))await smartSaveCoordinator.resolveRestored();},state.hasDraft || state.inFlight);
+        button('保留旧草稿，继续保存当前页面',async()=>{if(await smartSaveCoordinator.keepCurrent())await saveCanvas();},state.inFlight);
+        if(state.hasDraft){const note=document.createElement('small');note.textContent='当前页面也有新修改或恢复结果。请先导出，或继续保存当前页面；旧草稿会单独保留。';actions.appendChild(note);}
+    }
+    if(state.status!=='saved'){
+        button('导出当前草稿',exportSmartUnsavedDraft);
+        button('核对服务器',()=>smartSaveCoordinator.check(),state.inFlight);
+        if(!['conflict','uncertain','recovery','auth'].includes(state.status))button('保存当前修改',async()=>{if(await smartSaveCoordinator.check())await saveCanvas();},state.inFlight);
+        if(['conflict','error','maintenance'].includes(state.status) || state.status==='recovery' && state.hasDraft)button('放弃本地修改并加载服务器',async()=>{
+            if(confirm('放弃当前未确认修改？建议先导出草稿。此操作不会覆盖服务器。'))await smartSaveCoordinator.discard();
+        },state.inFlight);
     }
 }
+function exportSmartUnsavedDraft(){
+    // Offline copy only; never transplant task/nonce bindings or resume a copied task.
+    const omitted=new Set(['pendingTasks','jimengPending','generationHistory','activeGenerationId','currentGenerationId','currentGenerationChangedAt',
+        'taskId','taskIds','task_id','submitId','request_id','generation_id','generationId','nonce','client_nonce','_runMetaTargetId','running','pending','queued','logs','api_key','apiKey','authorization','cookie','password','csrf']);
+    const clean=JSON.parse(JSON.stringify(smartSaveSnapshot(),(key,value)=>omitted.has(key)?undefined:value));
+    delete clean.id;delete clean.updated_at;
+    const url=URL.createObjectURL(new Blob([JSON.stringify({kind:'smart-draft-copy',canvas:clean},null,2)],{type:'application/json'}));
+    const a=document.createElement('a');a.href=url;a.download='smart-unsaved-draft.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function initializeSmartSave(serverCanvas){
+    smartSaveCoordinator?.dispose();
+    smartSaveCoordinator=new SmartSave.Coordinator({id:canvasId,server:serverCanvas,
+        scope:window.InstanceSession?.identity.storage_namespace || `local:${location.origin}`,storage:localStorage,clientId:smartClientId,
+        capture:smartSaveSnapshot,apply:smartSaveApply,onState:renderSmartSaveState,
+        onVersion:version=>{canvas.updated_at=version;},busy:()=>nodes.some(smartNodeInFlight),get:smartSaveGet,
+        put:async body=>{
+            const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);
+            try{const res=await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:controller.signal});
+                const data=await res.json().catch(()=>({}));return {status:res.status,canvas:data.canvas || data.detail?.canvas,maintenance:data.detail?.code==='maintenance'};
+            }finally{clearTimeout(timer);}
+        }
+    });
+}
+function scheduleSave(){
+    smartSaveCoordinator?.mark();
+}
+async function saveCanvas(){
+    if(!canvasId || !canvas || !smartSaveCoordinator)return false;
+    // Storage serialization remains centralized; transient log-preview nodes are filtered by canvasForStorage.
+    return smartSaveCoordinator.flush();
+}
+
 function imageMetaFromNode(node){
     return {};
 }
@@ -8025,31 +8058,12 @@ function smartLogPreviewNode(url, kind='image'){
 }
 const smartCanvasLogDeleteBusy = new Set();
 async function flushSmartCanvasBeforeLogDelete(){
-    if(saveTimer){
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await saveCanvas();
-    }
-    if(canvasSyncInFlight || saveTimer){
-        throw new Error(tr('canvas.logSaveInProgress'));
-    }
+    if(!await saveCanvas() || smartSaveCoordinator?.protected())throw new Error(tr('canvas.logSaveInProgress'));
 }
 function applySmartCanvasLogServerCanvas(serverCanvas){
-    if(!serverCanvas || !canvas || String(serverCanvas.id || '') !== String(canvasId || '')) return false;
-    const localViewport = {...viewport};
-    canvas = {...canvas, ...serverCanvas, viewport:localViewport};
-    canvas.logs = Array.isArray(serverCanvas.logs) ? serverCanvas.logs : [];
-    nodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
-    canvas.nodes = nodes;
-    canvas.connections = Array.isArray(serverCanvas.connections) ? serverCanvas.connections : [];
-    canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
-    render();
-    if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
-    if(nodeGenerationHistoryPanelNodeId) renderNodeGenerationHistoryPanel();
-    resumeSmartPendingTasks();
-    resumeJimengPendingNodes();
-    return true;
+    return smartSaveCoordinator?.observe(serverCanvas) || false;
 }
+
 async function reloadSmartCanvasAfterLogConflict(data={}){
     const included = window.CanvasLogCleanup?.serverCanvas(data);
     if(included && applySmartCanvasLogServerCanvas(included)) return true;
@@ -8079,6 +8093,7 @@ async function deleteSmartCanvasLogEntry(logId, deleteMedia=false){
     try {
         await flushSmartCanvasBeforeLogDelete();
         if(!window.CanvasLogCleanup) throw new Error(tr('canvas.logDeleteFailed'));
+        await smartSaveCoordinator.externalWrite(async()=>{
         const {response, data} = await CanvasLogCleanup.request({
             canvasId,
             logId,
@@ -8099,6 +8114,7 @@ async function deleteSmartCanvasLogEntry(logId, deleteMedia=false){
         }
         renderSmartCanvasLog();
         toast(smartCanvasLogDeleteSummary(data));
+        });
     } catch(err) {
         toast(err?.message || tr('canvas.logDeleteFailed'));
     } finally {
@@ -8253,8 +8269,6 @@ function closePromptEditor(){
     promptEditorModal.hidden = true;
     promptEditorModal.classList.remove('open');
     document.body.classList.remove('prompt-editor-open');
-    clearTimeout(saveTimer);
-    saveTimer = null;
     void saveCanvas();
 }
 function ensurePromptEditor(){
@@ -20588,10 +20602,16 @@ async function cancelSmartImageGeneration(nodeId){
     toast(localOnly ? '已停止本地等待；任务已提交服务商，可能仍会继续执行。' : '生成已取消');
     return true;
 }
-window.addEventListener('beforeunload', () => {
-    [...activeSmartTaskControllers.keys()].forEach(cancelSmartCanvasTask);
+window.addEventListener('beforeunload', event => {
+    // Revoked sessions must reach login; their last synchronous draft is already scoped and persisted.
+    if(window.InstanceSession?.active===false)return;
+    smartSaveCoordinator?.mark(false);
+    if(smartSaveCoordinator?.protected()){event.preventDefault();event.returnValue='';}
 });
 window.addEventListener('pagehide', () => {
+    smartSaveCoordinator?.dispose();
+    // Leaving/reloading is not a user request to cancel the original server task.
+    [...activeSmartTaskControllers.values()].forEach(controller=>controller.abort());
     [...activePromptLLMRuns.keys()].forEach(nodeId => cancelPromptLLMNode(nodeId, {silent:true, keepalive:true}));
 });
 function smartTaskDelay(ms, signal){
@@ -23343,6 +23363,7 @@ window.addEventListener('studio-lang-change', () => {
     render();
 });
 window.onload = async () => {
+    if(window.InstanceSession)await window.InstanceSession.ready;
     applyTheme(localStorage.getItem('studio_theme') || localStorage.getItem('canvas_theme') || 'light');
     loadPromptPresets();
     loadPromptTemplateGroups();
