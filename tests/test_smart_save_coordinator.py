@@ -21,3 +21,12 @@ class SmartSaveCoordinatorTests(unittest.TestCase):
         html=(root/'static/smart-canvas.html').read_text()
         self.assertLess(html.index(asset),html.index('/static/js/smart-canvas.js'))
         self.assertNotIn(asset,(root/'static/canvas.html').read_text())
+
+    def test_smart_draft_entry_is_smart_only_and_cache_busted(self):
+        root=Path(__file__).resolve().parents[1]
+        smart=(root/'static/smart-canvas.html').read_text()
+        ordinary=(root/'static/canvas.html').read_text()
+        self.assertIn('id="smartDraftToggle"',smart)
+        self.assertIn('hidden aria-expanded="false"',smart)
+        self.assertIn('smart-draft-toggle.1',smart)
+        self.assertNotIn('smartDraftToggle',ordinary)

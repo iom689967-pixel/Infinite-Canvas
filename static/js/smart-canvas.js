@@ -6633,44 +6633,71 @@ async function smartSaveGet(){
         if(!res.ok)throw new Error('无法核对服务器，请保留草稿');return (await res.json()).canvas;
     }finally{clearTimeout(timer);}
 }
+let smartDraftPanelOpen=false;
+let smartSaveViewState=null;
+function setSmartDraftPanelOpen(open){
+    smartDraftPanelOpen=!!open;
+    if(smartSaveViewState)renderSmartSaveState(smartSaveViewState);
+}
 function renderSmartSaveState(state){
     canvasSyncInFlight=state.inFlight;
+    smartSaveViewState=state;
+    const recoveries=Array.isArray(state.recoveries)?state.recoveries:[];
+    const draftToggle=document.getElementById('smartDraftToggle');
+    const draftNeedsAttention=recoveries.length>0&&(!['unsaved','saving','saved'].includes(state.status)||state.storageError);
+    if(!recoveries.length)smartDraftPanelOpen=false;
+    if(draftToggle){
+        draftToggle.hidden=!recoveries.length;
+        draftToggle.classList.toggle('active',recoveries.length>0&&smartDraftPanelOpen);
+        draftToggle.classList.toggle('attention',draftNeedsAttention);
+        draftToggle.setAttribute('aria-expanded',String(recoveries.length>0&&smartDraftPanelOpen));
+        draftToggle.setAttribute('aria-label',`${draftNeedsAttention?'草稿待处理':'本机草稿'} ${recoveries.length} 份`);
+        const label=draftToggle.querySelector('.smart-draft-label');if(label)label.textContent=draftNeedsAttention?'草稿待处理':'草稿';
+        const count=draftToggle.querySelector('.smart-draft-count');if(count){count.textContent=String(recoveries.length);count.setAttribute('aria-label',`${recoveries.length} 份草稿`);}
+        draftToggle.onclick=()=>setSmartDraftPanelOpen(!smartDraftPanelOpen);
+    }
     let panel=document.getElementById('smartSaveState');
     // Normal autosave is silent; only states requiring attention get a panel.
     // Keep the coordinator and leave protection independent of presentation.
-    if(['unsaved','saving','saved'].includes(state.status) && !state.storageError){
+    const normal=['unsaved','saving','saved'].includes(state.status);
+    const recoveryOnly=state.status==='recovery'&&!state.storageError;
+    const showingDrafts=recoveries.length>0&&smartDraftPanelOpen;
+    if((normal&&!state.storageError&&!showingDrafts)||(recoveryOnly&&!showingDrafts)){
         panel?.remove();
         return;
     }
     if(!panel){
         panel=document.createElement('section');panel.id='smartSaveState';panel.className='smart-save-state nodrag nopan';
         panel.setAttribute('aria-label','画布保存状态');
-        panel.innerHTML='<div role="status" aria-live="polite"></div><small></small><div class="smart-save-actions"></div>';
+        panel.innerHTML='<div class="smart-save-heading"><div role="status" aria-live="polite"></div><button class="smart-save-collapse" type="button" hidden>收起</button></div><small></small><div class="smart-save-actions"></div>';
         document.body.appendChild(panel);
     }
-    const stateKey=JSON.stringify(state);
+    const stateKey=JSON.stringify({state,draftsOpen:smartDraftPanelOpen});
     if(panel.dataset.renderedState===stateKey)return;
     panel.dataset.renderedState=stateKey;
     const labels={conflict:'保存冲突：本地修改已保留，自动保存已暂停',
         uncertain:'保存结果待核对：服务器可能已写入，请先核对',error:'保存失败：草稿未确认',auth:'登录已失效：请重新登录后检查草稿',
         maintenance:'维护中：保存尚未确认',recovery:'发现未确认的本机草稿，请选择恢复或保留'};
-    panel.dataset.state=state.status;panel.querySelector('[role=status]').textContent=labels[state.status] || (state.storageError?'本机草稿保护失败':'保存状态需要处理');
+    panel.dataset.state=state.status;panel.dataset.drafts=showingDrafts?'open':'closed';
+    panel.querySelector('[role=status]').textContent=state.storageError?'本机草稿保护失败':normal&&showingDrafts?'本机草稿':labels[state.status] || '保存状态需要处理';
+    const collapse=panel.querySelector('.smart-save-collapse');collapse.hidden=!showingDrafts;collapse.onclick=()=>setSmartDraftPanelOpen(false);
     panel.querySelector('small').textContent=state.storageError?'本机草稿保护不可用：存储失败或超过上限，请立即导出；不要关闭页面。':
+        showingDrafts?`${recoveries.length} 份未确认草稿保留在此浏览器；清除浏览器数据后无法恢复。`:
         state.hasDraft?'未确认草稿已暂存于此浏览器；清除浏览器数据后无法恢复。':'本机草稿与服务器确认状态分别显示。';
     const actions=panel.querySelector('.smart-save-actions');actions.replaceChildren();
     const button=(text,fn,disabled=false)=>{const el=document.createElement('button');el.type='button';el.textContent=text;el.disabled=disabled;
         el.onclick=()=>Promise.resolve(fn()).catch(()=>toast('操作未完成，草稿仍保留，请核对服务器。'));actions.appendChild(el);};
-    if(state.status==='recovery'){
+    if(showingDrafts){
         const select=document.createElement('select');select.setAttribute('aria-label','未确认草稿');
-        state.recoveries.forEach(d=>{const op=document.createElement('option');op.value=d.key;op.textContent=new Date(d.at).toLocaleString();select.appendChild(op);});actions.appendChild(select);
+        recoveries.forEach(d=>{const op=document.createElement('option');op.value=d.key;op.textContent=new Date(d.at).toLocaleString();select.appendChild(op);});actions.appendChild(select);
         button('恢复本机草稿',async()=>{if(smartSaveCoordinator.restore(select.value))await smartSaveCoordinator.resolveRestored();},state.hasDraft || state.inFlight);
-        button('保留旧草稿，继续保存当前页面',async()=>{if(await smartSaveCoordinator.keepCurrent())await saveCanvas();},state.inFlight);
+        if(state.status==='recovery')button('保留旧草稿，继续保存当前页面',async()=>{if(await smartSaveCoordinator.keepCurrent())await saveCanvas();},state.inFlight);
         if(state.hasDraft){const note=document.createElement('small');note.textContent='当前页面也有新修改或恢复结果。请先导出，或继续保存当前页面；旧草稿会单独保留。';actions.appendChild(note);}
     }
-    if(state.status!=='saved' || state.storageError){
+    if(state.status!=='saved' || state.storageError || showingDrafts){
         button('导出当前草稿',exportSmartUnsavedDraft);
         button('核对服务器',()=>smartSaveCoordinator.check(),state.inFlight);
-        if(!['conflict','uncertain','recovery','auth'].includes(state.status))button('保存当前修改',async()=>{if(await smartSaveCoordinator.check())await saveCanvas();},state.inFlight);
+        if(state.status!=='saved'&&!['conflict','uncertain','recovery','auth'].includes(state.status))button('保存当前修改',async()=>{if(await smartSaveCoordinator.check())await saveCanvas();},state.inFlight);
         if(['conflict','error','maintenance'].includes(state.status) || state.status==='recovery' && state.hasDraft)button('放弃本地修改并加载服务器',async()=>{
             if(confirm('放弃当前未确认修改？建议先导出草稿。此操作不会覆盖服务器。'))await smartSaveCoordinator.discard();
         },state.inFlight);
