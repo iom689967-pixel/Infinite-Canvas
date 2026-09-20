@@ -12,6 +12,9 @@ import time
 
 from instance_maintenance import Maintenance
 
+# Bound parsed collections as well as the existing 64 KiB private-file limit.
+MAX_APPROVAL_RECORDS = 512
+
 
 def fingerprint(row):
     # This is the canonical format used by the pre-existing private audit.
@@ -58,13 +61,14 @@ def validate_approval(value, state, now):
     if not value['created_at'] <= now < value['expires_at'] <= value['created_at'] + 7200:
         raise ValueError('授权过期或超过两小时窗口')
     rows = value['records']
-    if not isinstance(rows, list) or len(rows) != 4 or value['remote_status_and_cost_unknown'] is not True:
-        raise ValueError('必须明确批准四条历史未知记录')
+    if (not isinstance(rows, list) or not 1 <= len(rows) <= MAX_APPROVAL_RECORDS
+            or value['remote_status_and_cost_unknown'] is not True):
+        raise ValueError('必须明确批准有限、非空的历史未知记录集合（最多512条）')
     if any(not isinstance(r, dict) or set(r) != {'id', 'fingerprint'}
-           or not re.fullmatch('[0-9a-f]{32}', str(r['id']))
-           or not re.fullmatch('[0-9a-f]{64}', str(r['fingerprint'])) for r in rows):
+           or not isinstance(r['id'], str) or not re.fullmatch('[0-9a-f]{32}', r['id'])
+           or not isinstance(r['fingerprint'], str) or not re.fullmatch('[0-9a-f]{64}', r['fingerprint']) for r in rows):
         raise ValueError('授权记录身份无效')
-    if len({r['id'] for r in rows}) != 4 or len({r['fingerprint'] for r in rows}) != 4:
+    if len({r['id'] for r in rows}) != len(rows) or len({r['fingerprint'] for r in rows}) != len(rows):
         raise ValueError('授权记录重复')
 
 
@@ -174,7 +178,7 @@ def seal_for_interruption(root, gateway_db, instances_root, approval_file, sourc
                 audit = {'schema': 1, 'status': 'prepared', 'approval': value,
                          'approval_sha256': approval_hash, 'sealed_epoch': next_state['epoch'],
                          'restart_safe': False, 'remote_status_and_cost_unknown': True,
-                         'local_quiescent': True, 'historical_unknowns_retained': 4,
+                         'local_quiescent': True, 'historical_unknowns_retained': len(actual),
                          'original_blockers': ['llm_remote_status_requires_reconcile']}
                 atomic_audit(audit_file, audit, exclusive=True)
                 atomic_state(gate, next_state)

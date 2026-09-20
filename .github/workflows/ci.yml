@@ -48,6 +48,17 @@ jobs:
           path: ${{ runner.temp }}/mio-interruption-evidence.json
           if-no-files-found: error
 
+      - name: Rehearse exact seven-record interruption on unmodified 2c6c2df as real root
+        run: sudo "$(command -v python)" -B tests/rehearse_interruption_upgrade.py --source-revision 2c6c2df062efbf6443aa5fc8d31998fd725c0e3b --historical-count 7 --caddy "$RUNNER_TEMP/mio-interruption-caddy" --evidence "$RUNNER_TEMP/mio-seven-record-interruption-evidence.json"
+
+      - name: Preserve seven-record upgrade and rollback evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-seven-record-interruption-evidence
+          path: ${{ runner.temp }}/mio-seven-record-interruption-evidence.json
+          if-no-files-found: error
+
       - name: Run project checks
         run: ./scripts/check.sh
 

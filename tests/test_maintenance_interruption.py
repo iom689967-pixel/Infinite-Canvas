@@ -15,6 +15,8 @@ import maintenance_interruption as command
 
 
 class InterruptionTests(unittest.TestCase):
+    record_count = 4
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name).resolve();self.control=self.root/'control';initialize(self.control)
@@ -28,7 +30,7 @@ class InterruptionTests(unittest.TestCase):
             db.execute('INSERT INTO instances VALUES (?,?,?,?,?)',(self.iid,str(self.data),self.gate.pid,self.gate.start,'running'))
         with self.gate.db() as db:
             for iid in ('gateway',self.iid):db.execute('INSERT INTO processes VALUES (?,?,?)',(iid,self.gate.pid,self.gate.start))
-        for _ in range(4):self.gate.uncertain_llm(self.iid)
+        for _ in range(self.record_count):self.gate.uncertain_llm(self.iid)
         self.before=self.rows();now=time.time()
         self.approval=dict(schema=1,window_id='a'*32,epoch=1,source_revision='a'*40,target_revision='b'*40,
             created_at=now-1,expires_at=now+300,remote_status_and_cost_unknown=True,
@@ -53,13 +55,15 @@ class InterruptionTests(unittest.TestCase):
 
     def test_exact_records_seal_but_default_status_still_unsafe(self):
         result=self.run_command();self.assertTrue(result['interruption_authorized']);self.assertTrue(result['local_quiescent'])
-        self.assertEqual(result['historical_unknowns_retained'],4);self.assertFalse(result['restart_safe'])
+        self.assertEqual(result['historical_unknowns_retained'],self.record_count);self.assertFalse(result['restart_safe'])
         self.assertEqual(self.gate.state(),{'schema':1,'phase':'sealed','epoch':2})
         self.assertEqual(self.rows(),self.before)
         status=inspect(self.gate,[self.data]);self.assertFalse(status['restart_safe'])
         self.assertIn('llm_remote_status_requires_reconcile',status['blockers'])
         audit=json.loads((self.control/'interruption-audit'/('a'*32+'.json')).read_text())
         self.assertEqual(audit['status'],'committed');self.assertEqual(audit['approval'],self.approval)
+        self.assertEqual(audit['historical_unknowns_retained'],self.record_count)
+        self.assertFalse(audit['restart_safe']);self.assertTrue(audit['remote_status_and_cost_unknown'])
 
     def test_same_count_different_id_or_fingerprint_denied(self):
         for field in ('id','fingerprint'):
@@ -69,9 +73,59 @@ class InterruptionTests(unittest.TestCase):
             self.approval['records'][0][field]=old
         self.assertEqual(self.gate.state()['phase'],'draining');self.assertEqual(self.rows(),self.before)
 
-    def test_fifth_unknown_is_never_implicitly_approved(self):
+    def test_extra_unknown_is_never_implicitly_approved(self):
         self.gate.uncertain_llm(self.iid);result=self.run_command()
-        self.assertFalse(result['interruption_authorized']);self.assertEqual(result['historical_unknowns_retained'],5)
+        self.assertFalse(result['interruption_authorized']);self.assertEqual(result['historical_unknowns_retained'],self.record_count+1)
+        self.assertIn('historical_unknown_set_mismatch',result['blockers'])
+        self.assertEqual(self.gate.state()['phase'],'draining')
+
+    def test_missing_approved_record_is_not_a_subset_authorization(self):
+        self.approval['records'].pop();self.save()
+        result=self.run_command();self.assertFalse(result['interruption_authorized'])
+        self.assertIn('historical_unknown_set_mismatch',result['blockers'])
+        self.assertEqual(self.rows(),self.before)
+
+    def test_missing_actual_record_is_not_authorized(self):
+        # Synthetic fixture mutation only: approved must also not be a superset.
+        with self.gate.db() as db:db.execute('DELETE FROM uncertainties WHERE id=?',(self.before[0]['id'],))
+        remaining=self.rows();result=self.run_command()
+        self.assertFalse(result['interruption_authorized'])
+        self.assertIn('historical_unknown_set_mismatch',result['blockers'])
+        self.assertEqual(self.rows(),remaining)
+
+    def test_invalid_record_sets_rejected_without_audit_or_state_change(self):
+        original=self.approval['records']
+        invalid=[[],None,{},'all',[original[0],original[0]],
+            [original[0],dict(id=original[0]['id'],fingerprint='f'*64)],
+            [original[0],dict(id='f'*32,fingerprint=original[0]['fingerprint'])],
+            [dict(id='*',fingerprint='f'*64)],[dict(id='a'*32)],
+            [dict(id='a'*32,fingerprint='b'*64,ignore_all=True)],
+            [dict(id='A'*32,fingerprint='b'*64)],
+            [dict(id='a'*32,fingerprint='b'*63)],
+            [dict(id=int('1'*32),fingerprint='b'*64)],
+            [dict(id='a'*32,fingerprint=int('1'*64))]]
+        for records in invalid:
+            with self.subTest(records=records):
+                self.approval['records']=records;self.save()
+                with self.assertRaises(ValueError):self.run_command()
+                self.assertEqual(self.gate.state()['phase'],'draining');self.assertEqual(self.rows(),self.before)
+                self.assertFalse((self.control/'interruption-audit').exists())
+        self.approval['records']=original
+
+    def test_record_limit_and_private_file_size_boundaries(self):
+        # Independent boundary expectation, not derived from the implementation.
+        self.approval['records']=[dict(id=f'{i:032x}',fingerprint=f'{i:064x}') for i in range(512)]
+        command.validate_approval(self.approval,self.gate.state(),time.time())
+        self.approval['records'].append(dict(id=f'{512:032x}',fingerprint=f'{512:064x}'))
+        with self.assertRaises(ValueError):command.validate_approval(self.approval,self.gate.state(),time.time())
+        self.approval['records']=[dict(id=r['id'],fingerprint=command.fingerprint(r)) for r in self.before]
+        raw=json.dumps(self.approval).encode();self.file.write_bytes(raw+b' '*(65536-len(raw)))
+        self.assertEqual(command.private_json(self.file)[0],self.approval)
+        self.file.write_bytes(raw+b' '*(65537-len(raw)))
+        with self.assertRaises(ValueError):self.run_command()
+        self.file.write_text('{invalid')
+        with self.assertRaises(ValueError):self.run_command()
+        self.assertEqual(self.gate.state()['phase'],'draining');self.assertEqual(self.rows(),self.before)
 
     def test_all_local_activity_kinds_block_and_timeout_retains_lease(self):
         for kind in ('http','read','local_write','recovery','runner','stream','upload','result','model'):
@@ -181,3 +235,8 @@ class InterruptionTests(unittest.TestCase):
             self.real_running_source(self.gate,self.db,self.root)
         with patch('os.readlink',cwd),patch('pathlib.Path.read_bytes',return_value=b'/python\0/other/public_beta_worker.py\0serve\0'):
             with self.assertRaises(ValueError):self.real_running_source(self.gate,self.db,self.root)
+
+
+class SevenRecordInterruptionTests(InterruptionTests):
+    """Repeat all safety gates with seven; count never substitutes for identity."""
+    record_count = 7

@@ -1,4 +1,4 @@
-"""Actual root CLI -> unmodified f598 processes -> backup/roll/reopen/rollback.
+"""Actual root CLI -> unmodified old processes -> backup/roll/reopen/rollback.
 
 Run as root only on an isolated Linux CI runner. All credentials and assets are
 synthetic. Caddy is a temporary, fixed TLS proxy; no reload/barrier is used.
@@ -27,9 +27,13 @@ from instance_maintenance import Maintenance
 from maintenance_interruption import fingerprint
 
 OLD='f598c15fb46d81968d3f80c2a66e646f2d2ab685'
+SMART_SAVE='2c6c2df062efbf6443aa5fc8d31998fd725c0e3b'
 
 
 class InterruptionRehearsal(Rehearsal):
+    source_revision = OLD
+    historical_count = 4
+
     def git(self,*args):
         return subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),*args],text=True).strip()
 
@@ -76,7 +80,7 @@ class InterruptionRehearsal(Rehearsal):
 
     def consistent_backup(self):
         destination=self.root/'consistent-backup';destination.mkdir(mode=0o700)
-        count=0
+        count=0;ordinary={}
         for folder in ('gateway','instances','control'):
             base=self.root/folder
             files=[p for p in base.rglob('*') if p.is_file() and not p.name.endswith(('-wal','-shm'))]
@@ -89,7 +93,12 @@ class InterruptionRehearsal(Rehearsal):
                 else:
                     before=hashlib.sha256(src.read_bytes()).hexdigest();shutil.copy2(src,dst)
                     assert before==hashlib.sha256(src.read_bytes()).hexdigest()==hashlib.sha256(dst.read_bytes()).hexdigest()
-        self.record('consistent_backup',online_sqlite_backups=count,ordinary_files_stable=True,remote_unknowns_retained=4)
+                    ordinary[src]=before
+        assert all(hashlib.sha256(src.read_bytes()).hexdigest()==digest for src,digest in ordinary.items())
+        with sqlite3.connect(destination/'control/activity/journal.sqlite3') as db:
+            db.row_factory=sqlite3.Row
+            assert [dict(r) for r in db.execute('SELECT id,instance,pid,start,reason FROM uncertainties ORDER BY id')]==self.original_unknowns
+        self.record('consistent_backup',online_sqlite_backups=count,ordinary_files_stable=True,remote_unknowns_retained=len(self.original_unknowns))
 
     def roll(self,program,revision):
         before=self.accounts();self.stop('gateway');self.stop('supervisor')
@@ -123,7 +132,10 @@ class InterruptionRehearsal(Rehearsal):
     def execute(self):
         assert os.geteuid()==0 and sys.platform=='linux','Requires real Linux root, no sandbox substitute'
         target=self.git('rev-parse','HEAD');assert not self.git('status','--porcelain')
-        old=self.root/'f598-source';self.git('worktree','add','--detach',str(old),OLD);self.old=old
+        source=self.source_revision
+        old=self.root/'old-source';self.git('worktree','add','--detach',str(old),source);self.old=old
+        assert self.git('-C',str(old),'rev-parse','HEAD')==source
+        assert not self.git('-C',str(old),'status','--porcelain')
         self.control=self.root/'control';self.env['MIO_MAINTENANCE_ROOT']=str(self.control)
         self.cli('init','--worker-uid','0','--worker-gid','0');self.cli('open');self.gate=Maintenance(self.control)
         self.run(old,"from public_beta_store import BetaConfig,GatewayStore;from public_beta_supervisor import Supervisor;"
@@ -159,11 +171,14 @@ class InterruptionRehearsal(Rehearsal):
         # Fixture unknown receipts are created before preparing the approval, by
         # the actual old journal API. No production record is synthesized.
         self.run(old,'from instance_maintenance import Maintenance;g=Maintenance('+repr(str(self.control))+');'
-            +';'.join('g.uncertain_llm('+repr(before[0]['instance_id'])+')' for _ in range(4)))
+            +';'.join('g.uncertain_llm('+repr(before[0]['instance_id'])+')' for _ in range(self.historical_count)))
         self.original_unknowns=self.unknowns();self.approved=[dict(id=r['id'],fingerprint=fingerprint(r)) for r in self.original_unknowns]
-        self.record('old_f598_native',source_revision=OLD,root_cli=True,source_unmodified=True,
+        assert len(self.approved)==self.historical_count
+        original_gateway=self.procs['gateway'].pid;original_supervisor=self.procs['supervisor'].pid
+        self.record('old_native',source_revision=source,root_cli=True,source_unmodified=True,
+            tool_revision=target,tool_directory=str(ROOT),source_directory=str(old),historical_count=self.historical_count,
             gateway_pid=self.procs['gateway'].pid,workers=[r['pid'] for r in before])
-        self.cli('draining');approval=self.authorization(OLD,target,'approval-forward.json')
+        self.cli('draining');approval=self.authorization(source,target,'approval-forward.json')
         args=self.seal_args(approval,old,ROOT,'3')
         # Actual CLI termination while blocked on the admission lock. It cannot
         # print success, mutate state, or discard original unknowns.
@@ -180,37 +195,55 @@ class InterruptionRehearsal(Rehearsal):
             refused=self.cli(*self.seal_args(approval,old,ROOT),expected=3);assert not refused['interruption_authorized']
             sealing=pool.submit(self.cli,*args);time.sleep(.15);assert not sealing.done();release.set()
             assert saving.result(timeout=5).status_code==200;result=sealing.result(timeout=10)
-        assert result['interruption_authorized'] and not result['restart_safe'];assert result['historical_unknowns_retained']==4
+        assert result['interruption_authorized'] and not result['restart_safe'];assert result['historical_unknowns_retained']==self.historical_count
         assert [r['pid'] for r in self.accounts()]==[r['pid'] for r in before]
+        assert self.procs['gateway'].pid==original_gateway and self.procs['supervisor'].pid==original_supervisor
+        forward_audit=json.loads((self.control/'interruption-audit'/(result['window_id']+'.json')).read_text())
+        assert forward_audit['status']=='committed' and forward_audit['historical_unknowns_retained']==self.historical_count
+        assert self.unknowns()==self.original_unknowns
         status=self.cli('status','--gateway-db',str(self.root/'gateway/gateway.sqlite3'),'--instances-root',str(self.root/'instances'))
         assert not status['restart_safe'] and 'llm_remote_status_requires_reconcile' in status['blockers']
         for method,path in [('GET','/api/config'),('PUT','/api/canvases/'+cid),('POST','/api/canvas-image-tasks/'+tid+'/refresh'),('GET',job['result']['images'][0])]:
             assert client.request(method,path,json={}).status_code==503
         assert client.get('/healthz').status_code==200
         self.record('sealed_old_without_restart',**result,default_status_restart_safe=False,concurrent_save_completed=True,
-            cli_abnormal_exit_failed_closed=True,expected_503=4,health_200=True,caddy_reloads=0)
+            cli_abnormal_exit_failed_closed=True,expected_503=4,health_200=True,caddy_reloads=0,
+            gateway_supervisor_workers_not_restarted=True,audit_count_verified=self.historical_count)
         self.consistent_backup();self.roll(ROOT,target)
         self.verify(client,cid,tid,job['result']['images'][0],pf,pb)
         self.cli(*args,expected=2) # consumed/open/epoch-changed approval never reused
         self.record('new_reopened',maintenance='open',models=3,history_count=1,media_readable=True,
             provider_bytes_preserved=True,unknown_fingerprints_preserved=True)
         # Separate, bounded rollback window with inverse source/target binding.
-        self.cli('draining');rollback=self.authorization(target,OLD,'approval-rollback.json')
-        self.cli(*self.seal_args(rollback,ROOT,old));self.roll(old,OLD)
+        self.cli('draining');rollback=self.authorization(target,source,'approval-rollback.json')
+        reverse=self.cli(*self.seal_args(rollback,ROOT,old))
+        assert reverse['window_id']!=result['window_id'] and reverse['epoch']!=result['epoch']
+        reverse_audit=json.loads((self.control/'interruption-audit'/(reverse['window_id']+'.json')).read_text())
+        assert reverse_audit['status']=='committed' and reverse_audit['historical_unknowns_retained']==self.historical_count
+        assert reverse_audit['approval']['source_revision']==target and reverse_audit['approval']['target_revision']==source
+        assert not reverse['restart_safe'] and reverse['interruption_authorized']
+        self.record('independent_reverse_window',window_id=reverse['window_id'],epoch=reverse['epoch'],
+            source_revision=target,target_revision=source,tool_revision=target,
+            historical_unknowns_retained=self.historical_count,restart_safe=False,interruption_authorized=True)
+        self.roll(old,source)
         self.verify(client,cid,tid,job['result']['images'][0],pf,pb)
         assert self.unknowns()==self.original_unknowns
         assert sum(k=='create' for k,_,_ in self.mock.calls)==1
         assert not subprocess.check_output(['git','-c','safe.directory='+str(old),'-C',str(old),'status','--porcelain'],text=True).strip()
         self.record('rollback_reopened',maintenance='open',database_restore=False,unknown_fingerprints_preserved=True,
-            original_mock_generations=1,generation_replay=0,real_models=0,real_uploads=0,real_mail=0)
+            historical_unknowns_retained=self.historical_count,original_mock_generations=1,
+            generation_replay=0,real_models=0,real_uploads=0,real_mail=0)
         return self.evidence
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--caddy',required=True);parser.add_argument('--evidence',required=True);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--caddy',required=True);parser.add_argument('--evidence',required=True)
+    parser.add_argument('--source-revision',choices=[OLD,SMART_SAVE],default=OLD)
+    parser.add_argument('--historical-count',type=int,choices=[4,7],default=4);args=parser.parse_args()
     if os.geteuid()!=0 or sys.platform!='linux':raise SystemExit('Requires isolated Linux root')
-    with tempfile.TemporaryDirectory(prefix='mio-f598-interruption-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='mio-interruption-') as temporary:
         run=InterruptionRehearsal(args.caddy,Path(temporary).resolve())
+        run.source_revision=args.source_revision;run.historical_count=args.historical_count
         try:
             evidence=run.execute();Path(args.evidence).write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
         except Exception:
