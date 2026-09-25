@@ -872,11 +872,11 @@ function canvasForStorage(){
 function apiErrorMessage(data, fallback='请求失败'){
     if(!data) return fallback;
     if(personalApiInstance && data?.detail?.event_id){
-        return `${data.detail.message || fallback}（事件 ${data.detail.event_id}）`;
+        return window.PersonalModelSelection.errorMessage(data.detail,fallback);
     }
     if(typeof data === 'string') return data || fallback;
     const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
+    if(typeof detail === 'string') return personalApiInstance ? window.PersonalModelSelection.errorMessage(detail,fallback) : (detail || fallback);
     if(Array.isArray(detail)){
         const messages = detail.map(item => {
             if(typeof item === 'string') return item;
@@ -3828,6 +3828,7 @@ function renderInlineCustomSizeFields(prefix=''){
     </div>`;
 }
 function renderQualityControl(){
+    if(personalApiInstance && !window.PersonalModelSelection.supportsImageParameter(apiProviders,settings.provider_id,settings.model,'quality')) return '';
     const value = settings.quality || 'auto';
     const labels = {auto:tr('smart.qualityAuto'), low:tr('smart.qualityLow'), medium:tr('smart.qualityMid'), high:tr('smart.qualityHigh')};
     return `<div class="smart-control quality-control">
@@ -19899,10 +19900,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
         aspect_ratio:kieSchema ? runSettings.aspectRatio : (API_RATIO_VALUES[runSettings.ratio] || (runSettings.ratio === 'custom' ? String(runSettings.customRatio || '').trim() : '')),
         resolution:kieSchema ? String(runSettings.resolution || '').toUpperCase() : (['1k','2k','4k'].includes(apiResolution) ? apiResolution : ''),
         output_format:kieCapabilityField(kieSchema,'output_format') ? String(runSettings.outputFormat || '') : '',
-        quality:runSettings.quality || 'auto',
         n:1,
         reference_images:imageRefs
     };
+    if(!personalApiInstance || window.PersonalModelSelection.supportsImageParameter(apiProviders,runSettings.provider_id,runSettings.model,'quality')){
+        payload.quality=runSettings.quality || 'auto';
+    }
     const limits = apiProviders.find(item => item.id === runSettings.provider_id)?.model_limits?.[runSettings.model];
     if(limits){
         if(count > limits.max_images) throw new Error(`单次最多生成 ${limits.max_images} 张图片`);
@@ -19915,12 +19918,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
             payload.generation_id = bindingNode.activeGenerationId || '';
         }
         const response = await fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        if(!response.ok) throw new Error(await response.text());
+        if(!response.ok) throw new Error(await responseErrorMessage(response,'图片生成失败'));
         const task = await response.json();
         return {taskIds:[task.task_id], count, controlled:true, providerId:payload.provider_id, model:payload.model};
     }
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r,'图片生成失败'));
         return r.json();
     })));
     return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};

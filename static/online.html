@@ -407,7 +407,7 @@
                 badge.style.display = '';
             }
             const qf = document.getElementById('qualityField');
-            if(qf) qf.style.display = (personalApiInstance ? providerById(provider)?.capabilities?.image?.[selectedModel]?.parameters?.includes('quality') : QUALITY_PROTOCOLS.has(proto)) ? '' : 'none';
+            if(qf) qf.style.display = (personalApiInstance ? window.PersonalModelSelection.supportsImageParameter(apiProviders,provider,selectedModel,'quality') : QUALITY_PROTOCOLS.has(proto)) ? '' : 'none';
             const qs = document.getElementById('qualitySelect');
             if(qs) qs.value = quality;
             // RunningHub 每次出图都是一次完整工作流运行，隐藏数量并固定为 1，避免误触发多次昂贵任务。
@@ -632,7 +632,7 @@
             try {
                 const reqBody = { prompt, provider_id:provider, model:selectedModel, size:currentSize(), n:outputCount, reference_images:Object.values(refs).filter(Boolean) };
                 if(personalApiInstance){reqBody.aspect_ratio=({square:'1:1',portrait:'2:3',portrait43:'3:4',landscape43:'4:3',landscape:'3:2',story:'9:16',wide:'16:9'})[ratio] || (ratio==='custom' ? `${customRatioWidth}:${customRatioHeight}` : '');reqBody.resolution=resolution==='custom' ? '' : resolution;}
-                if(personalApiInstance ? providerById(provider)?.capabilities?.image?.[selectedModel]?.parameters?.includes('quality') : QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
+                if(personalApiInstance ? window.PersonalModelSelection.supportsImageParameter(apiProviders,provider,selectedModel,'quality') : QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
                 const result = await fetch('/api/online-image', {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify(reqBody)

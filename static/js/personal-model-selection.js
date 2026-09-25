@@ -26,10 +26,21 @@
             error.code='model_prompt_too_long';throw error;
         }
     }
+    function supportsImageParameter(providers,providerId,model,parameter){
+        const provider=(providers||[]).find(item=>item.id===providerId);
+        const capability=provider?.capabilities?.image?.[model];
+        return Array.isArray(capability?.parameters) && capability.parameters.includes(parameter);
+    }
     function errorMessage(detail,fallback='请求未完成，请查看事件编号或检查配置'){
-        if(detail && typeof detail==='object' && typeof detail.message==='string')return detail.message+(detail.event_id ? ` · 事件 ${detail.event_id}` : '');
-        return typeof detail==='string' ? detail : fallback;
+        if(typeof detail==='string' && detail.trim().startsWith('{')){
+            try { detail=JSON.parse(detail).detail ?? detail; } catch(_) {}
+        }
+        const message=detail && typeof detail==='object' && typeof detail.message==='string' ? detail.message : detail;
+        const readable=typeof message==='string' && message.includes('所选 Kie input 模板未实现 quality 字段契约')
+            ? '当前 Kie 模型不支持 Quality 参数。'
+            : (typeof message==='string' ? message : fallback);
+        return readable+(detail && typeof detail==='object' && detail.event_id ? ` · 事件 ${detail.event_id}` : '');
     }
     function preserve(value,defaultValue){return value || defaultValue || '';}
-    root.PersonalModelSelection=Object.freeze({reason,assertAvailable,assertPrompt,errorMessage,preserve});
+    root.PersonalModelSelection=Object.freeze({reason,assertAvailable,assertPrompt,supportsImageParameter,errorMessage,preserve});
 })(typeof module==='object'?module.exports:window);

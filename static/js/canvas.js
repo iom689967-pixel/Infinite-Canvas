@@ -875,6 +875,9 @@ function normalizedImageQuality(value){
     const quality = String(value || 'auto').trim().toLowerCase();
     return ['low','medium','high'].includes(quality) ? quality : '';
 }
+function imageParameterSupported(providerId,model,parameter){
+    return !personalApiInstance || window.PersonalModelSelection.supportsImageParameter(apiProviders,providerId,model,parameter);
+}
 function resolveChatModel(value, providerId=''){
     const providerModels = providerId ? providerChatModels(providerId) : [];
     if(personalApiInstance) return value || providerModels[0] || (providerId ? '' : allChatModels()[0]) || '';
@@ -893,11 +896,11 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
 function apiErrorMessage(data, fallback='请求失败'){
     if(!data) return fallback;
     if(personalApiInstance && data?.detail?.event_id){
-        return `${data.detail.message || fallback}（事件 ${data.detail.event_id}）`;
+        return window.PersonalModelSelection.errorMessage(data.detail,fallback);
     }
     if(typeof data === 'string') return data || fallback;
     const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
+    if(typeof detail === 'string') return personalApiInstance ? window.PersonalModelSelection.errorMessage(detail,fallback) : (detail || fallback);
     if(Array.isArray(detail)){
         const messages = detail.map(item => {
             if(typeof item === 'string') return item;
@@ -8652,7 +8655,9 @@ function renderGeneratorBody(node){
     const fitSizeBtn = wrap.querySelector('.fit-size-btn');
     const referenceImages = ordered.flatMap(src => src.refs || []);
     const syncQualityControls = () => {
-        qualitySelect.disabled = false;
+        const supported=imageParameterSupported(node.apiProvider,resolveImageModel(node.model),'quality');
+        qualitySelect.style.display=supported ? '' : 'none';
+        qualitySelect.disabled=!supported;
         if(!['auto','low','medium','high'].includes(String(node.quality || 'auto'))) node.quality = 'auto';
         qualitySelect.value = node.quality || 'auto';
     };
@@ -11067,7 +11072,7 @@ async function runRhModelNode(node, opts={}){
         reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
     };
     const quality = normalizedImageQuality(node.quality);
-    if(quality) payload.quality = quality;
+    if(quality && imageParameterSupported(payload.provider_id,payload.model,'quality')) payload.quality = quality;
     let pendingIds = [];
     const startedAt = nowMs();
     if(!opts.cascade){
@@ -12060,7 +12065,7 @@ async function runGenerator(genId, opts={}){
         reference_images:refs
     };
     const quality = normalizedImageQuality(gen.quality);
-    if(quality) payload.quality = quality;
+    if(quality && imageParameterSupported(payload.provider_id,payload.model,'quality')) payload.quality = quality;
     let pendingIds = [];
     const startedAt = nowMs();
     if(!opts.cascade){
@@ -12070,7 +12075,13 @@ async function runGenerator(genId, opts={}){
         setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
     }
     try {
-        if(personalApiInstance){if(gen.personalAdapterParameters)payload.adapter_parameters=gen.personalAdapterParameters;payload.n=count;payload.request_id=crypto.randomUUID();await saveCanvas();Object.assign(payload,{canvas_id:canvas.id,node_id:gen.id});}
+        if(personalApiInstance){
+            const adapter=apiProviders.find(p=>p.id===payload.provider_id)?.capabilities?.image?.[payload.model]?.adapter;
+            // The generator only records ModelScope LoRA extras. Keep saved node data,
+            // but do not carry those adapter-specific settings into another model.
+            if(adapter==='modelscope-async' && gen.personalAdapterParameters) payload.adapter_parameters=gen.personalAdapterParameters;
+            payload.n=count;payload.request_id=crypto.randomUUID();await saveCanvas();Object.assign(payload,{canvas_id:canvas.id,node_id:gen.id});
+        }
         const taskInfos = await Promise.all(Array.from({length:personalApiInstance ? 1 : count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
         if(!out){
             let outputs = [];
@@ -12319,7 +12330,7 @@ async function runGeneratorLegacy(genId, opts={}){
             reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
         };
         const quality = normalizedImageQuality(gen.quality);
-        if(quality) payload.quality = quality;
+        if(quality && imageParameterSupported(payload.provider_id,payload.model,'quality')) payload.quality = quality;
         const results = await Promise.all(Array.from({length:count}, () => fetch('/api/online-image', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
