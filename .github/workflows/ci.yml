@@ -60,7 +60,17 @@ jobs:
           if-no-files-found: error
 
       - name: Run project checks
+        env:
+          MIO_CONCURRENCY_EVIDENCE: ${{ runner.temp }}/mio-concurrency-evidence.json
         run: ./scripts/check.sh
+
+      - name: Preserve ten-slot mock resource evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mio-concurrency-evidence
+          path: ${{ runner.temp }}/mio-concurrency-evidence.json
+          if-no-files-found: error
 
       - name: Install verified temporary Caddy fixture
         run: python scripts/install_rehearsal_caddy.py "$RUNNER_TEMP/mio-rehearsal-caddy"

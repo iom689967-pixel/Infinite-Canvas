@@ -78,7 +78,7 @@ class ModelPolicy:
         self.mode = config['mode']
         if self.mode not in {'mock', 'live'}:
             raise RuntimeError('Model mode must be explicitly mock or live')
-        self.max_concurrent = self.integer(config['max_concurrent'], 1, 8)
+        self.max_concurrent = self.integer(config['max_concurrent'], 1, 10)
         # Server-admin-only exact HTTPS LAN destinations. Never permit loopback,
         # link-local metadata, CIDRs, or a browser-controlled credential target list.
         for target in config.get('private_targets', []):
@@ -158,7 +158,8 @@ class ModelPolicy:
             self.providers[compiled['id']] = compiled
         if getattr(paths, 'public_beta', False):
             budget = json.loads((paths.data_root / '.auth/public-beta.json').read_text())
-            self.max_concurrent = min(self.max_concurrent, budget['max_concurrent_generations'])
+            self.max_concurrent = min(self.max_concurrent,
+                self.integer(budget['max_concurrent_generations'], 1, 10))
 
     @staticmethod
     def integer(value, low, high):

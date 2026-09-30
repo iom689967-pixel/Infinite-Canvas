@@ -53,7 +53,7 @@ class BetaConfig:
     max_users: int = 20
     storage_quota: int = 5 * 1024**3
     max_upload: int = 50 * 1024**2
-    concurrency: int = 2
+    concurrency: int = 10
     register_limit: int = 5
     login_limit: int = 10
     window_seconds: int = 300
@@ -109,7 +109,7 @@ class BetaConfig:
                 raise ValueError('资源限制必须为正整数')
         if type(self.min_free_disk) is not int or self.min_free_disk < 0:
             raise ValueError('磁盘安全余量必须是非负整数')
-        if not 1 <= self.concurrency <= 8 or not 1 <= self.max_running_instances <= 20 or not 1 <= self.ticket_ttl <= 60 or not 1 <= self.session_ttl <= 86400:
+        if not 1 <= self.concurrency <= 10 or not 1 <= self.max_running_instances <= 20 or not 1 <= self.ticket_ttl <= 60 or not 1 <= self.session_ttl <= 86400:
             raise ValueError('会话或并发配置无效')
         if self.registration_mode not in {'open','closed','invite'}:
             raise ValueError('注册模式必须为 open、closed 或 invite')
