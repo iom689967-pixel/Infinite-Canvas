@@ -51,14 +51,22 @@ class ControlledModels(NetworkTasks):
                     db.execute('UPDATE jobs SET data=? WHERE id=?',(json.dumps(job),row['id']))
                 recoverable = (bool(job['upstream']) and all(e.get('remote_done') for e in job['upstream'])
                                and not job.get('submission_uncertain') and job.get('upstream_status') != 'fail')
+                kie_image = self.is_kie_image(job, provider) or (provider is None and job.get('purpose', 'image') == 'image')
+                local_complete = (job['status'] == 'succeeded' and job.get('local_result_status') == 'completed'
+                                  and self.kie_results_complete(job)) if kie_image else recoverable
                 if job['status'] == 'failed' and recoverable:
                     job.update(status='result_recovery_required', upstream_status='success', local_result_status='pending',
                                error='图片已在上游生成成功，本地结果尚未恢复')
+                    if kie_image:job['outstanding'] = not local_complete
+                    db.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), row['id']))
+                if kie_image and job['status'] == 'result_recovery_required' and not local_complete:
+                    job['outstanding'] = True
                     db.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), row['id']))
                 if job['status'] in {'queued', 'preparing', 'submitting', 'submitted', 'generating', 'waiting', 'queuing', 'result_pending_download'}:
                     job.update(status='result_recovery_required' if recoverable else 'failed', recovery=self.recovery(job),
                                error='图片已在上游生成成功，本地结果尚未恢复' if recoverable else '服务重启，提交状态待确认；不会自动重新提交',
-                               outstanding=False if recoverable else bool(job.get('outstanding')))
+                               outstanding=False if local_complete else bool(job.get('outstanding')))
+                    if kie_image and recoverable and not local_complete:job['outstanding'] = True
                     if recoverable:
                         job.update(upstream_status='success', local_result_status='pending')
                     db.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), row['id']))
@@ -208,17 +216,59 @@ class ControlledModels(NetworkTasks):
         return provider, limits
 
     def validate_binding(self, binding, owner):
-        if not binding:
-            return
-        canvas = self.app.load_canvas(binding['canvas_id'])
         # Canvas.owner is an editable display label, not an authorization identity.
         # load_canvas uses this instance's data root; task ownership is session-bound.
         if (PRINCIPAL.get() or {}).get('subject') != owner:
             raise HTTPException(404, '本用户没有此任务')
+        if not binding:
+            return
+        canvas = self.app.load_canvas(binding['canvas_id'])
         node = next((n for n in canvas.get('nodes', []) if n.get('id') == binding['node_id']), None)
         if not node or (binding.get('generation_id') and not any(
                 a.get('id') == binding['generation_id'] for a in node.get('generationHistory', []))):
             raise HTTPException(409, '原节点或生成版本已不存在，结果不会转移到其他节点')
+
+    def recovery_binding_status(self, job):
+        """An owned task authorizes its results; a missing binding only disables backfill."""
+        if (PRINCIPAL.get() or {}).get('subject') != job['owner']:
+            raise HTTPException(404, '本用户没有此任务')
+        try:
+            self.validate_binding(job.get('binding'), job['owner'])
+        except HTTPException as exc:
+            if exc.status_code not in {404, 409}:
+                raise
+            return 'detached'
+        return 'attached' if job.get('binding') else 'unbound'
+
+    def is_kie_image(self, job, provider=None):
+        provider = provider if provider is not None else self.policy.providers.get(job['provider_id'], {})
+        return job.get('purpose', 'image') == 'image' and (effective_protocol(
+            provider['settings'], job['model'], 'image') == 'kie' if provider.get('personal') else provider.get('protocol') == 'kie')
+
+    @staticmethod
+    def registered_kie_batch(job):
+        entries = job.get('upstream', [])
+        expected = job['params'].get('n')
+        ids = [e.get('id') for e in entries]
+        return (not job.get('submission_uncertain') and type(expected) is int and expected > 0
+                and len(entries) == expected and all(isinstance(i, str) and i.strip() for i in ids)
+                and len(set(ids)) == len(ids)
+                and job['params'].get('provider_id') == job['provider_id']
+                and job['params'].get('model') == job['model']
+                and job['params'].get('purpose', 'image') == job.get('purpose', 'image'))
+
+    def kie_entry_complete(self, entry):
+        local = entry.get('local', [])
+        if not (entry.get('remote_done') and entry.get('done') and local
+                and len(local) == entry.get('result_count', len(local))):
+            return False
+        try:
+            return all(Path(self.paths.user_path(self.app.output_file_from_url(url))).is_file() for url in local)
+        except (OSError, ValueError, TypeError, HTTPException):
+            return False
+
+    def kie_results_complete(self, job):
+        return self.registered_kie_batch(job) and all(self.kie_entry_complete(e) for e in job['upstream'])
 
     @staticmethod
     def phase(job):
@@ -292,6 +342,8 @@ class ControlledModels(NetworkTasks):
     def public(self, job):
         return {k:job.get(k) for k in ('id','status','provider_id','model','result','error','recovery','created_at')} | {
             'phase':self.phase(job), 'binding':job.get('binding', {}),
+            'binding_status':job.get('binding_status', 'attached' if job.get('binding') else 'unbound'),
+            'recovery_message':job.get('recovery_message', ''),
             'upstream_status':job.get('upstream_status', 'success' if any(e.get('remote_done') for e in job['upstream']) else ''),
             'local_result_status':job.get('local_result_status', 'completed' if job['status']=='succeeded' else 'pending'),
             'has_upstream_task':bool(job['upstream']), 'upstream_cancel_supported':False,
@@ -305,8 +357,12 @@ class ControlledModels(NetworkTasks):
 
     def refresh(self, task_id):
         job = self.owned(task_id)
-        self.validate_binding(job.get('binding'), job['owner'])
-        if job['status'] == 'succeeded':
+        if (PRINCIPAL.get() or {}).get('subject') != job['owner']:
+            raise HTTPException(404, '本用户没有此任务')
+        kie_image = self.is_kie_image(job)
+        if not kie_image:
+            self.validate_binding(job.get('binding'), job['owner'])
+        if job['status'] == 'succeeded' and (not kie_image or self.kie_results_complete(job)):
             return self.public(job)
         configured = self.policy.providers.get(job['provider_id'])
         if not configured or not configured.get('enabled', True):
@@ -314,12 +370,17 @@ class ControlledModels(NetworkTasks):
         provider, _ = self.policy.allowed(job['provider_id'], job['model'], job.get('purpose','image'))
         if job.get('provider_revision') != task_provider_revision(self.policy, provider):
             raise HTTPException(409, '原任务配置已变化或为旧版本任务；禁止使用新凭证查询，也不会重新提交')
-        if task_id not in self.runners and job['upstream'] and job['status'] != 'succeeded':
+        if kie_image:
+            if not self.registered_kie_batch(job):
+                raise HTTPException(409, '原提交或批次尚未确认完整；恢复不会补交或释放占位')
+            job['binding_status'] = self.recovery_binding_status(job)
+        if task_id not in self.runners and job['upstream']:
             if not job['outstanding']:
                 self.check_capacity()
                 job['outstanding'] = True
                 self.save(job)
             job['status'] = 'result_pending_download' if any(e.get('remote_done') for e in job['upstream']) else 'submitted'
+            job['recovery_message'] = ''
             job['recovery_attempts'] = job.get('recovery_attempts', 0) + 1
             job['recovery_started_at'] = time.time()
             self.save(job)
@@ -356,6 +417,8 @@ class ControlledModels(NetworkTasks):
             provider, limits = self.policy.allowed(job['provider_id'], job['model'], job.get('purpose','image'))
             if job.get('provider_revision') != task_provider_revision(self.policy, provider):
                 raise failure('conflict', 409)
+            if query_only and not self.registered_kie_batch(job):
+                raise failure('task_incomplete', 409)
             client = GuardedClient(self.policy, provider, timeout=limits['timeout_seconds'] if provider.get('personal') else min(120, limits['timeout_seconds']))
             if provider.get('personal'):
                 # The effective model protocol is Kie even in a mixed Provider.
@@ -411,6 +474,7 @@ class ControlledModels(NetworkTasks):
                     job.update(status='submitted', submission_uncertain=False); self.save(job)
                 entry = job['upstream'][index]
                 if entry['done']:
+                    if not self.kie_entry_complete(entry):raise failure('download', 502)
                     continue
                 async def status(value, _raw):
                     job['upstream_status'] = value
@@ -423,6 +487,9 @@ class ControlledModels(NetworkTasks):
                 result = await poll_task(kie, entry['id'], timeout_seconds=limits['timeout_seconds'],
                     initial_interval=.05 if self.policy.mode == 'mock' else 2.5, cancel_event=cancel, on_status=status)
                 entry['remote_done'] = True
+                if entry.get('result_count') is not None and entry['result_count'] != len(result['resultUrls']):
+                    raise failure('task_incomplete', 502)
+                entry['result_count'] = len(result['resultUrls'])
                 job.update(upstream_status='success', status='result_pending_download', local_result_status='pending')
                 self.save(job)
                 for url in result['resultUrls'][len(entry.get('local',[])):] :
@@ -453,11 +520,17 @@ class ControlledModels(NetworkTasks):
                 job.update(status='failed', result=result, outstanding=True, recovery='manual-reconcile',
                            error='已保存已知任务结果；另有提交状态不明，需管理员核对，未自动补交')
             else:
+                if not self.kie_results_complete(job):raise failure('task_incomplete', 502)
+                job['binding_status'] = self.recovery_binding_status(job)
+                recovery_message = ('原生成节点已不存在，结果已恢复到历史记录，不会自动写入其他节点。'
+                                    if job['binding_status'] == 'detached' else '')
+                result.update(binding_status=job['binding_status'], recovery_message=recovery_message)
                 self.policy.mark_verified(provider,job['model'],'image')
                 result['local_result_status'] = 'completed'
                 self.app.save_to_history(result, identity_key=job['id'])
                 job.update(status='succeeded', result=result, outstanding=False, error='', error_code='', recovery='',
-                           local_result_status='completed', completed_local_at=time.time(), upstream_status='success')
+                           local_result_status='completed', completed_local_at=time.time(), upstream_status='success',
+                           recovery_message=recovery_message)
         except (asyncio.CancelledError, KieTaskCancelled):
             # Never claim provider cancellation: these adapters have no cancellation API.
             job.update(status='canceled', cancel_scope='local-only' if submitted or job['upstream'] else 'pre-submit',
@@ -474,11 +547,11 @@ class ControlledModels(NetworkTasks):
                 code = 'storage_full'
             if isinstance(exc, HTTPException) and exc.status_code == 503 and exc.detail == SERVER_FULL:
                 code = 'server_storage_full'
-            outstanding = submitted or known
+            outstanding = submitted or known or bool(job.get('submission_uncertain'))
             terminal_failure = isinstance(exc, KieTaskError) and task_status(exc.raw) == 'fail'
-            if isinstance(exc, KieTaskError) and task_status(exc.raw) in {'fail','success'}:
-                outstanding = False
-            if known and not job.get('submission_uncertain') and all(entry.get('remote_done') for entry in job['upstream']):
+            # Remote success is not local completion. Parsing, media validation,
+            # partial downloads and History failures retain the original reservation.
+            if terminal_failure and self.registered_kie_batch(job) and len(job['upstream']) == 1:
                 outstanding = False
             if terminal_failure:
                 job['upstream_status'] = 'fail'

@@ -141,7 +141,10 @@ class RecoveryTests(unittest.TestCase):
 
     def test_deleted_node_cannot_take_over_result(self):
         t,_=self.begin();self.ok('A','PUT','/api/canvases/'+self.binding['canvas_id'],json={'nodes':[]})
-        before=len(self.mock.calls);self.assertEqual(self.request('A','POST','/api/canvas-image-tasks/'+t+'/refresh').status_code,409);self.assertEqual(len(self.mock.calls),before)
+        canvas=self.ok('A','GET','/api/canvases/'+self.binding['canvas_id'])
+        result=self.recover(t)
+        self.assertEqual(result['binding_status'],'detached')
+        self.assertEqual(self.ok('A','GET','/api/canvases/'+self.binding['canvas_id']),canvas)
 
     def test_invalid_initial_binding_rejected_before_create(self):
         for values in ({'canvas_id':'missing','node_id':'other'},{'node_id':'other'}):
@@ -180,7 +183,11 @@ class RecoveryTests(unittest.TestCase):
               'models':[{'id':'gpt-image-2','purpose':'image'}]}
         self.ok('A','PUT','/api/instance/providers',json=item | {'api_key':self.keys['A']})
         t,r=self.begin(provider_id='personal');self.assertEqual(r['status'],'result_recovery_required')
-        self.ok('A','PUT','/api/instance/providers',json=item | {'enabled':False})
+        # A pending result now keeps its reservation, so browser edits remain blocked.
+        self.assertEqual(self.request('A','PUT','/api/instance/providers',json=item | {'enabled':False}).status_code,409)
+        self.stop('A');path=self.roots['A']/'.auth/model-access.json';config=json.loads(path.read_text())
+        next(p for p in config['personal_providers'] if p['id']=='personal')['enabled']=False
+        path.write_text(json.dumps(config));self.start('A')
         before=len(self.mock.calls)
         self.assertEqual(self.request('A','GET','/api/canvas-image-tasks/'+t).status_code,200)
         self.assertEqual(self.request('A','POST','/api/canvas-image-tasks/'+t+'/refresh').status_code,409)

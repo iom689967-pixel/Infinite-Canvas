@@ -175,16 +175,14 @@ class OwnProviderTests(unittest.TestCase):
         while time.monotonic()<deadline and not any(k=='create' for k,_,_ in self.mock.calls):time.sleep(.03)
         self.assertEqual(self.request('A','DELETE',API,json={'id':'personal'}).status_code,409)
         self.assertEqual(self.request('A','PUT',API,json=self.item(protocol='kie') | {'api_key':self.keys['A']}).status_code,409)
-        self.mock.finish_waiting=True
-        self.wait_job(task)
-        # Terminal failure makes retry-query eligible, but configuration revision must still match.
-        import sqlite3
-        self.stop('A')
-        with sqlite3.connect(self.roots['A']/'.auth/model-tasks.sqlite3') as db:
-            row=db.execute('SELECT data FROM jobs WHERE id=?',(task,)).fetchone();job=json.loads(row[0]);job['status']='failed';job['outstanding']=False
-            db.execute('UPDATE jobs SET data=? WHERE id=?',(json.dumps(job),task))
+        # Stop only the synthetic local wait; keep the genuine unresolved reservation.
+        self.ok('A','DELETE','/api/canvas-image-tasks/'+task)
+        self.wait_job(task);self.stop('A')
+        config=json.loads((self.roots['A']/'.auth/model-access.json').read_text())
+        stored=next(p for p in config['personal_providers'] if p['id']=='personal')
+        # Simulate an administrator's key rotation in this offline fixture, never free a slot.
+        (self.roots['A']/'.auth'/stored['credential_file']).write_text('rotated-fixture-only')
         self.start('A')
-        self.ok('A','PUT',API,json=self.item(protocol='kie') | {'api_key':self.keys['A']})
         before=len(self.mock.calls)
         self.assertEqual(self.request('A','POST','/api/canvas-image-tasks/'+task+'/refresh').status_code,409)
         self.assertEqual(len(self.mock.calls),before)

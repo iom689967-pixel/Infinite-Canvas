@@ -1,7 +1,58 @@
 import unittest
+from pathlib import Path
 from test_smart_generation_polling_incremental_ui import function_source,run_node
 
 class ResultRecoveryFrontendTests(unittest.TestCase):
+    def test_detached_completed_binding_never_applies_to_stale_original_node(self):
+        value=run_node("""
+const canvasId='canvas';const node={id:'original',images:[{url:'/adopted.png'}]};
+"""+function_source('assertSmartTaskBinding')+"""
+let detached=false;try{assertSmartTaskBinding({status:'succeeded',binding_status:'detached',binding:{canvas_id:'canvas',node_id:'original',generation_id:'generation'}},node,{generationId:'generation'})}catch(e){detached=e.detachedRecovery}
+process.stdout.write(JSON.stringify({detached,images:node.images}));
+""")
+        self.assertTrue(value['detached']);self.assertEqual(value['images'],[{'url':'/adopted.png'}])
+
+    def test_detached_query_notice_does_not_save_or_finalize_canvas(self):
+        value=run_node("""
+const canvasId='canvas',task={taskId:'local',generationId:'gen',recoverTaskId:'local',controlled:true};
+const node={id:'original',images:[{url:'/adopted.png'}],pendingTasks:[task]},nodes=[node];
+let saves=0,finalizes=0;const notices=[];
+const render=()=>{},scheduleSave=()=>saves++,toast=s=>notices.push(s),smartPendingTasks=n=>n.pendingTasks||[],smartRecoverableImageTask=()=>task,extractUpstreamTaskId=()=>'';
+const finalizeSmartPendingTask=()=>finalizes++;
+const fetch=async()=>({ok:true,json:async()=>({status:'succeeded',binding_status:'detached',binding:{canvas_id:'canvas',node_id:'original',generation_id:'gen'}})});
+"""+function_source('assertSmartTaskBinding')+function_source('querySmartImageTaskNow')+"""
+(async()=>{await querySmartImageTaskNow('original','local');process.stdout.write(JSON.stringify({saves,finalizes,notices,images:node.images}));})();
+""")
+        self.assertEqual(value['saves'],0);self.assertEqual(value['finalizes'],0)
+        self.assertEqual(value['images'],[{'url':'/adopted.png'}]);self.assertIn('历史记录',value['notices'][0])
+
+    def test_detached_poll_never_returns_images_to_any_node(self):
+        value=run_node("""
+const activeSmartTaskPolls=new Map(),activeSmartTaskControllers=new Map();
+const smartTaskDelay=async()=>{},fetch=async()=>({ok:true,json:async()=>({status:'succeeded',binding_status:'detached',result:{images:['/original.png']}})});
+let updates=0;const updateSmartPendingTaskStatus=()=>updates++;
+"""+function_source('pollSmartCanvasTask')+"""
+(async()=>{let detached=false;try{await pollSmartCanvasTask('local')}catch(e){detached=e.detachedRecovery}process.stdout.write(JSON.stringify({detached,updates,polls:activeSmartTaskPolls.size,controllers:activeSmartTaskControllers.size}));})();
+""")
+        self.assertEqual(value,{'detached':True,'updates':0,'polls':0,'controllers':0})
+
+    def test_cancelled_generation_protection_is_unchanged(self):
+        value=run_node("""
+const liveNodeGenerationState=n=>n,nodeGenerationAttemptForTask=n=>n.generationHistory[0];
+"""+function_source('finalizeSmartPendingTask')+"""
+const node={id:'original',generationHistory:[{id:'gen',status:'cancelled',outputs:[]}],images:[{url:'/adopted.png'}]};
+const before=JSON.stringify(node);finalizeSmartPendingTask(node,'local',[{url:'/recovered.png'}]);process.stdout.write(JSON.stringify({unchanged:before===JSON.stringify(node)}));
+""")
+        self.assertTrue(value['unchanged'])
+
+    def test_history_notice_uses_detached_enum_not_arbitrary_message_html(self):
+        online=(Path(__file__).resolve().parents[1]/'static/online.html').read_text()
+        source=online[online.index('function detachedRecoveryNotice('):online.index('function openLightbox(')]
+        value=run_node(source+"""
+process.stdout.write(JSON.stringify({detached:detachedRecoveryNotice({binding_status:'detached',recovery_message:'<unsafe>'}),attached:detachedRecoveryNotice({binding_status:'attached'})}));
+""")
+        self.assertIn('不会自动写入其他节点',value['detached']);self.assertNotIn('<unsafe>',value['detached']);self.assertEqual(value['attached'],'')
+
     def test_recoverable_success_is_not_terminal_failure(self):
         value=run_node(function_source('smartTaskHasTerminalFailure')+"""
 process.stdout.write(JSON.stringify({pending:smartTaskHasTerminalFailure({status:'failed',resultRecoveryRequired:true}),terminal:smartTaskHasTerminalFailure({status:'failed'}),state:smartTaskHasTerminalFailure({status:'result_recovery_required'})}));

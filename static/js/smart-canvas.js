@@ -20834,14 +20834,16 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     task.querying = true;
     task.recoverTaskId = recoverTaskId;
     render();
+    let detached = false;
     try {
         let data;
         if(task.controlled){
             const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh`, {method:'POST'});
             if(!response.ok) throw new Error(await response.text());
             const owned = await response.json();
+            detached = owned.binding_status === 'detached';
             assertSmartTaskBinding(owned, node, task);
-            data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId, node, task)};
+            data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId, detached ? null : node, detached ? null : task)};
         } else {
             data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
         }
@@ -20873,6 +20875,11 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             toast(task.error);
         }
     } catch(e){
+        if(detached || e?.detachedRecovery){
+            detached = true;
+            toast(e.message || '原生成节点已不存在，请在历史记录查看恢复结果');
+            return;
+        }
         if(e?.resultRecoveryRequired){
             task.resultRecoveryRequired = true;
             task.status = 'result_recovery_required';
@@ -20886,7 +20893,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         const latest = smartPendingTasks(node).find(item => item.taskId === localTaskId);
         if(latest) latest.querying = false;
         render();
-        scheduleSave();
+        if(!detached) scheduleSave();
     }
 }
 function startJimengPoll(node){
@@ -20942,8 +20949,13 @@ async function pollSmartCanvasTask(taskId, bindingNode=null, bindingTask=null){
             }
             if(!response.ok) throw new Error(await response.text());
             const task = await response.json();
+            if(task.status === 'succeeded' && task.binding_status === 'detached'){
+                const signal = new Error('原生成节点已不存在，结果已恢复到历史记录，不会自动写入其他节点。');
+                signal.detachedRecovery = true;
+                throw signal;
+            }
             if(bindingNode && bindingTask) assertSmartTaskBinding(task, bindingNode, bindingTask);
-            updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status, task.upstream_task_id || '');
+            if(task.binding_status !== 'detached') updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status, task.upstream_task_id || '');
             if(task.status === 'succeeded') return task.result || {};
             if(task.status === 'result_recovery_required'){
                 const signal = controlledImageTaskRecovery(taskId, task.error);
@@ -21062,6 +21074,10 @@ async function resumeSmartPendingNode(node, logContext={}){
             }
         } catch(e) {
             node = liveNodeGenerationState(node);
+            if(e?.detachedRecovery){
+                toast(e.message);
+                return;
+            }
             if(!node || node.id !== nodeId) return;
             const liveTask = smartPendingTasks(node).find(item => item.taskId === task.taskId);
             if(!liveTask) return;
@@ -21165,6 +21181,11 @@ async function resumeSmartPendingNode(node, logContext={}){
     }
 }
 function assertSmartTaskBinding(record, node, task){
+    if(record.status === 'succeeded' && record.binding_status === 'detached'){
+        const signal = new Error('原生成节点已不存在，结果已恢复到历史记录，不会自动写入其他节点。');
+        signal.detachedRecovery = true;
+        throw signal;
+    }
     const binding = record.binding || {};
     if(binding.canvas_id && (binding.canvas_id !== canvasId || binding.node_id !== node.id ||
         (binding.generation_id && binding.generation_id !== task.generationId))){
