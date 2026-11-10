@@ -92,6 +92,7 @@ ROUTE_ACCESS = {
     "GET /api/conversations/{conversation_id}": "workbench",
     "DELETE /api/conversations/{conversation_id}": "workbench",
     "GET /api/canvases": "workbench",
+    "GET /api/model-prompt-limits": "workbench",
     "GET /api/projects": "workbench",
     "POST /api/projects": "workbench",
     "POST /api/projects/{project_id}": "workbench",
@@ -243,7 +244,11 @@ WORKBENCH_STATIC = frozenset([
     "/static/vendor/js/tailwindcss-cdn.js",
     "/static/vendor/js/three-0.160.0.module.js",
     "/static/js/instance-session.js",
-    "/static/css/instance-login.css"
+    "/static/css/instance-login.css",
+    # 画布页面依赖的共享脚本（合并规则、提示词长度、Kie 参数校验）
+    "/static/js/canvas-merge.js",
+    "/static/js/kie-image-params.js",
+    "/static/js/model-prompt-limits.js",
 ])
 
 PUBLIC_STATIC = frozenset({"/static/js/instance-login.js", "/static/css/instance-login.css"})
