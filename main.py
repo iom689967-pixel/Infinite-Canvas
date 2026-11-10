@@ -22,6 +22,7 @@ import zipfile
 import mimetypes
 import tempfile
 import math
+import ipaddress
 import shlex
 import functools
 import html
@@ -214,12 +215,138 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# --- 跨站请求防护（CORS / Origin / Host） ---
+# 本服务没有登录认证，任何网页都能让浏览器向 127.0.0.1 发请求。因此：
+# 1. CORS 只放行本机来源与浏览器扩展；
+# 2. 写操作（POST/PUT/PATCH/DELETE）若带 Origin/Referer，必须来自允许的来源；
+# 3. 涉及密钥的 GET 接口额外校验 Host，挡住 DNS rebinding（恶意域名解析到 127.0.0.1 后的同源读取）。
+# 不带 Origin/Referer 的写请求来自非浏览器客户端（PS UXP 插件、脚本、测试），浏览器无法伪造，予以放行。
+# 额外放行：INFINITE_CANVAS_ALLOWED_ORIGINS / INFINITE_CANVAS_ALLOWED_HOSTS（逗号分隔）。
+UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+SECRET_SENSITIVE_GET_PATHS = {
+    "/api/config",
+    "/api/config/token",
+    "/api/providers",
+    "/api/codex/status",
+    "/api/gemini-cli/status",
+    "/api/jimeng/status",
+    "/api/jimeng/credit",
+    "/api/jimeng/login/status",
+}
+SECRET_SENSITIVE_GET_PATTERNS = (re.compile(r"^/api/providers/[^/]+/fetch-models$"),)
+BROWSER_EXTENSION_SCHEMES = {"chrome-extension", "moz-extension"}
+LOCAL_CORS_ORIGIN_REGEX = r"^(https?://(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?|chrome-extension://[a-z0-9]+|moz-extension://[0-9a-f-]+)$"
+
+
+def _env_csv(name):
+    return {item.strip().lower().rstrip("/") for item in os.getenv(name, "").split(",") if item.strip()}
+
+
+def _hostname_from_host_header(host_header):
+    host = str(host_header or "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else host
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def _is_ip_literal(hostname):
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_loopback_hostname(hostname):
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def request_host_allowed(host_header):
+    """IP 字面量与 localhost 不可能来自 DNS rebinding；其他域名需显式加入 INFINITE_CANVAS_ALLOWED_HOSTS。"""
+    hostname = _hostname_from_host_header(host_header)
+    if not hostname:
+        return True
+    return hostname == "localhost" or _is_ip_literal(hostname) or hostname in _env_csv("INFINITE_CANVAS_ALLOWED_HOSTS")
+
+
+def request_origin_allowed(origin, host_header):
+    origin = str(origin or "").strip()
+    if not origin or origin.lower() == "null":
+        return False
+    if origin.lower().rstrip("/") in _env_csv("INFINITE_CANVAS_ALLOWED_ORIGINS"):
+        return True
+    parsed = urllib.parse.urlsplit(origin)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in BROWSER_EXTENSION_SCHEMES:
+        return True
+    if scheme not in ("http", "https"):
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if _is_loopback_hostname(hostname):
+        return True
+    # 同源访问（例如显式开启局域网后用 http://192.168.x.x:3000 打开页面）
+    same_origin = parsed.netloc.lower() == str(host_header or "").strip().lower()
+    return same_origin and request_host_allowed(host_header)
+
+
+def cross_site_rejection_reason(method, path, headers):
+    """返回拒绝原因；允许时返回空字符串。headers 为小写键的 dict。"""
+    method = str(method or "").upper()
+    sensitive_get = method in ("GET", "HEAD") and (
+        path in SECRET_SENSITIVE_GET_PATHS or any(p.match(path) for p in SECRET_SENSITIVE_GET_PATTERNS)
+    )
+    if method not in UNSAFE_HTTP_METHODS and not sensitive_get:
+        return ""
+    host = headers.get("host", "")
+    origin = headers.get("origin")
+    referer = headers.get("referer")
+    browser_like = origin is not None or referer is not None or "sec-fetch-site" in headers
+    if (sensitive_get or browser_like) and not request_host_allowed(host):
+        return f"Host「{host}」不在允许列表中（可能是 DNS rebinding）。如需通过域名访问，请设置 INFINITE_CANVAS_ALLOWED_HOSTS。"
+    if origin is not None:
+        if not request_origin_allowed(origin, host):
+            return f"来源「{origin}」不在允许列表中。如需放行，请设置 INFINITE_CANVAS_ALLOWED_ORIGINS。"
+    elif referer:
+        referer_origin = origin_from_url(referer)
+        if not referer_origin or not request_origin_allowed(referer_origin, host):
+            return "请求来源（Referer）不在允许列表中。"
+    return ""
+
+
+class CrossSiteRequestGuard:
+    """纯 ASGI 中间件：只读请求头，不包装响应体，因此不影响流式响应和 WebSocket。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+            reason = cross_site_rejection_reason(scope.get("method"), scope.get("path") or "", headers)
+            if reason:
+                response = JSONResponse(status_code=403, content={"detail": f"已拒绝跨站请求：{reason}"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(_env_csv("INFINITE_CANVAS_ALLOWED_ORIGINS")),
+    allow_origin_regex=LOCAL_CORS_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 最后添加的中间件位于最外层：先过跨站防护，再进入 CORS 与路由。
+app.add_middleware(CrossSiteRequestGuard)
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -1561,11 +1688,19 @@ def get_api_provider_exact(provider_id: str):
 def modelscope_provider_config():
     return get_api_provider_exact("modelscope")
 
+def is_masked_secret(value):
+    """mask_secret() 的输出（如 ••••••••abcd）。旧页面会把 /api/config/token 拿到的值原样回传，
+    这类值不是真实密钥，必须忽略并改用服务端保存的 Key。"""
+    return "•" in str(value or "")
+
 def modelscope_api_key(explicit_key: str = ""):
+    if is_masked_secret(explicit_key):
+        explicit_key = ""
     return (
         strip_auth_scheme(explicit_key, "Bearer")
         or strip_auth_scheme(provider_env_key_value("modelscope"), "Bearer")
         or strip_auth_scheme(MODELSCOPE_API_KEY, "Bearer")
+        or strip_auth_scheme(legacy_global_modelscope_token(), "Bearer")
     )
 
 def modelscope_api_root(provider=None):
@@ -14010,20 +14145,22 @@ async def save_providers(payload: List[ApiProviderPayload]):
 
 # --- ModelScope Token (从 env 读取，不再支持通过 UI 修改) ---
 
+def legacy_global_modelscope_token():
+    """旧版把 ModelScope Token 存在 global_config.json；仅作兜底读取。"""
+    if not os.path.exists(GLOBAL_CONFIG_FILE):
+        return ""
+    try:
+        with open(GLOBAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return str((json.load(f) or {}).get("modelscope_token") or "").strip()
+    except Exception:
+        return ""
+
 @app.get("/api/config/token")
 async def get_global_token():
-    # 优先读 env，回退到 global_config.json（兼容旧数据）
+    # 只返回掩码：页面只需要知道“服务端已配置 Token”。旧页面会把这里拿到的值回传给
+    # /api/angle/generate、/api/generate 等接口，后端通过 is_masked_secret() 识别并改用服务端 Key。
     saved_token = modelscope_api_key()
-    if saved_token:
-        return {"token": saved_token}
-    if os.path.exists(GLOBAL_CONFIG_FILE):
-        try:
-            with open(GLOBAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                return {"token": config.get("modelscope_token", "")}
-        except:
-            pass
-    return {"token": ""}
+    return {"token": mask_secret(saved_token), "has_token": bool(saved_token), "masked": True}
 
 # --- 在线生图 (COMFLY) ---
 
