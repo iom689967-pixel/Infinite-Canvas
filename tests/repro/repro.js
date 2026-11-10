@@ -413,6 +413,174 @@ async function a3Smart(browser) {
   await page.close();
 }
 
+// ---------------- GEN：保存进行中 / 409 合并期间生成任务返回结果 ----------------
+// 生成任务由 puppeteer 拦截并返回模拟结果（隔离实例只有假 Key）；保存请求可人为延迟，制造“保存进行中”的窗口。
+async function installGenMocks(page, { canvasId, prefix }) {
+  const ctl = { releasedAll: false, putDelay: 0, putsInFlight: 0, putStatuses: [], taskSeq: 0, successWhileSaving: 0, successServed: 0 };
+  await page.setRequestInterception(true);
+  page.on('request', async req => {
+    const url = req.url(), method = req.method();
+    if (method === 'POST' && /\/api\/canvas-image-tasks$/.test(url)) {
+      const id = `${prefix}-${++ctl.taskSeq}`;
+      return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ task_id: id, status: 'queued' }) });
+    }
+    if (method === 'GET' && url.includes(`/api/canvas-image-tasks/${prefix}-`)) {
+      const id = decodeURIComponent(url.split('/').pop().split('?')[0]);
+      if (ctl.releasedAll) {
+        ctl.successServed++;
+        if (ctl.putsInFlight > 0) ctl.successWhileSaving++;
+        return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ id, status: 'succeeded', result: { images: [`/assets/output/${id}.png`] } }) });
+      }
+      return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ id, status: 'running' }) });
+    }
+    if (method === 'PUT' && url.includes(`/api/canvases/${canvasId}`) && ctl.putDelay) {
+      ctl.putsInFlight++;
+      await sleep(ctl.putDelay);
+      ctl.putsInFlight--;
+    }
+    req.continue();
+  });
+  page.on('response', res => {
+    if (res.request().method() === 'PUT' && res.url().includes(`/api/canvases/${canvasId}`)) ctl.putStatuses.push(res.status());
+  });
+  return ctl;
+}
+const genNode = (id, x, y) => ({ id, type: 'smart-image-generation', x, y, w: 440, h: 250, title: id,
+  runSettings: { engine: 'api', apiKind: 'image', provider_id: 'codex', model: 'gpt-image-2' } });
+const historyOf = node => (node?.generationHistory || []).map(h => ({ status: h.status, outputs: (h.outputs || []).map(o => o?.url || o) }));
+const imageUrls = node => (node?.images || []).map(i => i?.url || i);
+async function startSmartRun(page, nodeId) {
+  await page.evaluate(`selectedId=${JSON.stringify(nodeId)}; updateComposer(); setPromptText('a cat'); void runGeneration({});`);
+}
+
+async function genSmartWhileSaving(browser) {
+  const id = await createTestCanvas('smart', [genNode('audit-g', 100, 100), { id: 'audit-s', type: 'smart-text', x: 700, y: 100, w: 440, h: 250, title: 'S', text: '' }]);
+  const page = await openSmart(browser, id, 2);
+  const ctl = await installGenMocks(page, { canvasId: id, prefix: 'mock-ws' });
+  await startSmartRun(page, 'audit-g');
+  await sleep(3000);
+  ctl.putDelay = 4000;                    // 之后的保存都要 4 秒才返回
+  await page.evaluate(`nodes.find(n=>n.id==='audit-s').x += 33; scheduleSave();`);
+  await sleep(800);                       // 保存已发出、尚未返回
+  ctl.releasedAll = true;                 // 下一次轮询（≤2s）拿到结果，此时保存仍在进行中
+  await sleep(14000);
+  const c = await getCanvas(id);
+  const g = nodeOf(c, 'audit-g'), sNode = nodeOf(c, 'audit-s');
+  const urls = imageUrls(g), hist = historyOf(g);
+  const pass = ctl.successWhileSaving > 0 && urls.some(u => u.includes('mock-ws-1')) && hist.some(h => h.status === 'success' && h.outputs.some(u => u.includes('mock-ws-1')))
+    && sNode.x === 733 && !(g.pendingTasks || []).length;
+  record('GEN_smart_result_while_save_in_flight', pass, { successWhileSaving: ctl.successWhileSaving, images: urls, history: hist, sX: sNode.x, pendingLeft: (g.pendingTasks || []).length, puts: ctl.putStatuses });
+  await page.close();
+}
+
+async function genSmartDuring409(browser) {
+  const id = await createTestCanvas('smart', [genNode('audit-g', 100, 100),
+    { id: 'audit-s', type: 'smart-text', x: 700, y: 100, w: 440, h: 250, title: 'S', text: '' },
+    { id: 'audit-t', type: 'smart-text', x: 700, y: 500, w: 440, h: 250, title: 'T', text: '' }]);
+  const page = await openSmart(browser, id, 3);
+  const ctl = await installGenMocks(page, { canvasId: id, prefix: 'mock-409' });
+  await startSmartRun(page, 'audit-g');
+  await sleep(3500);
+  // 另一个客户端修改 T；client_id 用本页的，使本页不收到广播，下一次保存必然 409
+  const clientId = await page.evaluate('smartClientId');
+  const cur = await getCanvas(id);
+  const tNodes = cur.nodes.map(n => n.id === 'audit-t' ? { ...n, x: n.x + 44 } : n);
+  const ext = await api('PUT', `/api/canvases/${id}`, { nodes: tNodes, base_updated_at: cur.updated_at, client_id: clientId });
+  ctl.putDelay = 4000;
+  await page.evaluate(`nodes.find(n=>n.id==='audit-s').x += 55; scheduleSave();`);
+  await sleep(800);
+  ctl.releasedAll = true;                 // 结果在“这次注定 409 的保存”进行中到达
+  await sleep(16000);
+  const c = await getCanvas(id);
+  const g = nodeOf(c, 'audit-g');
+  const urls = imageUrls(g), hist = historyOf(g);
+  const pass = ctl.putStatuses.includes(409) && ctl.successWhileSaving > 0
+    && urls.some(u => u.includes('mock-409-1')) && hist.some(h => h.status === 'success' && h.outputs.some(u => u.includes('mock-409-1')))
+    && nodeX(c, 'audit-t') === 744 && nodeX(c, 'audit-s') === 755 && !(g.pendingTasks || []).length;
+  record('GEN_smart_result_during_409_merge', pass, { externalPut: ext ? 'ok' : 'failed', puts: ctl.putStatuses, successWhileSaving: ctl.successWhileSaving, images: urls, history: hist, tX: nodeX(c, 'audit-t'), sX: nodeX(c, 'audit-s'), pendingLeft: (g.pendingTasks || []).length });
+  await page.close();
+}
+
+async function genSmartTwoTabsHistory(browser) {
+  const id = await createTestCanvas('smart', [genNode('audit-g', 100, 100)]);
+  const p1 = await openSmart(browser, id, 1);
+  const p2 = await openSmart(browser, id, 1);
+  const c1 = await installGenMocks(p1, { canvasId: id, prefix: 'mock-tab1' });
+  const c2 = await installGenMocks(p2, { canvasId: id, prefix: 'mock-tab2' });
+  c1.putDelay = c2.putDelay = 1500;       // 让两边都先开始生成，再看到对方的保存
+  await Promise.all([startSmartRun(p1, 'audit-g'), startSmartRun(p2, 'audit-g')]);
+  await sleep(4000);
+  c1.releasedAll = true;
+  c2.releasedAll = true;
+  c1.putDelay = c2.putDelay = 0;
+  await sleep(14000);
+  const g = nodeOf(await getCanvas(id), 'audit-g');
+  const hist = historyOf(g);
+  const has = tag => hist.some(h => h.status === 'success' && h.outputs.some(u => u.includes(tag)));
+  const p1Hist = await p1.evaluate(`(nodes.find(n=>n.id==='audit-g').generationHistory||[]).length`);
+  const p2Hist = await p2.evaluate(`(nodes.find(n=>n.id==='audit-g').generationHistory||[]).length`);
+  record('GEN_smart_two_tabs_both_history_entries_kept', has('mock-tab1') && has('mock-tab2') && p1Hist >= 2 && p2Hist >= 2,
+    { serverHistory: hist, tab1LocalHistory: p1Hist, tab2LocalHistory: p2Hist, tab1Puts: c1.putStatuses, tab2Puts: c2.putStatuses });
+  await p1.close(); await p2.close();
+}
+
+const classicGenNodes = () => [
+  { id: 'audit-n1', type: 'prompt', x: 100, y: 100, text: 'a cat' },
+  { id: 'audit-g1', type: 'generator', x: 600, y: 100, apiProvider: 'codex', model: 'gpt-image-2' },
+  { id: 'audit-n2', type: 'prompt', x: 100, y: 700, text: 'a dog' },
+  { id: 'audit-g2', type: 'generator', x: 600, y: 700, apiProvider: 'codex', model: 'gpt-image-2' },
+];
+async function seedClassicGen() {
+  const id = await createTestCanvas('classic', classicGenNodes());
+  const c0 = await getCanvas(id);
+  await api('PUT', `/api/canvases/${id}`, { connections: [{ id: 'audit-e1', from: 'audit-n1', to: 'audit-g1' }, { id: 'audit-e2', from: 'audit-n2', to: 'audit-g2' }], base_updated_at: c0.updated_at });
+  return id;
+}
+const outputUrlsOf = c => (c.nodes || []).filter(n => n.type === 'output').flatMap(n => (n.images || []).map(i => i?.url || i));
+const logOutputsOf = c => (c.logs || []).flatMap(l => (l.outputs || []).map(o => o?.url || o));
+
+async function genClassicDuring409(browser) {
+  const id = await seedClassicGen();
+  const page = await openClassic(browser, id, 4);
+  await page.evaluate('stopCanvasRemotePolling()');
+  const ctl = await installGenMocks(page, { canvasId: id, prefix: 'mock-c409' });
+  await page.evaluate(`void runGenerator('audit-g1')`);
+  await sleep(4000);
+  const cur = await getCanvas(id);
+  const ext = await api('PUT', `/api/canvases/${id}`, { nodes: cur.nodes.map(n => n.id === 'audit-n2' ? { ...n, x: n.x + 77 } : n), base_updated_at: cur.updated_at });
+  ctl.putDelay = 4000;
+  await page.evaluate(`nodes.find(n=>n.id==='audit-n1').x += 11; scheduleSave();`);
+  await sleep(800);
+  ctl.releasedAll = true;
+  await sleep(16000);
+  const c = await getCanvas(id);
+  const outs = outputUrlsOf(c), logs = logOutputsOf(c);
+  const pass = ctl.putStatuses.includes(409) && ctl.successWhileSaving > 0 && outs.some(u => u.includes('mock-c409-1')) && logs.some(u => u.includes('mock-c409-1'))
+    && nodeX(c, 'audit-n2') === 177 && nodeX(c, 'audit-n1') === 111;
+  record('GEN_classic_result_during_409_merge', pass, { externalPut: ext ? 'ok' : 'failed', puts: ctl.putStatuses, successWhileSaving: ctl.successWhileSaving, outputImages: outs, logOutputs: logs, n1x: nodeX(c, 'audit-n1'), n2x: nodeX(c, 'audit-n2') });
+  await page.close();
+}
+
+async function genClassicTwoTabsLogs(browser) {
+  const id = await seedClassicGen();
+  const p1 = await openClassic(browser, id, 4);
+  const p2 = await openClassic(browser, id, 4);
+  await p1.evaluate('stopCanvasRemotePolling()');
+  await p2.evaluate('stopCanvasRemotePolling()');
+  const c1 = await installGenMocks(p1, { canvasId: id, prefix: 'mock-ctab1' });
+  const c2 = await installGenMocks(p2, { canvasId: id, prefix: 'mock-ctab2' });
+  await Promise.all([p1.evaluate(`void runGenerator('audit-g1')`), p2.evaluate(`void runGenerator('audit-g2')`)]);
+  await sleep(4000);
+  c1.releasedAll = true;
+  c2.releasedAll = true;
+  await sleep(14000);
+  const c = await getCanvas(id);
+  const logs = logOutputsOf(c), outs = outputUrlsOf(c);
+  record('GEN_classic_two_tabs_both_log_entries_kept', logs.some(u => u.includes('mock-ctab1')) && logs.some(u => u.includes('mock-ctab2')) && outs.some(u => u.includes('mock-ctab1')) && outs.some(u => u.includes('mock-ctab2')),
+    { logOutputs: logs, outputImages: outs, tab1Puts: c1.putStatuses, tab2Puts: c2.putStatuses });
+  await p1.close(); await p2.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -445,6 +613,8 @@ async function apiSemantics() {
     ['A2', () => a2Classic(browser)], ['A2', () => a2Smart(browser)],
     ['A1', () => a1Classic(browser)], ['A1', () => a1Smart(browser)],
     ['A3', () => a3Smart(browser)],
+    ['GEN', () => genSmartWhileSaving(browser)], ['GEN', () => genSmartDuring409(browser)], ['GEN', () => genSmartTwoTabsHistory(browser)],
+    ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
