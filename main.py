@@ -1662,10 +1662,33 @@ def get_primary_provider_id(providers=None):
         return non_ms["id"]
     return providers[0]["id"] if providers else "modelscope"
 
+# 前端在平台列表为空时会发送 "comfly"（旧版默认平台 id）。没有配置同名平台时，
+# 它与空值一样表示“使用默认平台”，以保持旧页面可用。
+LEGACY_DEFAULT_PROVIDER_ALIASES = {"comfly"}
+
+def unknown_provider_error(provider_id):
+    return HTTPException(
+        status_code=400,
+        detail=f"未找到 API 平台：{provider_id}。该平台可能已被删除或改名，请在节点或 API 设置中重新选择平台。",
+    )
+
+def is_unknown_provider_id(provider_id, providers=None):
+    """非空、非旧版默认别名、且不在当前配置中的平台 id。"""
+    target = str(provider_id or "").strip().lower()
+    if not target:
+        return False
+    providers = providers if providers is not None else load_api_providers()
+    if any(p["id"] == target for p in providers):
+        return False
+    return target not in LEGACY_DEFAULT_PROVIDER_ALIASES
+
 def get_api_provider(provider_id="comfly"):
     providers = load_api_providers()
     target = (provider_id or "").strip().lower()
-    # 兼容旧的 "comfly" 硬编码：若 comfly 不存在或未指定，回退到首选 provider
+    # 找不到明确指定的平台时直接报错，不再悄悄改用首选平台（否则任务会被发到别的服务商）。
+    # 只有“未指定”（空值或旧版默认别名 comfly）才回退到首选平台。
+    if is_unknown_provider_id(target, providers):
+        raise unknown_provider_error(target)
     if not target or not any(p["id"] == target for p in providers):
         target = get_primary_provider_id(providers)
     provider = next((p for p in providers if p["id"] == target), None)
@@ -12364,6 +12387,8 @@ def chat_split_parallel_prompts(prompt, count):
     return [f"{item}的{suffix}" for item in candidates[:count]]
 
 def pick_chat_image_provider(provider_id="", fallback_id=""):
+    if is_unknown_provider_id(provider_id):
+        raise unknown_provider_error(str(provider_id).strip().lower())
     providers = [p for p in load_api_providers() if p.get("enabled", True) and (p.get("image_models") or [])]
     for target in (provider_id, fallback_id):
         clean = str(target or "").strip().lower()
@@ -15657,6 +15682,9 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    # 在创建后台任务前解析平台：未知或已禁用的平台立即返回 400，
+    # 而不是先返回 task_id、再在后台悄悄改用其他平台。
+    get_api_provider(payload.provider_id)
     validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
     if payload.provider_id == "kie":
         try:
