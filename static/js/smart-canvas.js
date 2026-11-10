@@ -2538,7 +2538,8 @@ function imageProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'volcengine' && (p.image_models || []).length);
 }
 function isKieProviderId(providerId){
-    return String(providerId || '').trim().toLowerCase() === 'kie';
+    const provider = apiProviders.find(item => item.id === providerId);
+    return provider ? provider.protocol === 'kie' : String(providerId || '').trim().toLowerCase() === 'kie';
 }
 function kieCapabilityKey(providerId=settings.provider_id, model=settings.model){
     return `${String(providerId || '').trim().toLowerCase()}:${String(model || '').trim()}`;
@@ -9449,7 +9450,7 @@ function nodeBodyHtml(node, layout){
         return jimengPendingBodyHtml(node, layout);
     }
     const recoverTask = smartRecoverableImageTask(node);
-    if(recoverTask && imgs.length === 0){
+    if(recoverTask){
         return imageTaskRecoverBodyHtml(node, recoverTask, layout);
     }
     if(node.queued && imgs.length === 0 && !node.pending){
@@ -9495,14 +9496,14 @@ function smartRecoverableImageTask(node){
 function imageTaskRecoverBodyHtml(node, task, layout){
     const querying = Boolean(task.querying);
     const failedCount = smartPendingTasks(node).filter(item => item.failed && item.recoverTaskId).length;
-    const title = querying ? '查询中' : '任务未丢失';
-    const sub = failedCount > 1 ? `还有 ${failedCount} 个任务可查询` : `任务 ID：${task.recoverTaskId || ''}`;
+    const title = querying ? '恢复中' : task.resultRecoveryRequired ? '生成已完成，结果下载待恢复' : '任务未丢失';
+    const sub = task.controlled ? '只查询原任务，不会重新生成或计费生成' : failedCount > 1 ? `还有 ${failedCount} 个任务可查询` : '可查询原任务';
     return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
         <div class="jimeng-pending-overlay">
             <div class="jimeng-pending-spinner"><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i></div>
             <div class="jimeng-pending-text">${escapeHtml(title)}</div>
             <div class="jimeng-pending-sub">${escapeHtml(sub)}</div>
-            <button class="jimeng-pending-query" type="button" data-image-task-query="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
+            <button class="jimeng-pending-query" type="button" data-image-task-query="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '恢复中…' : task.resultRecoveryRequired ? '恢复结果' : '查询结果'}</span></button>
         </div>
     </div>`;
 }
@@ -10140,7 +10141,7 @@ async function runFocusEdit(){
                 if(!runningHubSelectedModel(runSettings)) throw new Error('当前 RunningHub 工作流未声明焦点编辑能力，请切换到支持参考图编辑的图片模型');
                 apiSettings = runningHubModelApiSettings(runSettings);
             }
-            const submitted = await runApiGeneration(request.prompt, request.refs, apiSettings);
+            const submitted = await runApiGeneration(request.prompt, request.refs, apiSettings, target);
             const taskIds = Array.isArray(submitted?.taskIds) ? submitted.taskIds : [];
             if(!taskIds.length) throw new Error('焦点编辑任务提交失败');
             target.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:submitted.providerId, model:submitted.model, status:'queued', generationId:attempt.id}));
@@ -10175,7 +10176,8 @@ async function runFocusEdit(){
     }
     return nodeGenerationAttempt(target, attempt.id)?.status === 'success';
 }
-function nodeGenerationHistoryStatusLabel(status){
+function nodeGenerationHistoryStatusLabel(status, localResultStatus=''){
+    if(localResultStatus === 'pending') return '结果待恢复';
     return status === 'success' ? '成功' : status === 'running' ? '生成中' : status === 'cancelled' ? '已取消' : '失败';
 }
 function nodeGenerationHistoryTypeLabel(type){
@@ -10256,7 +10258,7 @@ function renderNodeGenerationHistoryPanel(){
     const upstreamTaskIds = Array.from(new Set([selected.upstreamTaskId, ...(selected.upstreamTaskIds || [])].filter(Boolean)));
     const refs = selected.references || [];
     const details = [
-        ['状态', (selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status))],
+        ['状态', (selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus))],
         ['本地任务 ID', taskIds.join(' / ') || '未记录'],
         ['上游任务 ID', upstreamTaskIds.join(' / ') || '未记录'],
         ['Provider', selected.providerId || '未记录'],
@@ -10280,13 +10282,13 @@ function renderNodeGenerationHistoryPanel(){
             return `<button type="button" class="node-generation-history-card ${item.id === selected.id ? 'selected' : ''} ${adopted ? 'adopted' : ''}" data-generation-history-id="${escapeAttr(item.id)}">
                 <span class="node-generation-history-thumb">${preview ? smartPreviewImgHtml(preview.url, 240) : `<i data-lucide="${item.status === 'running' ? 'loader-2' : item.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i>`}</span>
                 <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}${item.mode === 'focus-edit' ? ' · 焦点编辑' : ''}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
-                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml((item.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(item.status)))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml((item.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(item.status, item.localResultStatus)))}</span>
             </button>`;
         }).join('')}</aside>
         <main class="node-generation-history-main">
             <div class="node-generation-history-preview">${nodeGenerationHistoryPreviewHtml(selected)}</div>
             <div class="node-generation-history-adopt-row">
-                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml((selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status)))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml((selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus)))}</span>
                 <button type="button" class="node-generation-history-adopt" data-node-id="${escapeAttr(node.id)}" data-generation-history-adopt="${escapeAttr(selected.id)}" ${selected.status === 'success' && !current ? '' : 'disabled'}>${current ? '当前版本' : '采纳到当前节点'}</button>
             </div>
             <dl class="node-generation-history-details">${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
@@ -10342,7 +10344,7 @@ function smartGenerationRuntimeState(node, generationId=''){
     const requestedAttempt = generationId ? nodeGenerationAttempt(node, generationId) : null;
     const attempt = requestedAttempt || nodeGenerationAttempt(node) || nodeGenerationHistoryItems(node).find(item => item?.id && cancellingSmartGenerationIds.has(item.id));
     const cancelling = Boolean(attempt?.id && cancellingSmartGenerationIds.has(attempt.id));
-    const visible = Boolean(attempt && (attempt.status === 'running' || cancelling));
+    const visible = Boolean(attempt && attempt.localResultStatus !== 'pending' && (attempt.status === 'running' || cancelling));
     const status = smartPendingRuntimeStatus(node) || (cancelling ? 'cancelling' : (node?.running ? 'preparing' : (attempt?.status === 'running' ? 'generating' : String(attempt?.status || ''))));
     return {
         attempt,
@@ -16850,6 +16852,7 @@ function completeNodeGenerationAttempt(node, outputs, options={}){
     attempt.outputs = merged;
     attempt.outputKind = options.kind || attempt.outputKind || mediaKindForUrls(merged, 'image');
     attempt.status = 'success';
+    attempt.localResultStatus = 'completed';
     attempt.completedAt = nowMs();
     attempt.updatedAt = attempt.completedAt;
     attempt.error = '';
@@ -19327,7 +19330,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         settings = previousSettings;
         let result;
         if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
-            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings);
+            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings, outputSlot);
             const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             const existing = cleanHistoryImages(outputSlot.images || []);
@@ -19342,7 +19345,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 outputSlot.images = [];
             }
             outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model, status:'queued'}));
-            outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
+            outputSlot.pending = taskResult.controlled ? taskIds.length : Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
             scheduleSave();
@@ -19826,12 +19829,12 @@ async function runGeneration(options={}){
         const rhModelMode = settings.engine === 'runninghub' && Boolean(runningHubSelectedModel(settings));
         const priorRunningHubTaskId = settings.rhTaskId || '';
         const outImages = rhModelMode
-            ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings))
+            ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings), pendingNode)
             : settings.engine === 'runninghub'
                 ? await runRunningHubGeneration(prompt, refs)
                 : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
-                : await runApiGeneration(prompt, refs);
+                : await runApiGeneration(prompt, refs, settings, pendingNode);
         if(generationRunToken?.cancelRequested){
             const lateTaskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds.filter(Boolean) : [];
             if(lateTaskIds.length){
@@ -19850,7 +19853,7 @@ async function runGeneration(options={}){
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, status:'queued', generationId:generationAttempt?.id || ''}));
             bindNodeGenerationAttemptTasks(pendingNode, taskIds, {providerId:outImages.providerId, model:outImages.model});
-            pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
+            pendingNode.pending = outImages.controlled ? taskIds.length : Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
             pendingNode.running = false;
@@ -20052,7 +20055,7 @@ function comfyFieldKind(field){
     if(field?.type === 'textarea' || /prompt|text|提示词|正向|负向/.test(key)) return 'prompt';
     return 'setting';
 }
-async function runApiGeneration(prompt, refs, runSettings=settings){
+async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=null){
     await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     // 平台已删除/不可用：明确报错，不提交任务（A1）。
@@ -20082,6 +20085,22 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         reference_images:imageRefs
     };
     if(kieSchema) KieImageParams.validate(kieSchema, payload, imageRefs.length);
+    const limits = apiProviders.find(item => item.id === runSettings.provider_id)?.model_limits?.[runSettings.model];
+    if(limits){
+        if(count > limits.max_images) throw new Error(`单次最多生成 ${limits.max_images} 张图片`);
+        payload.n = count;
+        payload.request_id = crypto.randomUUID();
+        if(bindingNode){
+            await saveCanvas();
+            payload.canvas_id = canvasId;
+            payload.node_id = bindingNode.id;
+            payload.generation_id = bindingNode.activeGenerationId || '';
+        }
+        const response = await fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        if(!response.ok) throw new Error(await response.text());
+        const task = await response.json();
+        return {taskIds:[task.task_id], count, controlled:true, providerId:payload.provider_id, model:payload.model};
+    }
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw await ModelPromptLimits.responseError(r);
         return r.json();
@@ -20660,6 +20679,7 @@ function smartPendingTasks(node){
     return node.pendingTasks.filter(task => task && task.taskId);
 }
 function smartTaskHasTerminalFailure(task){
+    if(task?.resultRecoveryRequired || task?.status === 'result_recovery_required') return false;
     const status = String(task?.status || task?.upstreamStatus || '').trim().toLowerCase();
     return ['fail','failed','error','canceled','cancelled'].includes(status);
 }
@@ -20812,8 +20832,12 @@ class ImageTaskRecoverSignal extends Error {
         this.taskId = data.taskId || data.task_id || '';
         this.recoverTaskId = data.recoverTaskId || data.upstream_task_id || data.task_id || '';
         this.providerId = data.providerId || data.provider_id || '';
+        this.controlled = !!data.controlled;
         this.kind = data.kind || 'image';
     }
+}
+function controlledImageTaskRecovery(taskId, message){
+    return new ImageTaskRecoverSignal({taskId, recoverTaskId:taskId, controlled:true, message});
 }
 function extractUpstreamTaskId(text){
     const match = String(text || '').match(/(?:task_id|taskId|task id)\s*[=:：]\s*([A-Za-z0-9_.:-]+)/i);
@@ -20965,7 +20989,16 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     task.recoverTaskId = recoverTaskId;
     render();
     try {
-        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        let data;
+        if(task.controlled){
+            const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh`, {method:'POST'});
+            if(!response.ok) throw new Error(await response.text());
+            const owned = await response.json();
+            assertSmartTaskBinding(owned, node, task);
+            data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId, node, task)};
+        } else {
+            data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        }
         if(data.status === 'succeeded'){
             task.failed = false;
             task.querying = false;
@@ -20994,6 +21027,13 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             toast(task.error);
         }
     } catch(e){
+        if(e?.resultRecoveryRequired){
+            task.resultRecoveryRequired = true;
+            task.status = 'result_recovery_required';
+            const attempt = nodeGenerationAttemptForTask(node, task.taskId);
+            if(attempt) attempt.localResultStatus = 'pending';
+            node.runTimerHidden = true;
+        }
         task.error = e.message || '查询失败';
         toast(task.error.slice(0, 160));
     } finally {
@@ -21036,7 +21076,7 @@ function resumeJimengPendingNodes(){
         startJimengPoll(n);
     });
 }
-async function pollSmartCanvasTask(taskId){
+async function pollSmartCanvasTask(taskId, bindingNode=null, bindingTask=null){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const controller = new AbortController();
@@ -21049,12 +21089,21 @@ async function pollSmartCanvasTask(taskId){
                 response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {signal:controller.signal});
             } catch(error){
                 if(controller.signal.aborted) throw new SmartTaskCancelledSignal();
+                if(apiProviders.some(provider => provider.model_limits)){
+                    throw controlledImageTaskRecovery(taskId, '本地任务查询断开，可手动查询原任务；未重新提交');
+                }
                 throw error;
             }
             if(!response.ok) throw new Error(await response.text());
             const task = await response.json();
+            if(bindingNode && bindingTask) assertSmartTaskBinding(task, bindingNode, bindingTask);
             updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status, task.upstream_task_id || '');
             if(task.status === 'succeeded') return task.result || {};
+            if(task.status === 'result_recovery_required'){
+                const signal = controlledImageTaskRecovery(taskId, task.error);
+                signal.resultRecoveryRequired = true;
+                throw signal;
+            }
             if(task.status === 'canceled') throw new SmartTaskCancelledSignal();
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
@@ -21062,6 +21111,9 @@ async function pollSmartCanvasTask(taskId){
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
                 if(recoverTaskId && !smartTaskHasTerminalFailure({status:task.upstream_status})){
                     throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+                }
+                if(task.recovery === 'query-existing'){
+                    throw controlledImageTaskRecovery(taskId, task.error);
                 }
                 throw new Error(task.error || tr('smart.errRunFailed'));
             }
@@ -21152,7 +21204,7 @@ async function resumeSmartPendingNode(node, logContext={}){
     await Promise.all(tasks.map(async task => {
         if(task.failed && task.recoverTaskId) return;
         try {
-            const result = await pollSmartCanvasTask(task.taskId);
+            const result = await pollSmartCanvasTask(task.taskId, node, task);
             node = liveNodeGenerationState(node);
             if(!node || node.id !== nodeId) return;
             finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image');
@@ -21193,14 +21245,23 @@ async function resumeSmartPendingNode(node, logContext={}){
             }
             if(e && e.imageTaskRecover && e.recoverTaskId){
                 liveTask.failed = true;
+                liveTask.resultRecoveryRequired = !!e.resultRecoveryRequired;
+                if(liveTask.resultRecoveryRequired){
+                    liveTask.status = 'result_recovery_required';
+                    const attempt = nodeGenerationAttemptForTask(node, liveTask.taskId);
+                    if(attempt) attempt.localResultStatus = 'pending';
+                    node.runTimerHidden = true;
+                }
                 liveTask.querying = false;
                 liveTask.recoverTaskId = e.recoverTaskId;
+                liveTask.controlled = !!e.controlled;
                 liveTask.providerId = e.providerId || liveTask.providerId || providerIdForSmartTask(node, liveTask);
                 liveTask.error = e.message || tr('smart.errRunFailed');
                 node.running = false;
                 node.pending = Math.max(1, smartPendingTasks(node).length);
-                logTaskFailure(liveTask.error, liveTask);
-                toast('任务未丢失，可稍后手动查询结果');
+                // Recovery is a local delivery event, not a second generation failure log.
+                if(!liveTask.resultRecoveryRequired) logTaskFailure(liveTask.error, liveTask);
+                toast(liveTask.resultRecoveryRequired ? '图片已在上游生成成功，本地结果尚未恢复' : '任务未丢失，可稍后手动查询结果');
                 render();
                 scheduleSave();
                 return;
@@ -21258,8 +21319,31 @@ async function resumeSmartPendingNode(node, logContext={}){
         throw failures[0] || cancellations[0];
     }
 }
+function assertSmartTaskBinding(record, node, task){
+    const binding = record.binding || {};
+    if(binding.canvas_id && (binding.canvas_id !== canvasId || binding.node_id !== node.id ||
+        (binding.generation_id && binding.generation_id !== task.generationId))){
+        throw new Error('原任务不属于此画布节点，未回填');
+    }
+}
+const smartRecoveryStateChecks = new Set();
+async function checkSmartRecoveredResult(node, task){
+    if(smartRecoveryStateChecks.has(task.taskId)) return;
+    smartRecoveryStateChecks.add(task.taskId);
+    try {
+        const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}`);
+        if(!response.ok) return;
+        const record = await response.json();
+        assertSmartTaskBinding(record, node, task);
+        if(record.status === 'succeeded'){
+            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(record.result?.image_items || record.result?.images || []), 'image');
+            render(); scheduleSave();
+        }
+    } catch { /* A page load checks local state once; only an explicit button retries downloads. */ }
+}
 function resumeSmartPendingTasks(){
     nodes.filter(node => smartPendingTasks(node).length).forEach(node => {
+        smartPendingTasks(node).filter(task => task.controlled && task.resultRecoveryRequired).forEach(task => checkSmartRecoveredResult(node, task));
         resumeSmartPendingNode(node).catch(error => {
             if(error?.smartTaskCancelled) return;
             console.error(error);

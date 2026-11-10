@@ -827,6 +827,7 @@ function localChildPath(parentPath='', name=''){
 }
 // ---------------- 共享文件夹（服务端登记 + 只读浏览/引用，局域网可用） ----------------
 async function loadSharedFolders(){
+    if(window.InstanceSession && !window.InstanceSession.can('system_admin')) { sharedFolders = []; return sharedFolders; }
     try {
         const data = await apiJson('/api/shared-folders');
         sharedFolders = Array.isArray(data.folders) ? data.folders : [];

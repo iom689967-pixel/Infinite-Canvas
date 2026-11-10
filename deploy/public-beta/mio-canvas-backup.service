@@ -1,0 +1,27 @@
+[Unit]
+Description=Back up Mio Canvas Public Beta data
+After=mio-canvas-gateway.service
+
+[Service]
+Type=oneshot
+User=mio-canvas
+Group=mio-canvas
+WorkingDirectory=/opt/mio-canvas/app
+EnvironmentFile=/opt/mio-canvas/config/public-beta.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/mio-canvas/venv/bin/python /opt/mio-canvas/app/public_beta_backup.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/opt/mio-canvas/public-beta /opt/mio-canvas/instances /opt/mio-canvas/backups /opt/mio-canvas/logs
+StandardOutput=append:/opt/mio-canvas/logs/backup.log
+StandardError=append:/opt/mio-canvas/logs/backup.log

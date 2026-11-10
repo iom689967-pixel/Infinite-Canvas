@@ -27,7 +27,7 @@ jobs:
           node-version: "lts/*"
 
       - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements-dev.txt
 
       - name: Run project checks
         run: ./scripts/check.sh

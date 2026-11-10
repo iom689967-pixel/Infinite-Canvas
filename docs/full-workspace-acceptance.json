@@ -1,0 +1,18 @@
+{
+  "a_canvas_count": 2,
+  "b_canvas_count": 0,
+  "a_provider_present": true,
+  "b_personal_providers_empty": true,
+  "smart_prompt_and_model_persisted": true,
+  "b_cannot_read_a_canvas_status": 404,
+  "b_cannot_read_a_media_status": 404,
+  "unauthenticated_statuses": {
+    "canvas_api": 401,
+    "settings_api": 401,
+    "uploaded_media": 401,
+    "full_html": 401
+  },
+  "unauthenticated_navigation": "login",
+  "real_createTask": 0,
+  "real_upload": 0
+}

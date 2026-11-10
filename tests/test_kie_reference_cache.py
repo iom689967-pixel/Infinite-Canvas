@@ -307,24 +307,15 @@ class KieReferenceUploadCacheTests(unittest.IsolatedAsyncioTestCase):
         metric_rows = [json.loads(line) for line in lines if '"event": "kie_reference_prepare_metrics"' in line]
         self.assertEqual(len(metric_rows), 2)
         for metrics in metric_rows:
-            self.assertIn("total_reference_prepare_ms", metrics)
+            self.assertIn("elapsed_ms", metrics)
+            self.assertEqual(metrics["reference_count"], 1)
             self.assertIn("cache_hits", metrics)
             self.assertIn("cache_misses", metrics)
             self.assertIn("source_cache_hits", metrics)
             self.assertIn("source_cache_misses", metrics)
             self.assertIn("normalize_skipped_count", metrics)
-            timing = metrics["references"][0]
-            for key in (
-                "source_fingerprint_ms",
-                "source_cache_lookup_ms",
-                "source_cache_wait_ms",
-                "stale_validate_ms",
-                "normalize_ms",
-                "cache_lookup_ms",
-                "upload_ms",
-                "validate_ms",
-            ):
-                self.assertIn(key, timing)
+            self.assertNotIn("references", metrics)
+            self.assertNotIn("total_reference_prepare_ms", metrics)
         self.assertEqual(metric_rows[1]["normalize_skipped_count"], 1)
         self.assertIn("stale_normalize_avoided_count", metric_rows[1])
 
