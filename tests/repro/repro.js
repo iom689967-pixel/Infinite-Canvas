@@ -330,6 +330,65 @@ async function a2Smart(browser) {
   await page.close();
 }
 
+// ---------------- A1 前端：不悄悄换平台、不凭空造 comfly ----------------
+const DELETED_PROVIDER = 'audit-deleted-provider';
+function countRequests(page, pattern) {
+  const hits = [];
+  page.on('request', req => { if (req.method() === 'POST' && req.url().includes(pattern)) hits.push(req.postData() || ''); });
+  return hits;
+}
+async function a1Classic(browser) {
+  const id = await createTestCanvas('classic', [
+    { id: 'audit-n1', type: 'prompt', x: 100, y: 100, text: 'a cat' },
+    { id: 'audit-g1', type: 'generator', x: 600, y: 100, apiProvider: DELETED_PROVIDER, model: 'gpt-image-2' },
+    { id: 'audit-v1', type: 'video', x: 600, y: 700, apiProvider: '', model: 'veo3-fast' },
+  ]);
+  const c0 = await getCanvas(id);
+  await api('PUT', `/api/canvases/${id}`, { connections: [{ id: 'audit-e1', from: 'audit-n1', to: 'audit-g1' }, { id: 'audit-e2', from: 'audit-n1', to: 'audit-v1' }], base_updated_at: c0.updated_at });
+  const page = await openClassic(browser, id, 3);
+  page.on('dialog', d => d.dismiss().catch(() => {}));
+  const imageTasks = countRequests(page, '/api/canvas-image-tasks');
+  const videoCalls = countRequests(page, '/api/canvas-video');
+  await page.evaluate(`render(); nodes.find(n=>n.id==='audit-n1').x += 10; scheduleSave();`);
+  await sleep(2500);
+  const c = await getCanvas(id);
+  const g1 = nodeOf(c, 'audit-g1'), v1 = nodeOf(c, 'audit-v1');
+  const optionsShowStale = await page.evaluate(`providerOptions(${JSON.stringify(DELETED_PROVIDER)}).includes(${JSON.stringify(DELETED_PROVIDER)}) && providerOptions(${JSON.stringify(DELETED_PROVIDER)}).includes('⚠')`);
+  await page.evaluate(`runGenerator('audit-g1')`);
+  await sleep(800);
+  const generatorError = await page.evaluate(`document.getElementById('errorMessage')?.textContent || ''`);
+  await page.evaluate(`document.getElementById('errorModal')?.classList.remove('open'); runVideoNode('audit-v1')`);
+  await sleep(800);
+  const videoError = await page.evaluate(`document.getElementById('errorMessage')?.textContent || ''`);
+  record('A1_classic_deleted_provider_not_switched',
+    g1.apiProvider === DELETED_PROVIDER && g1.model === 'gpt-image-2' && optionsShowStale && generatorError.includes(DELETED_PROVIDER) && imageTasks.length === 0,
+    { saved: { apiProvider: g1.apiProvider, model: g1.model }, optionsShowStale, generatorError: generatorError.slice(0, 80), imageTaskRequests: imageTasks.length });
+  record('A1_classic_no_phantom_comfly',
+    v1.apiProvider !== 'comfly' && v1.model === 'veo3-fast' && videoCalls.length === 0 && !videoCalls.some(b => b.includes('comfly')),
+    { savedVideo: { apiProvider: v1.apiProvider, model: v1.model }, videoError: videoError.slice(0, 80), videoRequests: videoCalls.length, sentProviders: videoCalls.map(b => { try { return JSON.parse(b).provider_id; } catch (e) { return '?'; } }) });
+  await page.close();
+}
+async function a1Smart(browser) {
+  const id = await createTestCanvas('smart', [
+    { id: 'audit-g', type: 'smart-image-generation', x: 100, y: 100, w: 440, h: 250, title: 'G',
+      runSettings: { engine: 'api', apiKind: 'image', provider_id: DELETED_PROVIDER, model: 'gpt-image-2' } },
+  ]);
+  const page = await openSmart(browser, id, 1);
+  const imageTasks = countRequests(page, '/api/canvas-image-tasks');
+  await page.evaluate(`selectedId = 'audit-g'; updateComposer(); renderDynamicParams();`);
+  await sleep(1000);
+  const pill = await page.evaluate(`document.querySelector('#dynamicParams .provider-control .sub, .provider-control .sub')?.textContent || ''`);
+  await page.evaluate(`scheduleSave()`);
+  await sleep(2500);
+  const g = nodeOf(await getCanvas(id), 'audit-g');
+  const runError = await page.evaluate(`runApiGeneration('a cat', [], nodes.find(n=>n.id==='audit-g').runSettings).then(() => 'ran', e => e.message)`);
+  await sleep(500);
+  record('A1_smart_deleted_provider_not_switched',
+    g.runSettings?.provider_id === DELETED_PROVIDER && g.runSettings?.model === 'gpt-image-2' && pill.includes(DELETED_PROVIDER) && runError.includes(DELETED_PROVIDER) && imageTasks.length === 0,
+    { saved: { provider_id: g.runSettings?.provider_id, model: g.runSettings?.model }, pill, runError: String(runError).slice(0, 80), imageTaskRequests: imageTasks.length });
+  await page.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -360,6 +419,7 @@ async function apiSemantics() {
     ['C2', () => c2(browser, 'smart')], ['C2', () => c2(browser, 'classic')],
     ['C3', () => c3(browser)], ['C4', () => c4(browser)],
     ['A2', () => a2Classic(browser)], ['A2', () => a2Smart(browser)],
+    ['A1', () => a1Classic(browser)], ['A1', () => a1Smart(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {

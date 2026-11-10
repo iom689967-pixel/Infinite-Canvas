@@ -423,7 +423,7 @@ let comfyBackendCount = 1;
 let comfyWorkflows = [];
 let comfyWorkflowCache = {};
 let runningHubWorkflowCache = {};
-let managedProviderId = 'comfly';
+let managedProviderId = '';
 let localImageModels = [];
 let localChatModels = [];
 const MS_GEN_MODELS = {
@@ -674,8 +674,38 @@ function uniqueModels(list){
         return true;
     });
 }
-function defaultApiProviders(){
-    return [{id:'comfly', name:'Comfly', base_url:'', enabled:true, image_models:imageModels, chat_models:chatModels, video_models:videoModels.length ? videoModels : DEFAULT_VIDEO_MODELS, has_key:false, key_preview:''}];
+// ---- 平台解析（A1 前端）----
+// 以前：平台列表为空时凭空造出一个不存在的 “comfly” 平台；节点上的平台被删除或不可用时，
+// 渲染一次就悄悄换成列表里的第一个平台并保存——任务被发到用户没选过的服务商。
+// 现在：未选择时才默认取第一个；明确选过的平台原样保留，下拉框标出“已删除或不可用”，运行前给出明确错误。
+// “comfly” 是旧版的默认平台 id：没有配置同名平台时，等同于“未选择”。
+const LEGACY_DEFAULT_PROVIDER_IDS = new Set(['comfly']);
+function isUnsetProviderId(id){
+    const value = String(id || '').trim();
+    if(!value) return true;
+    return LEGACY_DEFAULT_PROVIDER_IDS.has(value.toLowerCase()) && !apiProviders.some(p => p.id === value);
+}
+function resolveProviderFromList(id, providers){
+    if(isUnsetProviderId(id)) return providers[0]?.id || '';
+    return String(id).trim();
+}
+function providerUnavailable(id, providers){
+    return !isUnsetProviderId(id) && !providers.some(p => p.id === String(id).trim());
+}
+// 运行前检查：返回错误文案；可以运行时返回空字符串。
+function canvasProviderProblem(id, providers){
+    const resolved = resolveProviderFromList(id, providers);
+    if(!resolved) return tr('canvas.providerNoneRun');
+    if(!providers.some(p => p.id === resolved)) return trf('canvas.providerMissingRun', {id:resolved});
+    return '';
+}
+function providerSelectOptions(selectedId, providers){
+    const selected = resolveProviderFromList(selectedId, providers);
+    const stale = selected && !providers.some(p => p.id === selected)
+        ? `<option value="${escapeHtml(selected)}" selected>⚠ ${escapeHtml(selected)}（${escapeHtml(tr('canvas.providerUnavailable'))}）</option>`
+        : '';
+    if(!providers.length && !stale) return `<option value="" disabled selected>${escapeHtml(tr('canvas.noApiProviders'))}</option>`;
+    return stale + providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function isRunningHubProvider(provider){
     const id = String(provider?.id || '').trim().toLowerCase();
@@ -687,9 +717,7 @@ function normalizeProviderId(value){
     return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40);
 }
 function imageApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
-    return providers;
+    return apiProviders.filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
 }
 function midjourneyApiProviders(){
     return (apiProviders.length ? apiProviders : [])
@@ -709,37 +737,26 @@ function midjourneyProviderOptions(selectedId){
     return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function providerById(id){
-    return (apiProviders.length ? apiProviders : defaultApiProviders()).find(p => p.id === id) || imageApiProviders()[0] || defaultApiProviders()[0];
-}
-function resolveProviderId(id){
-    return providerById(id)?.id || 'comfly';
+    return apiProviders.find(p => p.id === id) || null;
 }
 function chatApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.enabled !== false && (p.chat_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    return apiProviders.filter(p => p.enabled !== false && (p.chat_models || []).length);
 }
 function resolveChatProviderId(id){
-    const providers = chatApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return resolveProviderFromList(id, chatApiProviders());
 }
 function chatProviderOptions(selectedId){
-    const selected = resolveChatProviderId(selectedId);
-    return chatApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, chatApiProviders());
 }
 function providerChatModels(providerId){
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.chat_models || []);
 }
 function resolveImageProviderId(id){
-    const providers = imageApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || '';
+    return resolveProviderFromList(id, imageApiProviders());
 }
 function providerOptions(selectedId){
-    const selected = resolveImageProviderId(selectedId);
-    const providers = imageApiProviders();
-    if(!providers.length) return `<option value="" disabled selected>${tr('canvas.noApiProviders') || '暂无 API 平台'}</option>`;
-    return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, imageApiProviders());
 }
 function providerImageModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
@@ -749,22 +766,19 @@ function providerImageModels(providerId){
 function sanitizeImageNodeProviderModel(node){
     if(!node || node.type !== 'generator' || !apiConfigLoaded) return;
     node.apiProvider = resolveImageProviderId(node.apiProvider || '');
+    if(providerUnavailable(node.apiProvider, imageApiProviders())) return; // 平台已删除/不可用：原样保留平台和模型
     const models = providerImageModels(node.apiProvider);
     if(!models.length) node.model = '';
     else if(!models.includes(resolveImageModel(node.model))) node.model = models[0] || '';
 }
 function videoApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.video_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    return apiProviders.filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.video_models || []).length);
 }
 function resolveVideoProviderId(id){
-    const providers = videoApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return resolveProviderFromList(id, videoApiProviders());
 }
 function videoProviderOptions(selectedId){
-    const selected = resolveVideoProviderId(selectedId);
-    return videoApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, videoApiProviders());
 }
 function providerVideoModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
@@ -773,7 +787,8 @@ function providerVideoModels(providerId){
 }
 function sanitizeVideoNodeProviderModel(node){
     if(!node || node.type !== 'video' || !apiConfigLoaded) return;
-    node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
+    node.apiProvider = resolveVideoProviderId(node.apiProvider || '');
+    if(!node.apiProvider || providerUnavailable(node.apiProvider, videoApiProviders())) return; // 无可用平台或平台已删除：保留模型
     const models = providerVideoModels(node.apiProvider);
     if(!models.length) node.model = '';
     else if(!models.includes(node.model)) node.model = models[0] || '';
@@ -1636,7 +1651,6 @@ async function loadConfig(){
         cfg = await fetchJsonOrThrow('/api/config');
     } catch(e) {
         console.warn('API 配置加载失败，保留当前配置', e);
-        if(!apiConfigLoaded && !apiProviders.length) apiProviders = defaultApiProviders();
         setStatus(tr('canvas.apiConfigLoadFailed'));
         return false;
     }
@@ -1645,7 +1659,7 @@ async function loadConfig(){
     videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
     msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
     comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
-    apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
+    apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
     models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
     models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
     apiConfigLoaded = true;
@@ -2789,7 +2803,7 @@ function pickMediaForNode(nodeId){
 }
 function addLLMNode(point){
     const p = point || defaultPoint(80, 0);
-    const providerId = chatApiProviders()[0]?.id || 'comfly';
+    const providerId = chatApiProviders()[0]?.id || '';
     return addNode({
         id:uid('llm'),
         type:'llm',
@@ -2848,7 +2862,7 @@ function addMsGenNode(point){
 }
 function addVideoNode(point){
     const p = point || defaultPoint(160, 0);
-    const providerId = videoApiProviders()[0]?.id || 'comfly';
+    const providerId = videoApiProviders()[0]?.id || '';
     const models = providerVideoModels(providerId);
     return addNode({
         id:uid('vid'),
@@ -3436,7 +3450,7 @@ function addComfyNode(point){
         enhanceUpscaleRes:2048,
         editUpscale:false,
         editUpscaleRes:2048,
-        editModel:allImageModels(imageApiProviders()[0]?.id || 'comfly')[0] || models.gpt,
+        editModel:allImageModels(imageApiProviders()[0]?.id || '')[0] || models.gpt,
         ratio:'square',
         resolution:'1k',
         customRatio:'',
@@ -8407,7 +8421,7 @@ function renderLLMBody(node){
     const wrap = document.createElement('div');
     wrap.className = 'llm-body';
     const mode = node.mode || 'node';
-    node.llmProvider = resolveChatProviderId(node.llmProvider || 'comfly');
+    node.llmProvider = resolveChatProviderId(node.llmProvider || '');
     const llmProv = node.llmProvider;
     if(llmProv === 'modelscope') node.model = node.llmMsModel || node.model;
     if(!providerChatModels(llmProv).includes(node.model)) node.model = providerChatModels(llmProv)[0] || node.model;
@@ -8452,7 +8466,7 @@ function renderLLMBody(node){
     modelSelect.onchange = e => {
         e.stopPropagation();
         node.model = e.target.value;
-        if((node.llmProvider||'comfly') === 'modelscope') node.llmMsModel = e.target.value;
+        if((node.llmProvider||'') === 'modelscope') node.llmMsModel = e.target.value;
         scheduleSave();
     };
     wrap.querySelector('.llm-sys-toggle').onclick = e => { e.stopPropagation(); node.showSystem = !node.showSystem; render(); scheduleSave(); };
@@ -11718,7 +11732,7 @@ function uniqueCanvasReferenceImages(refs=[]){
     });
 }
 async function canvasReferenceLimitForNode(node, {refresh=false}={}){
-    const providerId = resolveImageProviderId(node?.apiProvider || 'comfly');
+    const providerId = resolveImageProviderId(node?.apiProvider || '');
     const model = resolveImageModel(node?.model || '');
     const key = `${providerId}:${model}`;
     if(!refresh && canvasReferenceCapabilityCache.has(key)) return canvasReferenceCapabilityCache.get(key);
@@ -12229,7 +12243,9 @@ function refreshGeneratorInputViews(){
 }
 async function validateCanvasModelPrompt(node, prompt, refs, opts={}){
     try {
-        await ModelPromptLimits.validate({provider_id:resolveImageProviderId(node.apiProvider || 'comfly'), model:resolveImageModel(node.model), prompt:prompt || 'Edit the reference images.', reference_images:refs});
+        const providerProblem = canvasProviderProblem(node.apiProvider, imageApiProviders());
+        if(providerProblem) throw new Error(providerProblem);
+        await ModelPromptLimits.validate({provider_id:resolveImageProviderId(node.apiProvider || ''), model:resolveImageModel(node.model), prompt:prompt || 'Edit the reference images.', reference_images:refs});
         delete node.runValidation;
         return true;
     } catch(error){
@@ -12280,7 +12296,7 @@ async function runGenerator(genId, opts={}){
     const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
     const payload = {
         prompt: prompt || 'Edit the reference images.',
-        provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
+        provider_id:resolveImageProviderId(gen.apiProvider || ''),
         model:resolveImageModel(gen.model),
         size:await generatorSizeForRun(gen, refs),
         aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
@@ -12544,7 +12560,7 @@ async function runGeneratorLegacy(genId, opts={}){
     try {
         const payload = {
             prompt: prompt || 'Edit the reference images.',
-            provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
+            provider_id:resolveImageProviderId(gen.apiProvider || ''),
             model:resolveImageModel(gen.model),
             size:requestSize,
             aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
@@ -12594,6 +12610,12 @@ async function runVideoNode(nodeId, opts={}){
     if(node.useFrameRoles && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
     if(node.useFrameRoles && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
+    const providerProblem = canvasProviderProblem(node.apiProvider, videoApiProviders());
+    if(providerProblem){
+        if(opts.cascade) throw new Error(providerProblem);
+        showErrorModal(providerProblem, tr('canvas.providerProblemTitle'));
+        return;
+    }
     let out = outputForNode(node, 460);
     const pendingId = uid('p');
     const run = runSnapshot(node, prompt, refs);
@@ -12606,7 +12628,7 @@ async function runVideoNode(nodeId, opts={}){
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
                 prompt,
-                provider_id:resolveVideoProviderId(node.apiProvider || 'comfly'),
+                provider_id:resolveVideoProviderId(node.apiProvider || ''),
                 model:node.model || 'veo3-fast',
                 duration:Number(node.duration || 5),
                 aspect_ratio:node.aspectRatio || '16:9',
@@ -13717,7 +13739,9 @@ async function runComfyNode(nodeId, opts={}){
     }
 }
 async function callCanvasLLM(node, message, messages=[], options={}){
-    const llmProv = resolveChatProviderId(node.llmProvider || 'comfly');
+    const providerProblem = canvasProviderProblem(node.llmProvider, chatApiProviders());
+    if(providerProblem) throw new Error(providerProblem);
+    const llmProv = resolveChatProviderId(node.llmProvider || '');
     const model = resolveChatModel(node.model || node.llmMsModel, llmProv);
     const images = llmInputImages(node);
     const videos = llmInputVideos(node);
@@ -14343,9 +14367,9 @@ function requestMetaFromResult(result={}){
 }
 function runPlatformLabel(run){
     const node = run?.node || {};
-    if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
+    if(run?.nodeType === 'generator') return providerById(node.apiProvider || '')?.name || node.apiProvider || 'API';
     if(run?.nodeType === 'msgen') return 'Modelscope';
-    if(run?.nodeType === 'video') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
+    if(run?.nodeType === 'video') return providerById(node.apiProvider || '')?.name || node.apiProvider || 'Video';
     if(run?.nodeType === 'comfy') return 'ComfyUI';
     if(run?.nodeType === 'ltxDirector') return 'ComfyUI';
     return run?.nodeType || 'Generate';
@@ -14669,7 +14693,7 @@ function providerIdForPending(pending){
         || pending?.run?.request?.provider_id
         || pending?.run?.node?.apiProvider
         || pending?.run?.node?.provider_id
-        || 'comfly';
+        || '';
 }
 function completeRecoverPendingOutput(out, pending, result){
     if(!out || !pending || !result) return;

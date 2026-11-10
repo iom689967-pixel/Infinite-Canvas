@@ -242,11 +242,17 @@ const select=()=>({replaceChildren(...options){this.options=options;}});
     def test_smart_save_reload_clone_and_generation_keep_model_and_refs(self):
         smart = (ROOT/'static/js/smart-canvas.js').read_text()
         helper = (ROOT/'static/js/kie-image-params.js').read_text()
-        selected_functions = '\n'.join(function(smart, name) for name in ('cloneSmartSettings','settingsForStorage','clearSmartNodeTransientRunState','cloneSmartNode','kieCapabilityField','kieFieldValues','normalizeKieSettings','runApiGeneration'))
+        selected_functions = '\n'.join(function(smart, name) for name in ('cloneSmartSettings','settingsForStorage','clearSmartNodeTransientRunState','cloneSmartNode','kieCapabilityField','kieFieldValues','normalizeKieSettings','runApiGeneration',
+            # runApiGeneration 在提交前检查平台是否仍可用（A1）
+            'isUnsetProviderId','resolveSmartProviderFromList','smartProviderProblem','imageProviders'))
         for model in VARIANTS:
             with self.subTest(model=model):
                 source = helper+'\nconst schema='+json.dumps(build_capability_schema(model))+';\n'+selected_functions+r'''
 const ModelPromptLimits={validate:async()=>{}};
+const LEGACY_DEFAULT_PROVIDER_IDS=new Set(['comfly']);
+const apiProviders=[{id:'kie',enabled:true,image_models:[schema.model]}];
+function tr(key){return key;}
+function trf(key){return key;}
 function uid(){return 'clone';}
 function isKieProviderId(id){return id==='kie';}
 function currentKieCapability(){return null;}

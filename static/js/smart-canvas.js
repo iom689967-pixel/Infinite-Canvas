@@ -2803,13 +2803,41 @@ function sortRunningHubFields(fields){
         return String(a.nodeId || '').localeCompare(String(b.nodeId || ''), undefined, {numeric:true}) || String(a.fieldName || '').localeCompare(String(b.fieldName || ''));
     });
 }
+// ---- 平台解析（A1 前端）----
+// 以前：没有视频平台时凭空造出 “comfly”；节点上的平台被删除后，渲染参数面板时会悄悄换成列表第一个平台，
+// 并通过 persistActiveSmartSettings 写回节点。现在：未选择时才默认取第一个；明确选过的平台原样保留，
+// 面板上标出“已删除或不可用”，运行前给出明确错误。“comfly” 是旧版默认 id，未配置同名平台时视为“未选择”。
+const LEGACY_DEFAULT_PROVIDER_IDS = new Set(['comfly']);
+function isUnsetProviderId(id){
+    const value = String(id || '').trim();
+    if(!value) return true;
+    return LEGACY_DEFAULT_PROVIDER_IDS.has(value.toLowerCase()) && !(apiProviders || []).some(p => p.id === value);
+}
+function resolveSmartProviderFromList(id, providers){
+    if(isUnsetProviderId(id)) return providers[0]?.id || '';
+    return String(id).trim();
+}
+function smartProviderUnavailable(id, providers){
+    return !isUnsetProviderId(id) && !providers.some(p => p.id === String(id).trim());
+}
+// 运行前检查：返回错误文案；可以运行时返回空字符串。
+function smartProviderProblem(id, providers){
+    const resolved = resolveSmartProviderFromList(id, providers);
+    if(!resolved) return tr('smart.providerNoneRun');
+    if(!providers.some(p => p.id === resolved)) return trf('smart.providerMissingRun', {id:resolved});
+    return '';
+}
+function smartProviderPillLabel(id, providers, fallback){
+    const provider = providers.find(p => p.id === id);
+    if(provider) return provider.name || provider.id;
+    if(id && !isUnsetProviderId(id)) return `⚠ ${id}（${tr('smart.providerUnavailable')}）`;
+    return fallback;
+}
 function chatApiProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
 }
 function resolveChatProviderId(providerId=''){
-    const providers = chatApiProviders();
-    if(providers.some(p => p.id === providerId)) return providerId;
-    return providers[0]?.id || 'comfly';
+    return resolveSmartProviderFromList(providerId, chatApiProviders());
 }
 function providerChatModels(providerId){
     const provider = chatApiProviders().find(p => p.id === providerId);
@@ -2831,7 +2859,7 @@ function chatModelOptions(selectedModel='', providerId=''){
 }
 function apiProviderById(providerId){
     if(providerId === 'volcengine') return volcengineProvider();
-    return (apiProviders || []).find(p => p.id === providerId) || imageProviders()[0] || null;
+    return (apiProviders || []).find(p => p.id === providerId) || null;
 }
 // 认证素材 asset:// 是平台绑定的：返回某 provider 所属的认证平台键（与后端一致）
 function videoProviderPlatform(providerId){
@@ -2959,28 +2987,25 @@ function modelscopeImageModels(){
 }
 const DEFAULT_VIDEO_MODELS = ['veo3-fast','veo3','sora','runway','kling','pika','minimax-video','wan-v2','seedance-1.0-pro','jimeng-vide-3.0','jimeng-video-3.0-pro'];
 function videoApiProviders(){
-    const fromConfig = (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
-    if(fromConfig.length) return fromConfig;
-    return [{id:'comfly', name:'Comfly', video_models:DEFAULT_VIDEO_MODELS, enabled:true}];
+    return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
 }
 function videoProviderById(providerId){
     if(providerId === 'volcengine') return volcengineProvider();
-    return videoApiProviders().find(p => p.id === providerId) || videoApiProviders()[0] || null;
+    return videoApiProviders().find(p => p.id === providerId) || null;
 }
 function providerVideoModels(providerId){
     if(providerId === 'volcengine') return volcengineVideoModels();
     const provider = videoApiProviders().find(p => p.id === providerId);
-    const models = provider?.video_models || DEFAULT_VIDEO_MODELS;
-    return [...new Set(models)];
+    return [...new Set(provider?.video_models || [])];
 }
 function volcengineVideoModels(){
     const provider = (apiProviders || []).find(p => p.id === 'volcengine');
     return [...new Set(provider?.video_models || DEFAULT_VIDEO_MODELS)];
 }
 function renderVideoProviderControl(providers){
-    const current = (providers || []).find(p => p.id === settings.videoProvider) || videoProviderById(settings.videoProvider);
+    const label = smartProviderPillLabel(settings.videoProvider, providers || [], tr('smart.platform'));
     return `<div class="smart-control provider-control">
-        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.videoProvider || tr('smart.platform'))}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(label)}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.videoPlatform'))}</div>
             <div class="model-list">
@@ -3236,9 +3261,10 @@ function renderDynamicParams(){
 }
 function renderApiParams(){
     const providers = imageProviders();
-    if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
+    settings.provider_id = resolveSmartProviderFromList(settings.provider_id, providers);
     const models = filterJimengImageModels(providerImageModels(settings.provider_id));
-    if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    // 平台已删除/不可用时保留原模型，等用户重新选择平台
+    if(!smartProviderUnavailable(settings.provider_id, providers) && (!settings.model || !models.includes(settings.model))) settings.model = models[0] || '';
     if(isKieProviderId(settings.provider_id)){
         const schema = currentKieCapability();
         if(!schema) ensureKieCapability(settings.provider_id, settings.model);
@@ -3274,9 +3300,9 @@ function renderJimengUpscaleControl(){
 }
 function renderApiVideoParams(){
     const providers = videoApiProviders();
-    if(!settings.videoProvider || !providers.some(p => p.id === settings.videoProvider)) settings.videoProvider = providers[0]?.id || 'comfly';
+    settings.videoProvider = resolveSmartProviderFromList(settings.videoProvider, providers);
     const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
+    if(settings.videoProvider && !smartProviderUnavailable(settings.videoProvider, providers) && (!settings.videoModel || !models.includes(settings.videoModel))) settings.videoModel = models[0] || settings.videoModel || '';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -3587,9 +3613,9 @@ function videoAspectIconClass(value){
     return '';
 }
 function renderProviderControl(providers){
-    const current = (providers || []).find(p => p.id === settings.provider_id) || apiProviderById(settings.provider_id);
+    const label = smartProviderPillLabel(settings.provider_id, providers || [], tr('smart.platform'));
     return `<div class="smart-control provider-control">
-        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.provider_id || tr('smart.platform'))}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(label)}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.apiPlatform'))}</div>
             <div class="model-list">
@@ -20016,6 +20042,9 @@ function comfyFieldKind(field){
 async function runApiGeneration(prompt, refs, runSettings=settings){
     await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
+    // 平台已删除/不可用：明确报错，不提交任务（A1）。
+    const providerProblem = smartProviderProblem(runSettings.provider_id, imageProviders());
+    if(providerProblem) throw new Error(providerProblem);
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const kieSchema = isKieProviderId(runSettings.provider_id) ? (currentKieCapability(runSettings) || await ensureKieCapability(runSettings.provider_id, runSettings.model)) : null;
     if(isKieProviderId(runSettings.provider_id) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
@@ -20127,6 +20156,10 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     throw new Error(tr('smart.rhTimeout'));
 }
 async function runApiVideoGeneration(prompt, refs, runSettings=settings){
+    if(runSettings.videoProvider !== 'volcengine'){
+        const providerProblem = smartProviderProblem(runSettings.videoProvider, videoApiProviders());
+        if(providerProblem) throw new Error(providerProblem);
+    }
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
@@ -20134,7 +20167,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
         // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
         const useAssetUris = trustedSource === 'library';
-        const targetPlatform = videoProviderPlatform(runSettings.videoProvider || 'comfly');
+        const targetPlatform = videoProviderPlatform(runSettings.videoProvider || '');
         let mismatchedAsset = false;
         const effUrl = ref => {
             const uris = (ref && ref.asset_uris && typeof ref.asset_uris === 'object') ? ref.asset_uris : null;
@@ -20160,7 +20193,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
         const payload = {
             prompt,
-            provider_id: runSettings.videoProvider || 'comfly',
+            provider_id: runSettings.videoProvider || '',
             model: runSettings.videoModel || 'veo3-fast',
             duration: Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)),
             aspect_ratio: runSettings.videoAspect || '16:9',
@@ -20893,13 +20926,13 @@ async function queryJimengNow(nodeId){
     }
 }
 function providerIdForSmartTask(node, task){
-    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';
+    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || '';
 }
 async function fetchImageTaskQuery(providerId, taskId){
     return fetch('/api/image-task-query', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId})
+        body:JSON.stringify({provider_id:providerId || '', task_id:taskId})
     }).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
