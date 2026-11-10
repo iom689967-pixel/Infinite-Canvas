@@ -2229,3 +2229,6 @@ body.smart-focus-edit-active .smart-node-floating-menu,body.smart-focus-edit-act
     .focus-edit-topbar { left:14px; right:14px; max-width:none; transform:none; }
     .focus-edit-panel { top:72px; right:12px; width:min(350px,calc(100vw - 24px)); max-height:calc(100vh - 84px); }
 }
+
+/* A3：节点使用的 API 平台已被删除或不可用（放在文件末尾，优先于 .image-node.selected 的 outline:0） */
+.image-node[data-provider-missing="true"] { outline:2px dashed rgba(220, 38, 38, .8); outline-offset:4px; border-radius:18px; }

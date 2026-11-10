@@ -1375,12 +1375,12 @@ function applyTheme(theme){
     document.body?.classList.toggle('theme-dark', dark);
     document.body?.classList.toggle('studio-theme-dark', dark);
 }
-function toast(text){
+function toast(text, duration=1800){
     const el = document.getElementById('toast');
     el.textContent = text;
     el.classList.add('show');
     clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => el.classList.remove('show'), 1800);
+    toast._timer = setTimeout(() => el.classList.remove('show'), duration);
 }
 let generationCompleteSoundAt = 0;
 function playGenerationCompleteSound(){
@@ -2835,6 +2835,65 @@ function smartProviderPillLabel(id, providers, fallback){
 }
 function chatApiProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
+}
+// ---- 失效平台检查（A3）----
+// 节点的 runSettings / LLM 设置里可能保存着已被删除或停用的平台（实际数据中有 8 个节点指向已删除的平台）。
+// 加载画布和配置变更后统一检查：汇总提示一次，并给这些节点加上标记；运行时由 smartProviderProblem 拦截。
+let smartApiConfigLoaded = false;
+let smartMissingProviderWarningKey = '';
+function smartNodeProviderRefs(node){
+    const refs = [];
+    const rs = node?.runSettings;
+    if(rs && typeof rs === 'object' && (rs.engine || 'api') === 'api'){
+        if(rs.apiKind === 'video'){
+            if(rs.videoProvider && rs.videoProvider !== 'volcengine') refs.push({kind:'video', id:rs.videoProvider});
+        } else if(rs.provider_id && rs.provider_id !== 'volcengine'){
+            refs.push({kind:'image', id:rs.provider_id});
+        }
+    }
+    if(node?.type === 'smart-prompt' && node.llmEnabled && node.llmProvider && node.llmProvider !== 'modelscope'){
+        refs.push({kind:'chat', id:node.llmProvider});
+    }
+    return refs;
+}
+function smartNodesWithMissingProviders(){
+    if(!smartApiConfigLoaded) return [];
+    const lists = {image:imageProviders(), video:videoApiProviders(), chat:chatApiProviders()};
+    const missing = [];
+    (nodes || []).forEach(node => {
+        smartNodeProviderRefs(node).forEach(ref => {
+            if(smartProviderUnavailable(ref.id, lists[ref.kind])) missing.push({nodeId:node.id, kind:ref.kind, providerId:ref.id});
+        });
+    });
+    return missing;
+}
+function applySmartMissingProviderMarkers(missing=smartNodesWithMissingProviders()){
+    const byNode = new Map();
+    missing.forEach(item => { if(!byNode.has(item.nodeId)) byNode.set(item.nodeId, item.providerId); });
+    world?.querySelectorAll('.image-node').forEach(el => {
+        const providerId = byNode.get(el.dataset.id);
+        if(providerId){
+            el.dataset.providerMissing = 'true';
+            el.title = trf('smart.providerMissingNodeTitle', {id:providerId});
+        } else if(el.dataset.providerMissing){
+            delete el.dataset.providerMissing;
+            el.removeAttribute('title');
+        }
+    });
+}
+function warnAboutMissingProviders(){
+    const missing = smartNodesWithMissingProviders();
+    applySmartMissingProviderMarkers(missing);
+    const key = missing.map(item => `${item.nodeId}:${item.providerId}`).sort().join('|');
+    if(!missing.length || key === smartMissingProviderWarningKey){
+        smartMissingProviderWarningKey = key;
+        return missing;
+    }
+    smartMissingProviderWarningKey = key;
+    const ids = [...new Set(missing.map(item => item.providerId))];
+    const nodeCount = new Set(missing.map(item => item.nodeId)).size;
+    toast(trf('smart.providerMissingSummary', {n:nodeCount, ids:ids.slice(0, 3).join('、') + (ids.length > 3 ? '…' : '')}), 8000);
+    return missing;
 }
 function resolveChatProviderId(providerId=''){
     return resolveSmartProviderFromList(providerId, chatApiProviders());
@@ -4799,6 +4858,7 @@ async function loadConfig(){
             try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
         }));
         lastConfigRefreshAt = Date.now();
+        smartApiConfigLoaded = true;
         sanitizeSmartApiSelection(settings);
         updateProviderModels();
         return true;
@@ -4811,6 +4871,7 @@ async function refreshSmartConfigFromSettings(){
     const loaded = await loadConfig();
     if(!loaded) return; // 拉取失败：不重渲染参数面板，也不把设置写回节点
     renderDynamicParams();
+    warnAboutMissingProviders();
     const node = selectedNode();
     if(node?.type === 'smart-prompt') {
         applySettingsToNode(node);
@@ -6672,6 +6733,7 @@ async function loadCanvas(){
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
+        warnAboutMissingProviders();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
 // ---- 保存状态与失败重试（C2）----
@@ -10632,6 +10694,7 @@ function render(){
     refreshRunTimerPills();
     renderNodeGenerationHistoryPanel();
     if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
+    applySmartMissingProviderMarkers();
     renderFocusEditUi();
     return;
     world.innerHTML = '';

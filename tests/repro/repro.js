@@ -389,6 +389,30 @@ async function a1Smart(browser) {
   await page.close();
 }
 
+// ---------------- A3：智能画布节点里的失效平台要被发现并提示 ----------------
+async function a3Smart(browser) {
+  const id = await createTestCanvas('smart', [
+    { id: 'audit-a', type: 'smart-image-generation', x: 100, y: 100, w: 440, h: 250, title: 'A',
+      runSettings: { engine: 'api', apiKind: 'image', provider_id: DELETED_PROVIDER, model: 'gpt-image-2' } },
+    { id: 'audit-b', type: 'smart-prompt', x: 700, y: 100, w: 316, h: 240, title: 'Prompt', text: '', llmEnabled: true, llmProvider: 'audit-deleted-chat', llmModel: 'x' },
+    { id: 'audit-c', type: 'smart-image-generation', x: 100, y: 500, w: 440, h: 250, title: 'C',
+      runSettings: { engine: 'api', apiKind: 'image', provider_id: 'codex', model: 'gpt-image-2' } },
+  ]);
+  const page = await openSmart(browser, id, 3);
+  const onLoad = await page.evaluate(`({
+    toast: document.getElementById('toast')?.textContent || '',
+    marked: [...document.querySelectorAll('.image-node[data-provider-missing="true"]')].map(el => el.dataset.id).sort(),
+  })`);
+  // 用户在参数面板改选了可用平台后，标记应消失
+  await page.evaluate(`nodes.find(n => n.id === 'audit-a').runSettings.provider_id = 'codex'; render();`);
+  await sleep(300);
+  const afterFix = await page.evaluate(`[...document.querySelectorAll('.image-node[data-provider-missing="true"]')].map(el => el.dataset.id).sort()`);
+  const pass = onLoad.marked.join(',') === 'audit-a,audit-b' && onLoad.toast.includes(DELETED_PROVIDER) && onLoad.toast.includes('audit-deleted-chat')
+    && afterFix.join(',') === 'audit-b';
+  record('A3_smart_missing_providers_reported', pass, { onLoad, afterFix });
+  await page.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -420,6 +444,7 @@ async function apiSemantics() {
     ['C3', () => c3(browser)], ['C4', () => c4(browser)],
     ['A2', () => a2Classic(browser)], ['A2', () => a2Smart(browser)],
     ['A1', () => a1Classic(browser)], ['A1', () => a1Smart(browser)],
+    ['A3', () => a3Smart(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {

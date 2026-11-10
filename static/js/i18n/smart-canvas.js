@@ -226,6 +226,8 @@
         "smart.providerUnavailable": { zh: "已删除或不可用", en: "deleted or unavailable" },
         "smart.providerMissingRun": { zh: "节点使用的 API 平台「{id}」已被删除或不可用，请在参数面板重新选择平台。", en: "The API provider \"{id}\" used by this node was deleted or is unavailable. Choose another provider in the settings panel." },
         "smart.providerNoneRun": { zh: "没有可用的 API 平台，请先到 API 设置添加。", en: "No API provider is available. Add one in API Settings first." },
+        "smart.providerMissingSummary": { zh: "{n} 个节点使用的 API 平台已被删除或不可用：{ids}。运行前请在参数面板重新选择平台。", en: "{n} node(s) use an API provider that was deleted or is unavailable: {ids}. Choose another provider before running." },
+        "smart.providerMissingNodeTitle": { zh: "此节点使用的 API 平台「{id}」已被删除或不可用", en: "This node uses the API provider \"{id}\", which was deleted or is unavailable" },
         "smart.toastApiSettingsFail": { zh: "API 设置加载失败", en: "Failed to load API settings" },
         "smart.toastCanvasFail": { zh: "智能画布加载失败", en: "Failed to load smart canvas" },
         "smart.errNoApiModel": { zh: "请先选择可用的 API 生图模型", en: "Please select an available API image model" },
