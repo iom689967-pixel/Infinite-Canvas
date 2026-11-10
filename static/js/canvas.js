@@ -228,12 +228,15 @@ function applyLanguage(lang){
     render();
 }
 async function refreshCanvasConfigFromSettings(){
-    await loadConfig();
-    pruneMissingComfyWorkflows();
-    (nodes || []).forEach(node => {
-        sanitizeImageNodeProviderModel(node);
-        sanitizeVideoNodeProviderModel(node);
-    });
+    const loaded = await loadConfig();
+    // 拉取失败时不清理、不改写任何节点：失败不等于“配置为空”（A2）。
+    if(loaded){
+        pruneMissingComfyWorkflows();
+        (nodes || []).forEach(node => {
+            sanitizeImageNodeProviderModel(node);
+            sanitizeVideoNodeProviderModel(node);
+        });
+    }
     if(typeof render === 'function') render();
 }
 window.addEventListener('message', event => {
@@ -744,7 +747,7 @@ function providerImageModels(providerId){
     return uniqueModels(provider?.image_models || []);
 }
 function sanitizeImageNodeProviderModel(node){
-    if(!node || node.type !== 'generator') return;
+    if(!node || node.type !== 'generator' || !apiConfigLoaded) return;
     node.apiProvider = resolveImageProviderId(node.apiProvider || '');
     const models = providerImageModels(node.apiProvider);
     if(!models.length) node.model = '';
@@ -769,7 +772,7 @@ function providerVideoModels(providerId){
     return uniqueModels(provider?.video_models || []);
 }
 function sanitizeVideoNodeProviderModel(node){
-    if(!node || node.type !== 'video') return;
+    if(!node || node.type !== 'video' || !apiConfigLoaded) return;
     node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
     const models = providerVideoModels(node.apiProvider);
     if(!models.length) node.model = '';
@@ -1617,33 +1620,50 @@ async function saveCanvas(){
     }
 }
 
+// 配置是否至少成功加载过一次。没有可信配置时，sanitize / prune 一律不动节点数据（A2）。
+let apiConfigLoaded = false;
+let comfyWorkflowsLoaded = false;
+async function fetchJsonOrThrow(url){
+    const res = await fetch(url);
+    if(!res.ok) throw new Error(`${url} HTTP ${res.status}`);
+    return res.json();
+}
+// 返回 true 表示 /api/config 加载成功。失败时保留上一次的配置，不再用假的默认平台顶替。
 async function loadConfig(){
     loadLocalModelLists();
+    let cfg;
     try {
-        const cfg = await fetch('/api/config').then(r=>r.json());
-        imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
-        chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
-        videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
-        msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
-        comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
-        apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
-        models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
-        models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
-        try {
-            const wf = await fetch('/api/workflows').then(r=>r.json());
-            comfyWorkflows = wf.workflows || [];
-        } catch(_) {
-            comfyWorkflows = [];
-        }
-        runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
-        await Promise.all(rhWorkflowIds.map(async workflowId => {
-            try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
-        }));
+        cfg = await fetchJsonOrThrow('/api/config');
     } catch(e) {
-        apiProviders = defaultApiProviders();
+        console.warn('API 配置加载失败，保留当前配置', e);
+        if(!apiConfigLoaded && !apiProviders.length) apiProviders = defaultApiProviders();
+        setStatus(tr('canvas.apiConfigLoadFailed'));
+        return false;
     }
+    imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
+    chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
+    videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
+    msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
+    comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
+    apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
+    models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
+    models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
+    apiConfigLoaded = true;
+    try {
+        const wf = await fetchJsonOrThrow('/api/workflows');
+        comfyWorkflows = wf.workflows || [];
+        comfyWorkflowsLoaded = true;
+    } catch(_) {
+        // 工作流列表拉取失败：保留上一次的列表；从未成功过时 pruneMissingComfyWorkflows 不会清空节点。
+        console.warn('ComfyUI 工作流列表加载失败，保留当前列表');
+    }
+    runningHubWorkflowCache = {};
+    const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+    const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+    await Promise.all(rhWorkflowIds.map(async workflowId => {
+        try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
+    }));
+    return true;
 }
 
 // 监听 API 设置页面的变更广播，实时刷新画布的模型/平台下拉
@@ -9946,6 +9966,8 @@ function validComfyWorkflowName(name){
     return hasComfyWorkflow(name) ? name : (comfyWorkflows[0]?.name || '');
 }
 function pruneMissingComfyWorkflows(){
+    // 只有拿到过一次完整的工作流列表，才能判断“工作流已被删除”；否则会把拉取失败当成全部删除（A2）。
+    if(!comfyWorkflowsLoaded) return;
     let changed = false;
     nodes.filter(n => n.type === 'comfy').forEach(node => {
         if(node.comfyWorkflow && !hasComfyWorkflow(node.comfyWorkflow)){

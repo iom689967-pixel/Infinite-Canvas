@@ -4752,16 +4752,20 @@ function bindDynamicParams(){
         };
     });
 }
+// 返回 true 表示 /api/config 加载成功。失败时（含非 2xx）保留上一次的平台和工作流列表，
+// 不再把错误响应当成“没有平台 / 没有工作流”（A2）。
 async function loadConfig(){
     try {
-        const cfg = await fetch('/api/config').then(r => r.json());
+        const cfgRes = await fetch('/api/config');
+        if(!cfgRes.ok) throw new Error(`/api/config HTTP ${cfgRes.status}`);
+        const cfg = await cfgRes.json();
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
         sanitizeSmartApiSelection(settings);
         updateProviderModels();
-        const wf = await fetch('/api/workflows').then(r => r.json()).catch(() => ({workflows:[]}));
-        comfyWorkflows = Array.isArray(wf.workflows) ? wf.workflows : [];
+        const wf = await fetch('/api/workflows').then(r => r.ok ? r.json() : null).catch(() => null);
+        if(wf && Array.isArray(wf.workflows)) comfyWorkflows = wf.workflows;
         runningHubWorkflowCache = {};
         const rhProvider = apiProviders.find(p => p.id === 'runninghub');
         const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
@@ -4771,12 +4775,15 @@ async function loadConfig(){
         lastConfigRefreshAt = Date.now();
         sanitizeSmartApiSelection(settings);
         updateProviderModels();
+        return true;
     } catch(e) {
         toast(tr('smart.toastApiSettingsFail'));
+        return false;
     }
 }
 async function refreshSmartConfigFromSettings(){
-    await loadConfig();
+    const loaded = await loadConfig();
+    if(!loaded) return; // 拉取失败：不重渲染参数面板，也不把设置写回节点
     renderDynamicParams();
     const node = selectedNode();
     if(node?.type === 'smart-prompt') {

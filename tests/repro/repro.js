@@ -284,6 +284,52 @@ async function c4(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- A2：配置拉取失败不得改写节点 ----------------
+async function failConfigRequests(page) {
+  const state = { failing: false };
+  await page.setRequestInterception(true);
+  page.on('request', req => {
+    const url = req.url();
+    if (state.failing && req.method() === 'GET' && (url.includes('/api/config') || url.includes('/api/workflows'))) {
+      return req.respond({ status: 500, contentType: 'application/json', body: '{"detail":"audit simulated 500"}' });
+    }
+    req.continue();
+  });
+  return state;
+}
+async function a2Classic(browser) {
+  const id = await createTestCanvas('classic', [
+    { id: 'audit-n1', type: 'prompt', x: 100, y: 100, text: 'n1' },
+    { id: 'audit-g1', type: 'generator', x: 600, y: 100, apiProvider: 'codex', model: 'gpt-image-2' },
+    { id: 'audit-c1', type: 'comfy', x: 1200, y: 100, comfyWorkflow: 'MiniMax_H3.json' },
+  ]);
+  const page = await openClassic(browser, id, 3);
+  const state = await failConfigRequests(page);
+  state.failing = true;
+  // 设置页保存后的广播、切回画布标签页，都会触发重新拉取配置
+  await page.evaluate(`window.postMessage({type:'providers-changed'}, location.origin); window.postMessage({type:'canvas-focus'}, location.origin);`);
+  await sleep(2500);
+  await page.evaluate(`nodes.find(n=>n.id==='audit-n1').x += 10; scheduleSave();`);
+  await sleep(2500);
+  const c = await getCanvas(id);
+  const g1 = nodeOf(c, 'audit-g1'), c1 = nodeOf(c, 'audit-c1');
+  record('A2_classic_config_failure_keeps_nodes', g1.apiProvider === 'codex' && g1.model === 'gpt-image-2' && c1.comfyWorkflow === 'MiniMax_H3.json',
+    { generator: { apiProvider: g1.apiProvider, model: g1.model }, comfyWorkflow: c1.comfyWorkflow ?? '(missing)' });
+  await page.close();
+}
+async function a2Smart(browser) {
+  const id = await createTestCanvas('smart', smartNodes());
+  const page = await openSmart(browser, id);
+  const before = await page.evaluate(`({providers: apiProviders.length, workflows: comfyWorkflows.length})`);
+  const state = await failConfigRequests(page);
+  state.failing = true;
+  await page.evaluate(`window.postMessage({type:'providers-changed'}, location.origin)`);
+  await sleep(2500);
+  const after = await page.evaluate(`({providers: apiProviders.length, workflows: comfyWorkflows.length})`);
+  record('A2_smart_config_failure_keeps_config', after.providers === before.providers && after.workflows === before.workflows && before.providers > 0, { before, after });
+  await page.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -313,6 +359,7 @@ async function apiSemantics() {
     ['C1', () => c1Overlap(browser)], ['C1', () => c1CrossTab(browser)], ['C1', () => c1RemoteWhileDirty(browser)],
     ['C2', () => c2(browser, 'smart')], ['C2', () => c2(browser, 'classic')],
     ['C3', () => c3(browser)], ['C4', () => c4(browser)],
+    ['A2', () => a2Classic(browser)], ['A2', () => a2Smart(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {

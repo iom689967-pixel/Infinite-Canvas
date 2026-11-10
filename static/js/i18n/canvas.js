@@ -2,6 +2,7 @@
     if(!window.StudioI18n) return;
     window.StudioI18n.register({
         "canvas.noApiProviders": { zh: "暂无 API 平台", en: "No API providers" },
+        "canvas.apiConfigLoadFailed": { zh: "API 配置加载失败，节点设置未做改动", en: "Failed to load API settings; node settings were left unchanged" },
         "canvas.noApiProvidersHint": { zh: "暂无 API 平台，请到 API 设置添加", en: "No API providers. Add one in API Settings." },
         "canvas.noImageModelsHint": { zh: "暂无生图模型，请到 API 设置添加", en: "No image models. Add some in API Settings." },
         "canvas.noModelsHint": { zh: "暂无模型，请到 API 设置添加", en: "No models. Add some in API Settings." },
