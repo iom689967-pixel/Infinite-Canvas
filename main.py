@@ -217,39 +217,46 @@ app = FastAPI(lifespan=lifespan)
 
 # --- 跨站请求防护（CORS / Origin / Host） ---
 # 本服务没有登录认证，任何网页都能让浏览器向 127.0.0.1 发请求。因此：
-# 1. CORS 只放行本机来源与浏览器扩展；
-# 2. 写操作（POST/PUT/PATCH/DELETE）若带 Origin/Referer，必须来自允许的来源；
-# 3. 涉及密钥的 GET 接口额外校验 Host，挡住 DNS rebinding（恶意域名解析到 127.0.0.1 后的同源读取）。
-# 不带 Origin/Referer 的写请求来自非浏览器客户端（PS UXP 插件、脚本、测试），浏览器无法伪造，予以放行。
+# 1. 可信来源只有本服务自己：同源页面，或指向同一端口的本机别名（localhost ↔ 127.0.0.1）。
+#    本机其他端口上的网页（开发服务器、其他本地应用）不再被信任；浏览器扩展照常放行。
+# 2. 写操作（POST/PUT/PATCH/DELETE）若带 Origin/Referer，必须来自可信来源；
+#    不带 Origin/Referer 的写请求来自非浏览器客户端（PS UXP 插件、脚本、测试），浏览器无法伪造，予以放行。
+# 3. 所有 GET/HEAD 请求和 WebSocket 握手都校验 Host，挡住 DNS rebinding（恶意域名解析到 127.0.0.1
+#    后的同源读取，包括画布内容和静态页）；WebSocket 握手带 Origin 时同样必须来自可信来源。
+#    IP 字面量（含 IPv6）与 localhost 不可能来自 DNS rebinding，直接放行，局域网按 IP 访问不受影响。
 # 额外放行：INFINITE_CANVAS_ALLOWED_ORIGINS / INFINITE_CANVAS_ALLOWED_HOSTS（逗号分隔）。
 UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-SECRET_SENSITIVE_GET_PATHS = {
-    "/api/config",
-    "/api/config/token",
-    "/api/providers",
-    "/api/codex/status",
-    "/api/gemini-cli/status",
-    "/api/jimeng/status",
-    "/api/jimeng/credit",
-    "/api/jimeng/login/status",
-}
-SECRET_SENSITIVE_GET_PATTERNS = (re.compile(r"^/api/providers/[^/]+/fetch-models$"),)
+HOST_CHECKED_METHODS = {"GET", "HEAD", "WEBSOCKET"}
 BROWSER_EXTENSION_SCHEMES = {"chrome-extension", "moz-extension"}
-LOCAL_CORS_ORIGIN_REGEX = r"^(https?://(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?|chrome-extension://[a-z0-9]+|moz-extension://[0-9a-f-]+)$"
+# 同源请求不需要 CORS；跨源调用只剩浏览器扩展（以及 INFINITE_CANVAS_ALLOWED_ORIGINS 显式放行的来源）。
+EXTENSION_CORS_ORIGIN_REGEX = r"^(chrome-extension://[a-z0-9]+|moz-extension://[0-9a-f-]+)$"
 
 
 def _env_csv(name):
     return {item.strip().lower().rstrip("/") for item in os.getenv(name, "").split(",") if item.strip()}
 
 
-def _hostname_from_host_header(host_header):
+def _split_host_header(host_header):
+    """返回 (hostname, port)；没有端口时 port 为 None。支持 [IPv6]:port。"""
     host = str(host_header or "").strip().lower()
+    port = None
     if host.startswith("["):
         end = host.find("]")
-        return host[1:end] if end > 0 else host
+        hostname = host[1:end] if end > 0 else host
+        rest = host[end + 1:] if end > 0 else ""
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+        return hostname, port
     if host.count(":") == 1:
-        host = host.split(":", 1)[0]
-    return host
+        hostname, _, raw_port = host.partition(":")
+        if raw_port.isdigit():
+            port = int(raw_port)
+        return hostname, port
+    return host, None
+
+
+def _hostname_from_host_header(host_header):
+    return _split_host_header(host_header)[0]
 
 
 def _is_ip_literal(hostname):
@@ -277,7 +284,7 @@ def request_host_allowed(host_header):
     return hostname == "localhost" or _is_ip_literal(hostname) or hostname in _env_csv("INFINITE_CANVAS_ALLOWED_HOSTS")
 
 
-def request_origin_allowed(origin, host_header):
+def request_origin_allowed(origin, host_header, server_port=None):
     origin = str(origin or "").strip()
     if not origin or origin.lower() == "null":
         return False
@@ -289,49 +296,60 @@ def request_origin_allowed(origin, host_header):
         return True
     if scheme not in ("http", "https"):
         return False
-    hostname = (parsed.hostname or "").lower()
-    if _is_loopback_hostname(hostname):
-        return True
-    # 同源访问（例如显式开启局域网后用 http://192.168.x.x:3000 打开页面）
-    same_origin = parsed.netloc.lower() == str(host_header or "").strip().lower()
-    return same_origin and request_host_allowed(host_header)
+    # 同源：Origin 与 Host 完全一致（含局域网 IP 访问）
+    if parsed.netloc.lower() == str(host_header or "").strip().lower():
+        return request_host_allowed(host_header)
+    # 同一服务的本机别名：两边都是回环地址，且端口就是本服务的端口
+    host_name, host_port = _split_host_header(host_header)
+    own_port = server_port or host_port
+    try:
+        origin_port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return False
+    origin_host = (parsed.hostname or "").lower()
+    return bool(own_port) and origin_port == own_port and _is_loopback_hostname(origin_host) and _is_loopback_hostname(host_name)
 
 
-def cross_site_rejection_reason(method, path, headers):
-    """返回拒绝原因；允许时返回空字符串。headers 为小写键的 dict。"""
+def cross_site_rejection_reason(method, path, headers, server_port=None):
+    """返回拒绝原因；允许时返回空字符串。headers 为小写键的 dict；WebSocket 握手传 method="WEBSOCKET"。"""
     method = str(method or "").upper()
-    sensitive_get = method in ("GET", "HEAD") and (
-        path in SECRET_SENSITIVE_GET_PATHS or any(p.match(path) for p in SECRET_SENSITIVE_GET_PATTERNS)
-    )
-    if method not in UNSAFE_HTTP_METHODS and not sensitive_get:
+    host_checked = method in HOST_CHECKED_METHODS
+    if method not in UNSAFE_HTTP_METHODS and not host_checked:
         return ""
     host = headers.get("host", "")
     origin = headers.get("origin")
     referer = headers.get("referer")
     browser_like = origin is not None or referer is not None or "sec-fetch-site" in headers
-    if (sensitive_get or browser_like) and not request_host_allowed(host):
+    if (host_checked or browser_like) and not request_host_allowed(host):
         return f"Host「{host}」不在允许列表中（可能是 DNS rebinding）。如需通过域名访问，请设置 INFINITE_CANVAS_ALLOWED_HOSTS。"
     if origin is not None:
-        if not request_origin_allowed(origin, host):
-            return f"来源「{origin}」不在允许列表中。如需放行，请设置 INFINITE_CANVAS_ALLOWED_ORIGINS。"
-    elif referer:
+        if not request_origin_allowed(origin, host, server_port):
+            return f"来源「{origin}」不在允许列表中（只接受本服务自己的页面）。如需放行，请设置 INFINITE_CANVAS_ALLOWED_ORIGINS。"
+    elif referer and method in UNSAFE_HTTP_METHODS:
         referer_origin = origin_from_url(referer)
-        if not referer_origin or not request_origin_allowed(referer_origin, host):
+        if not referer_origin or not request_origin_allowed(referer_origin, host, server_port):
             return "请求来源（Referer）不在允许列表中。"
     return ""
 
 
 class CrossSiteRequestGuard:
-    """纯 ASGI 中间件：只读请求头，不包装响应体，因此不影响流式响应和 WebSocket。"""
+    """纯 ASGI 中间件：只读请求头，不包装响应体，因此不影响流式响应。HTTP 拒绝返回 403，WebSocket 拒绝时关闭握手。"""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http":
+        scope_type = scope.get("type")
+        if scope_type in ("http", "websocket"):
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
-            reason = cross_site_rejection_reason(scope.get("method"), scope.get("path") or "", headers)
+            method = scope.get("method") if scope_type == "http" else "WEBSOCKET"
+            server = scope.get("server") or (None, None)
+            reason = cross_site_rejection_reason(method, scope.get("path") or "", headers, server[1] if len(server) > 1 else None)
             if reason:
+                if scope_type == "websocket":
+                    # 在 accept 之前关闭：服务器对握手返回 403
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
                 response = JSONResponse(status_code=403, content={"detail": f"已拒绝跨站请求：{reason}"})
                 await response(scope, receive, send)
                 return
@@ -341,7 +359,7 @@ class CrossSiteRequestGuard:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(_env_csv("INFINITE_CANVAS_ALLOWED_ORIGINS")),
-    allow_origin_regex=LOCAL_CORS_ORIGIN_REGEX,
+    allow_origin_regex=EXTENSION_CORS_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )

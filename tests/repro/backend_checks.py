@@ -118,10 +118,22 @@ class Checks:
         acao = h.get("access-control-allow-origin")
         self.record(g, "cors_preflight_foreign_origin_denied", acao not in ("*", "https://evil.example"), f"status={st} allow-origin={acao!r}")
 
-        for origin in ("http://localhost:5173", "chrome-extension://abcdefghijklmnop"):
-            st, h, _, _ = self.c.request("OPTIONS", "/api/providers", headers={"Origin": origin, "Access-Control-Request-Method": "PUT"})
-            acao = h.get("access-control-allow-origin")
-            self.record(g, f"cors_preflight_allowed[{origin.split(':')[0]}]", acao in (origin, "*"), f"status={st} allow-origin={acao!r}")
+        origin = "chrome-extension://abcdefghijklmnop"
+        st, h, _, _ = self.c.request("OPTIONS", "/api/providers", headers={"Origin": origin, "Access-Control-Request-Method": "PUT"})
+        acao = h.get("access-control-allow-origin")
+        self.record(g, "cors_preflight_extension_allowed", acao == origin, f"status={st} allow-origin={acao!r}")
+        st, h, _, _ = self.c.request("OPTIONS", "/api/providers", headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "PUT"})
+        acao = h.get("access-control-allow-origin")
+        self.record(g, "cors_preflight_other_local_port_denied", acao not in ("*", "http://localhost:5173"), f"status={st} allow-origin={acao!r}")
+        st, _, data, _ = self.c.request("POST", "/api/canvases", {"title": "AUDIT-x"}, headers={"Origin": "http://localhost:5173"})
+        self.record(g, "other_local_port_write_blocked", st == 403, f"status={st}")
+        if st == 200 and isinstance(data, dict):
+            self.created.append(data["canvas"]["id"])
+        st, _, data, _ = self.c.request("POST", "/api/canvases", {"title": "AUDIT-alias"},
+                                        headers={"Origin": f"http://localhost:{self.c.port}", "Host": f"127.0.0.1:{self.c.port}"})
+        self.record(g, "own_port_localhost_alias_allowed", st == 200, f"status={st}")
+        if st == 200 and isinstance(data, dict):
+            self.created.append(data["canvas"]["id"])
 
         st, _, providers, _ = self.c.request("GET", "/api/providers")
         body = [{k: v for k, v in p.items() if k in (
@@ -152,6 +164,46 @@ class Checks:
         if st == 200 and isinstance(data, dict):
             self.created.append(data["canvas"]["id"])
 
+        # 所有 GET 和 WebSocket 都校验 Host；IP 字面量（含 IPv6）、局域网 IP、缺少 Host 头照常放行
+        for label, path in (("canvases", "/api/canvases"), ("static_page", "/static/canvas.html")):
+            st, _, _, _ = self.c.request("GET", path, headers={"Host": rebinding_host})
+            self.record(g, f"dns_rebinding_get_{label}_blocked", st == 403, f"status={st}")
+        for label, host in (("ipv6_loopback", f"[::1]:{self.c.port}"), ("lan_ip", f"192.168.1.20:{self.c.port}")):
+            st, _, _, _ = self.c.request("GET", "/api/canvases", headers={"Host": host})
+            self.record(g, f"{label}_host_allowed", st == 200, f"status={st}")
+        st = self.raw_status("GET /api/providers HTTP/1.0\r\n\r\n")
+        self.record(g, "missing_host_header_allowed", st == "200", f"status={st}")
+        for label, host, origin, expected in (
+            ("ws_evil_host_blocked", "evil.example", None, "403"),
+            ("ws_evil_origin_blocked", f"127.0.0.1:{self.c.port}", "https://evil.example", "403"),
+            ("ws_other_local_port_origin_blocked", f"127.0.0.1:{self.c.port}", "http://localhost:5173", "403"),
+            ("ws_own_page_allowed", f"127.0.0.1:{self.c.port}", f"http://127.0.0.1:{self.c.port}", "101"),
+        ):
+            extra = f"Origin: {origin}\r\n" if origin else ""
+            st = self.raw_status(f"GET /ws/stats?client_id=audit HTTP/1.1\r\nHost: {host}\r\n{extra}Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+            self.record(g, label, st == expected, f"status={st}")
+
+        # Origin: null 的各种写请求（沙箱 iframe、file:// 等场景浏览器会发 null）
+        st, _, data, _ = self.c.request("POST", "/api/canvases", {"title": "AUDIT-null-target"})
+        target = data["canvas"]["id"] if st == 200 else ""
+        if target:
+            self.created.append(target)
+        null_cases = (
+            ("put_canvas", "PUT", f"/api/canvases/{target}", {"nodes": []}, {"Origin": "null"}),
+            ("canvas_meta", "POST", f"/api/canvases/{target}/meta", {"title": "x"}, {"Origin": "null"}),
+            ("delete_canvas", "DELETE", f"/api/canvases/{target}", None, {"Origin": "null"}),
+            ("storage_settings", "PATCH", "/api/storage-settings", {}, {"Origin": "null"}),
+            ("uppercase_NULL", "POST", "/api/canvases", {"title": "x"}, {"Origin": "NULL"}),
+            ("padded_null", "POST", "/api/canvases", {"title": "x"}, {"Origin": " null "}),
+            ("referer_null", "POST", "/api/canvases", {"title": "x"}, {"Referer": "null"}),
+        )
+        for label, method, path, body, hdrs in null_cases:
+            st, _, _, _ = self.c.request(method, path, body, headers=hdrs)
+            self.record(g, f"null_origin_{label}_blocked", st == 403, f"status={st}")
+        st, _, _, _ = self.c.request("GET", f"/api/canvases/{target}")
+        self.record(g, "null_origin_delete_had_no_effect", st == 200, f"canvas still readable: status={st}")
+
         st, _, data, _ = self.c.request("POST", "/api/canvases", {"title": "AUDIT-same-origin"}, headers={"Origin": own_origin})
         self.record(g, "same_origin_write_allowed", st == 200, f"status={st}")
         if st == 200:
@@ -177,6 +229,18 @@ class Checks:
             "print(main.modelscope_api_key(masked) == main.modelscope_api_key() and main.modelscope_api_key('real-explicit') == 'real-explicit')"
         )
         self.record(g, "masked_token_sent_back_is_ignored", rc == 0 and out == "True", f"rc={rc} out={out!r} {err[-120:] if rc else ''}")
+
+    def raw_status(self, raw_request):
+        """发送原始 HTTP 请求（用于 WebSocket 握手、缺少 Host 头等 http.client 不便构造的情况），返回状态码字符串。"""
+        import socket
+        sock = socket.create_connection((self.c.host, self.c.port), timeout=10)
+        try:
+            sock.sendall(raw_request.encode("latin-1"))
+            line = sock.recv(256).decode("latin-1", "replace").split("\r\n", 1)[0]
+        finally:
+            sock.close()
+        parts = line.split()
+        return parts[1] if len(parts) > 1 else line
 
     # ---------- A8 ----------
     def check_A8(self):

@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
 
 
-def reason(method, path, **headers):
-    return main.cross_site_rejection_reason(method, path, {k.replace("_", "-").lower(): v for k, v in headers.items()})
+def reason(method, path, server_port=None, **headers):
+    return main.cross_site_rejection_reason(method, path, {k.replace("_", "-").lower(): v for k, v in headers.items()}, server_port)
 
 
 class CrossSiteGuardTests(unittest.TestCase):
@@ -22,9 +22,21 @@ class CrossSiteGuardTests(unittest.TestCase):
     def test_null_origin_rejected(self):
         self.assertTrue(reason("POST", "/api/canvases", host="127.0.0.1:3000", origin="null"))
 
-    def test_local_and_extension_origins_allowed(self):
-        for origin in ("http://127.0.0.1:3000", "http://localhost:5173", "http://[::1]:3000", "chrome-extension://abcdef"):
+    def test_own_service_and_extension_origins_allowed(self):
+        # 同源、同一端口的本机别名（localhost / IPv6 回环）、浏览器扩展
+        for origin in ("http://127.0.0.1:3000", "http://localhost:3000", "http://[::1]:3000", "chrome-extension://abcdef"):
             self.assertEqual(reason("POST", "/api/canvases", host="127.0.0.1:3000", origin=origin), "", origin)
+            self.assertEqual(reason("POST", "/api/canvases", server_port=3000, host="127.0.0.1:3000", origin=origin), "", origin)
+
+    def test_other_local_ports_rejected(self):
+        # 本机其他端口上的网页（开发服务器、其他本地应用）不再被信任
+        # （同端口不同协议的 https://127.0.0.1:3000 不可能是另一个服务，不在此列）
+        for origin in ("http://localhost:5173", "http://127.0.0.1:8080", "http://localhost", "http://[::1]:8080"):
+            self.assertTrue(reason("POST", "/api/canvases", server_port=3000, host="127.0.0.1:3000", origin=origin), origin)
+
+    def test_server_port_wins_over_spoofed_host_port(self):
+        # Host 头写成 8080，但服务实际监听 3000：localhost:8080 的页面仍被拒绝（同源规则除外）
+        self.assertTrue(reason("POST", "/api/canvases", server_port=3000, host="localhost:3000", origin="http://localhost:8080"))
 
     def test_same_origin_lan_ip_allowed(self):
         self.assertEqual(reason("PUT", "/api/canvases/x", host="192.168.1.20:3000", origin="http://192.168.1.20:3000"), "")
@@ -38,8 +50,22 @@ class CrossSiteGuardTests(unittest.TestCase):
         self.assertTrue(reason("GET", "/api/providers/kie/fetch-models", host="evil.example:3000"))
         self.assertTrue(reason("POST", "/api/canvases", host="evil.example:3000", origin="http://evil.example:3000"))
 
-    def test_plain_get_not_guarded(self):
-        self.assertEqual(reason("GET", "/api/canvases", host="evil.example:3000"), "")
+    def test_all_get_and_websocket_host_checked(self):
+        # DNS rebinding：读取画布、静态页、WebSocket 都要校验 Host
+        for method, path in (("GET", "/api/canvases"), ("GET", "/static/canvas.html"), ("HEAD", "/"), ("WEBSOCKET", "/ws/stats")):
+            self.assertTrue(reason(method, path, host="evil.example:3000"), (method, path))
+        self.assertEqual(reason("GET", "/api/canvases", host="127.0.0.1:3000"), "")
+
+    def test_ip_literals_and_missing_host_allowed(self):
+        for host in ("[::1]:3000", "192.168.1.20:3000", "10.0.0.5", "localhost:3000", ""):
+            self.assertEqual(reason("GET", "/api/canvases", host=host), "", host)
+
+    def test_websocket_origin_checked(self):
+        self.assertTrue(reason("WEBSOCKET", "/ws/stats", server_port=3000, host="127.0.0.1:3000", origin="https://evil.example"))
+        self.assertEqual(reason("WEBSOCKET", "/ws/stats", server_port=3000, host="127.0.0.1:3000", origin="http://127.0.0.1:3000"), "")
+
+    def test_cross_site_navigation_referer_does_not_block_get(self):
+        self.assertEqual(reason("GET", "/static/index.html", host="127.0.0.1:3000", referer="https://some.site/page"), "")
 
     def test_referer_checked_when_origin_missing(self):
         self.assertTrue(reason("POST", "/api/canvases", host="127.0.0.1:3000", referer="https://evil.example/page"))
