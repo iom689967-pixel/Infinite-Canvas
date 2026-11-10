@@ -402,6 +402,52 @@ DEFAULT_STORAGE_DIRS = {
     "local": LOCAL_UPLOAD_DIR,
 }
 
+# --- 原子写入 ---
+# 状态文件（画布、配置、素材库、历史等）都是“读出 → 修改 → 整体写回”。直接 open('w') 会先把文件截断，
+# 写到一半时进程退出就只剩半个文件；其他线程同时读取也会读到不完整的 JSON（实测会让并发的 PUT 返回 500）。
+# 这里统一改为：完整序列化 → 写同目录临时文件并 fsync → os.replace 原子替换。
+
+def _replace_file_with_retry(source, target, attempts=20, delay=0.05):
+    # Windows 上目标文件正被其他句柄打开时 os.replace 会抛 PermissionError，稍等重试即可。
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+def atomic_write_text(path, text, encoding="utf-8", newline=None):
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        mode = 0o666 & ~current_umask
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, mode)  # mkstemp 默认 0600，保持原文件权限
+        _replace_file_with_retry(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+def atomic_write_json(path, data, **dump_kwargs):
+    dump_kwargs.setdefault("ensure_ascii", False)
+    # 先在内存里完整序列化：序列化失败时磁盘上的旧文件保持不变。
+    atomic_write_text(path, json.dumps(data, **dump_kwargs))
+
 def _storage_abs_path(value, fallback):
     text = str(value or "").strip()
     if not text:
@@ -432,8 +478,7 @@ def save_storage_settings(payload):
     for path in dirs.values():
         os.makedirs(path, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STORAGE_SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(dirs, f, ensure_ascii=False, indent=2)
+    atomic_write_json(STORAGE_SETTINGS_FILE, dirs, ensure_ascii=False, indent=2)
     apply_storage_settings(dirs)
     return {"dirs": dirs}
 
@@ -1606,8 +1651,7 @@ def load_api_providers():
 def save_api_providers(providers):
     os.makedirs(DATA_DIR, exist_ok=True)
     with GLOBAL_CONFIG_LOCK:
-        with open(API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(providers, f, ensure_ascii=False, indent=2)
+        atomic_write_json(API_PROVIDERS_FILE, providers, ensure_ascii=False, indent=2)
 
 def public_provider(provider):
     if provider.get("id") == "runninghub":
@@ -1742,7 +1786,14 @@ def env_quote(value):
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return text
 
+ENV_FILE_LOCK = RLock()
+
 def update_env_values(updates):
+    # 读 → 改 → 写回整个 .env；加锁避免两个保存请求交错时丢失其中一方的 Key。
+    with ENV_FILE_LOCK:
+        _update_env_values_locked(updates)
+
+def _update_env_values_locked(updates):
     os.makedirs(os.path.dirname(API_ENV_FILE), exist_ok=True)
     lines = []
     if os.path.exists(API_ENV_FILE):
@@ -1766,8 +1817,7 @@ def update_env_values(updates):
         if key not in seen:
             next_lines.append(f"{key}={env_quote(value)}")
             os.environ[key] = str(value or "")
-    with open(API_ENV_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(next_lines).rstrip() + "\n")
+    atomic_write_text(API_ENV_FILE, "\n".join(next_lines).rstrip() + "\n")
 
 BACKEND_LOCAL_LOAD = {addr: 0 for addr in COMFYUI_INSTANCES}
 
@@ -3834,8 +3884,7 @@ def save_to_history(record):
         if "timestamp" not in record:
             record["timestamp"] = time.time()
         history.insert(0, record)
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history[:5000], f, ensure_ascii=False, indent=4)
+        atomic_write_json(HISTORY_FILE, history[:5000], ensure_ascii=False, indent=4)
 
 def get_comfy_history(comfy_address, prompt_id):
     try:
@@ -3870,8 +3919,7 @@ def now_ms():
 def save_conversation(user_id, conversation):
     with CONVERSATION_LOCK:
         path = conversation_path(user_id, conversation["id"])
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(conversation, f, ensure_ascii=False, indent=2)
+        atomic_write_json(path, conversation, ensure_ascii=False, indent=2)
 
 def new_conversation(user_id, title="新对话"):
     timestamp = now_ms()
@@ -3923,8 +3971,7 @@ def canvas_path(canvas_id):
 def save_canvas(canvas):
     with CANVAS_LOCK:
         canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+        atomic_write_json(canvas_path(canvas["id"]), canvas, ensure_ascii=False, indent=2)
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -3946,8 +3993,7 @@ def load_projects():
 
 def save_projects(projects):
     with CANVAS_LOCK:
-        with open(PROJECTS_PATH, 'w', encoding='utf-8') as f:
-            json.dump({"projects": projects}, f, ensure_ascii=False, indent=2)
+        atomic_write_json(PROJECTS_PATH, {"projects": projects}, ensure_ascii=False, indent=2)
 
 def project_record(p):
     return {
@@ -7483,8 +7529,7 @@ def prune_generation_history_for_media(paths: List[str]) -> int:
             ]
             removed = len(history) - len(kept)
             if removed:
-                with open(HISTORY_FILE, "w", encoding="utf-8") as handle:
-                    json.dump(kept, handle, ensure_ascii=False, indent=4)
+                atomic_write_json(HISTORY_FILE, kept, ensure_ascii=False, indent=4)
             return removed
     except (OSError, UnicodeError, json.JSONDecodeError):
         return 0
@@ -8194,8 +8239,7 @@ def save_asset_classification_prompt(text):
     if len(value) > PROMPT_TEXT_MAX_LENGTH:
         raise HTTPException(status_code=400, detail=f"分类规则过长：最多允许 {PROMPT_TEXT_MAX_LENGTH} 个字符")
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(ASSET_CLASSIFICATION_PROMPT_FILE, "w", encoding="utf-8") as f:
-        f.write(value)
+    atomic_write_text(ASSET_CLASSIFICATION_PROMPT_FILE, value)
     return value
 
 ASSET_CLASSIFICATION_DIMENSION_NAMES = {
@@ -8304,8 +8348,7 @@ def _read_local_upload_classification(filename):
 
 def _write_local_upload_classification(filename, classification):
     path = _local_upload_classification_path(filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalize_asset_classification(classification), f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, normalize_asset_classification(classification), ensure_ascii=False, indent=2)
 
 def asset_classification_prompt(extra_prompt=""):
     base = load_asset_classification_prompt()
@@ -8431,8 +8474,7 @@ def save_asset_library(lib):
     sort_asset_library_items(lib)
     lib["updated_at"] = now_ms()
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(ASSET_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(lib, f, ensure_ascii=False, indent=2)
+    atomic_write_json(ASSET_LIBRARY_PATH, lib, ensure_ascii=False, indent=2)
     if GLOBAL_LOOP:
         asyncio.run_coroutine_threadsafe(manager.broadcast_asset_library_updated(int(lib["updated_at"])), GLOBAL_LOOP)
 
@@ -8492,8 +8534,7 @@ def shared_folders_load():
 
 def shared_folders_save(data):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SHARED_FOLDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(SHARED_FOLDERS_FILE, data, ensure_ascii=False, indent=2)
 
 def shared_folder_by_id(folder_id):
     for entry in shared_folders_load().get("folders", []):
@@ -8762,8 +8803,7 @@ def save_prompt_libraries(data):
     data = normalize_prompt_libraries(data)
     data["updated_at"] = now_ms()
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(PROMPT_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(PROMPT_LIBRARY_PATH, data, ensure_ascii=False, indent=2)
     return data
 
 def public_prompt_libraries(data=None):
@@ -13377,8 +13417,7 @@ async def caption_local_assets(payload: LocalAssetCaptionRequest):
                 payload.ms_model,
             )
             txt_path = _local_upload_caption_path(filename)
-            with open(txt_path, "w", encoding="utf-8", newline="") as f:
-                f.write(caption)
+            atomic_write_text(txt_path, caption, newline="")
             item.update({
                 "ok": True,
                 "name": filename,
@@ -13440,8 +13479,7 @@ async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest):
         raise HTTPException(status_code=400, detail="仅支持图片素材保存提示词")
     caption = str(payload.caption or "")[:100000]
     txt_path = _local_upload_caption_path(filename)
-    with open(txt_path, "w", encoding="utf-8", newline="") as f:
-        f.write(caption)
+    atomic_write_text(txt_path, caption, newline="")
     return {"ok": True, "caption": caption, "caption_file": os.path.basename(txt_path)}
 
 @app.post("/api/temp-sh/upload")
@@ -17528,8 +17566,7 @@ async def delete_project(project_id: str):
                 continue
             if str(data.get("project") or "") == project_id:
                 data["project"] = DEFAULT_PROJECT_ID
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                atomic_write_json(path, data, ensure_ascii=False, indent=2)
                 moved += 1
     return {"ok": True, "moved": moved}
 
@@ -17574,8 +17611,7 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
     if payload.board_y is not None:
         canvas["board_y"] = float(payload.board_y)
     with CANVAS_LOCK:
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+        atomic_write_json(canvas_path(canvas["id"]), canvas, ensure_ascii=False, indent=2)
     return {"canvas": canvas_record(canvas)}
 
 @app.get("/api/canvases/{canvas_id}")
@@ -19260,8 +19296,7 @@ async def delete_history(req: DeleteHistoryRequest):
                 else:
                     new_history.append(item)
             if target_record:
-                with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(new_history, f, ensure_ascii=False, indent=4)
+                atomic_write_json(HISTORY_FILE, new_history, ensure_ascii=False, indent=4)
 
         if target_record:
             for img_url in target_record.get("images", []):
@@ -19933,8 +19968,7 @@ def load_runninghub_workflow_store():
 
 def save_runninghub_workflow_store(store):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(RUNNINGHUB_WORKFLOW_STORE_FILE, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
+    atomic_write_json(RUNNINGHUB_WORKFLOW_STORE_FILE, store, ensure_ascii=False, indent=2)
 
 def prune_runninghub_workflow_store_for_provider(provider):
     if not isinstance(provider, dict) or provider.get("id") != "runninghub":
@@ -20438,8 +20472,7 @@ def upload_workflow(payload: WorkflowUploadRequest):
     os.makedirs(custom_dir, exist_ok=True)
     stored_name = f"{CUSTOM_WORKFLOW_FOLDER}/{name}"
     path = workflow_path_from_name(stored_name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload.workflow, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload.workflow, ensure_ascii=False, indent=2)
     return {"name": stored_name}
 
 @app.put("/api/workflows/{name:path}/config")
@@ -20450,8 +20483,7 @@ def save_workflow_config(name: str, payload: WorkflowConfig):
     if not os.path.exists(workflow_path):
         raise HTTPException(status_code=404, detail="Workflow not found")
     cfg_path = workflow_config_path(name)
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
+    atomic_write_json(cfg_path, payload.dict(), ensure_ascii=False, indent=2)
     return {"config": payload.dict()}
 
 @app.delete("/api/workflows/{name:path}")
