@@ -2256,43 +2256,7 @@ function canvasSyncSnapshot(source){
 function rememberCanvasSyncBase(source){
     try { canvasSyncBaseJson = canvasSyncSnapshot(source); } catch(e) { canvasSyncBaseJson = ''; }
 }
-function canvasJsonEqual(a, b){
-    if(a === b) return true;
-    try { return JSON.stringify(a) === JSON.stringify(b); } catch(e) { return false; }
-}
-function mergeCanvasNodeFieldsInPlace(local, remote, base){
-    // 原地修改本地节点对象：正在运行的任务、选中状态等都持有它的引用。
-    const localSer = serializableCanvasNode(local);
-    const keys = new Set([...Object.keys(localSer), ...Object.keys(remote || {}), ...Object.keys(base || {})]);
-    keys.forEach(key => {
-        if(!canvasJsonEqual(localSer[key], base[key])) return; // 本地改过 → 保留本地
-        if(Object.prototype.hasOwnProperty.call(remote, key)) local[key] = remote[key];
-        else delete local[key];
-    });
-}
-// 按 key 合并列表：一方删除（基线里有、该方没有）就删除；任一方新增就保留；双方都有时用本地对象。
-function mergeKeyedCanvasLists(localList, remoteList, baseList, keyOf){
-    const baseKeys = new Set((baseList || []).map(keyOf).filter(Boolean));
-    const localByKey = new Map((localList || []).map(item => [keyOf(item), item]));
-    const remoteKeys = new Set((remoteList || []).map(keyOf).filter(Boolean));
-    const out = [];
-    const seen = new Set();
-    (remoteList || []).forEach(item => {
-        const key = keyOf(item);
-        if(!key || seen.has(key)) return;
-        if(baseKeys.has(key) && !localByKey.has(key)) return;
-        seen.add(key);
-        out.push(localByKey.get(key) || item);
-    });
-    (localList || []).forEach(item => {
-        const key = keyOf(item);
-        if(!key || seen.has(key)) return;
-        if(baseKeys.has(key) && !remoteKeys.has(key)) return;
-        seen.add(key);
-        out.push(item);
-    });
-    return out;
-}
+// 合并规则本身在 static/js/canvas-merge.js（纯函数，可单独测试）；这里只负责取基线、写回页面状态。
 function mergeRemoteCanvasIntoLocal(remote){
     if(!remote || !canvas || remote.id !== canvas.id) return false;
     let base = null;
@@ -2300,38 +2264,27 @@ function mergeRemoteCanvasIntoLocal(remote){
     // 没有基线时把远端当作基线：本地全部胜出，等同旧行为，但不会丢本地修改。
     const nextBaseJson = canvasSyncSnapshot(remote); // 必须在远端节点变成本地对象之前拍快照
     if(!base) base = JSON.parse(nextBaseJson);
-    const baseNodes = new Map((base.nodes || []).map(n => [n.id, n]));
-    const remoteNodes = Array.isArray(remote.nodes) ? remote.nodes : [];
-    const remoteById = new Map(remoteNodes.map(n => [n.id, n]));
-    const localIds = new Set(nodes.map(n => n.id));
-    const merged = [];
-    nodes.forEach(local => {
-        const remoteNode = remoteById.get(local.id);
-        const baseNode = baseNodes.get(local.id);
-        if(remoteNode){
-            if(baseNode) mergeCanvasNodeFieldsInPlace(local, remoteNode, baseNode);
-            merged.push(local);
-            return;
+    const liveById = new Map(nodes.map(node => [node.id, node]));
+    const serializedById = new Map(nodes.map(node => [node.id, serializableCanvasNode(node)]));
+    const merged = CanvasMerge.mergeClassicCanvas({
+        title:canvas.title,
+        icon:canvas.icon,
+        nodes:nodes.map(node => serializedById.get(node.id)),
+        connections,
+        logs:canvas.logs,
+    }, remote, base);
+    nodes = merged.nodes.map(entry => {
+        if(entry.source === 'remote'){
+            resetTransientRunState([entry.node]);
+            return entry.node;
         }
-        // 对方删除了这个节点：本地没改过就接受删除，本地改过就保留（不丢数据）。
-        if(baseNode && canvasJsonEqual(serializableCanvasNode(local), baseNode)) return;
-        merged.push(local);
+        // 原地写回：正在运行的任务、选中状态等都持有本地节点对象的引用。
+        return CanvasMerge.syncNodeFields(liveById.get(entry.id), serializedById.get(entry.id), entry.node);
     });
-    remoteNodes.forEach(remoteNode => {
-        if(localIds.has(remoteNode.id)) return;
-        const baseNode = baseNodes.get(remoteNode.id);
-        // 本地删除了这个节点：对方没改过就保持删除，对方改过就恢复。
-        if(baseNode && canvasJsonEqual(remoteNode, baseNode)) return;
-        resetTransientRunState([remoteNode]);
-        merged.push(remoteNode);
-    });
-    nodes = merged;
-    connections = mergeKeyedCanvasLists(connections, remote.connections, base.connections, c => c?.id || (c ? `${c.from}->${c.to}` : ''));
-    canvas.logs = mergeKeyedCanvasLists(canvas.logs, remote.logs, base.logs, l => l?.id || '')
-        .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
-        .slice(0, 500);
-    if(canvas.title === base.title && remote.title) canvas.title = remote.title;
-    if(canvas.icon === base.icon && remote.icon) canvas.icon = remote.icon;
+    connections = merged.connections;
+    canvas.logs = merged.logs;
+    canvas.title = merged.title;
+    canvas.icon = merged.icon;
     ['owner', 'color', 'pinned', 'project', 'board_x', 'board_y'].forEach(key => {
         if(Object.prototype.hasOwnProperty.call(remote, key)) canvas[key] = remote[key];
     });

@@ -5701,21 +5701,7 @@ let canvasSyncTimer = null;
 let canvasMetaPollTimer = null;
 let connectionLayerRaf = 0;
 function mergeSmartImageLists(localImgs, remoteImgs){
-    const out = [];
-    const seen = new Set();
-    (localImgs || []).forEach(img => {
-        const u = img && img.url;
-        if(u && seen.has(u)) return;
-        if(u) seen.add(u);
-        out.push(img);
-    });
-    (remoteImgs || []).forEach(img => {
-        const u = img && img.url;
-        if(!u || seen.has(u)) return;
-        seen.add(u);
-        out.push(img);
-    });
-    return out;
+    return CanvasMerge.mergeImageLists(localImgs, remoteImgs);
 }
 function smartNodeInFlight(node){
     if(nodeGenerationAttempt(node)?.status === 'running') return true;
@@ -5995,23 +5981,9 @@ function syncRunButtonState(node=selectedNode()){
 function cloneSmartJson(value){
     return JSON.parse(JSON.stringify(value ?? null));
 }
-function smartJsonEqual(a, b){
-    if(a === b) return true;
-    try { return JSON.stringify(a) === JSON.stringify(b); } catch(e) { return false; }
-}
-// 字段级三方合并：相对共同基线，本地改过的字段保留本地值，否则采用对方的值（对方删掉的字段也删掉）。
-// images 由调用方按并集处理。没有基线时退回旧行为（以对方为准）。
+// 字段级三方合并（规则见 static/js/canvas-merge.js）；images 由调用方按并集处理。
 function threeWayMergeSmartFields(local, remote, base){
-    if(!base) return {...remote};
-    const merged = {...local};
-    const keys = new Set([...Object.keys(local || {}), ...Object.keys(remote || {}), ...Object.keys(base || {})]);
-    keys.forEach(key => {
-        if(key === 'images') return;
-        if(!smartJsonEqual(local[key], base[key])) return;
-        if(Object.prototype.hasOwnProperty.call(remote, key)) merged[key] = remote[key];
-        else delete merged[key];
-    });
-    return merged;
+    return CanvasMerge.threeWayMergeFields(local, remote, base, {skipKeys:['images']});
 }
 function mergeSmartNode(local, remote, base=null){
     const images = mergeSmartImageLists(local.images, remote.images);
@@ -6051,32 +6023,10 @@ function mergeSmartNode(local, remote, base=null){
     return mergeNodeGenerationState(merged, local, remote);
 }
 function mergeSmartNodeLists(localNodes, remoteNodes, baseNodes=null){
-    const baseById = new Map((baseNodes || []).filter(n => n && n.id).map(n => [n.id, n]));
-    const localById = new Map((localNodes || []).map(n => [n.id, n]));
-    const remoteById = new Map((remoteNodes || []).map(n => [n.id, n]));
-    const order = [];
-    const seen = new Set();
-    (localNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
-    (remoteNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
-    return order.map(id => {
-        const local = localById.get(id);
-        const remote = remoteById.get(id);
-        if(local && !remote) return local;     // 仅本地存在：保留（我新建的节点；对方删了也宁可复活也不丢结果）
-        if(remote && !local) return remote;     // 仅对方存在：加入对方新建的节点
-        return mergeSmartNode(local, remote, baseById.get(id) || null);
-    }).filter(Boolean);
+    return CanvasMerge.mergeNodeListsUnion(localNodes, remoteNodes, baseNodes, mergeSmartNode);
 }
 function mergeSmartConnections(localConns, remoteConns, nodeIds){
-    const out = [];
-    const seen = new Set();
-    [...(localConns || []), ...(remoteConns || [])].forEach(c => {
-        if(!c || !nodeIds.has(c.from) || !nodeIds.has(c.to)) return;
-        const key = `${c.from}->${c.to}:${c.kind || 'flow'}`;
-        if(seen.has(key)) return;
-        seen.add(key);
-        out.push(c);
-    });
-    return out;
+    return CanvasMerge.mergeConnectionsUnion(localConns, remoteConns, nodeIds);
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
