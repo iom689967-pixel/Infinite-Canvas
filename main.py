@@ -20483,10 +20483,31 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
     )
     return generate(req)
 
+def env_flag_enabled(name):
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+def resolve_bind_host():
+    """默认只监听本机。服务没有登录认证，局域网访问必须显式开启：
+    INFINITE_CANVAS_ALLOW_LAN=1 → 0.0.0.0；或用 INFINITE_CANVAS_HOST 指定具体地址。"""
+    explicit = os.getenv("INFINITE_CANVAS_HOST", "").strip()
+    if explicit:
+        return explicit
+    return "0.0.0.0" if env_flag_enabled("INFINITE_CANVAS_ALLOW_LAN") else "127.0.0.1"
+
+def resolve_bind_port():
+    try:
+        return int(os.getenv("INFINITE_CANVAS_PORT", "3000"))
+    except ValueError:
+        return 3000
+
 if __name__ == "__main__":
     import uvicorn
+    bind_host = resolve_bind_host()
+    bind_port = resolve_bind_port()
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"[安全提示] 服务将监听 {bind_host}:{bind_port}，同一网络内的设备都能访问；本服务没有登录认证，请只在可信网络中开启。")
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
-    uvicorn.run(app, host="0.0.0.0", port=3000,
+    uvicorn.run(app, host=bind_host, port=bind_port,
                 ws_ping_interval=None, ws_ping_timeout=None)
