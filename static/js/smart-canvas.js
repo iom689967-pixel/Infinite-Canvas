@@ -5600,6 +5600,9 @@ function handleAssetLibraryUpdatedMessage(data={}){
 // 服务器广播 canvas_updated 时带回 client_id，自己发的就忽略，避免自我刷新。
 const smartClientId = `canvas_smart_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
 let canvasSyncInFlight = false;
+// 三方合并的共同基线：最近一次与服务器一致的节点（深拷贝，绝不与 nodes 共享对象）。
+// 加载画布、保存成功、合并服务器版本后更新。合并时据此判断某个字段是“本地改的”还是“对方改的”。
+let smartSyncBaseNodes = null;
 let canvasSyncTimer = null;
 let canvasMetaPollTimer = null;
 let connectionLayerRaf = 0;
@@ -5895,7 +5898,28 @@ function syncRunButtonState(node=selectedNode()){
     runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
     syncSmartRunIntentUi(node);
 }
-function mergeSmartNode(local, remote){
+function cloneSmartJson(value){
+    return JSON.parse(JSON.stringify(value ?? null));
+}
+function smartJsonEqual(a, b){
+    if(a === b) return true;
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch(e) { return false; }
+}
+// 字段级三方合并：相对共同基线，本地改过的字段保留本地值，否则采用对方的值（对方删掉的字段也删掉）。
+// images 由调用方按并集处理。没有基线时退回旧行为（以对方为准）。
+function threeWayMergeSmartFields(local, remote, base){
+    if(!base) return {...remote};
+    const merged = {...local};
+    const keys = new Set([...Object.keys(local || {}), ...Object.keys(remote || {}), ...Object.keys(base || {})]);
+    keys.forEach(key => {
+        if(key === 'images') return;
+        if(!smartJsonEqual(local[key], base[key])) return;
+        if(Object.prototype.hasOwnProperty.call(remote, key)) merged[key] = remote[key];
+        else delete merged[key];
+    });
+    return merged;
+}
+function mergeSmartNode(local, remote, base=null){
     const images = mergeSmartImageLists(local.images, remote.images);
     const localDone = smartNodeHasCompletedResult(local);
     const remoteDone = smartNodeHasCompletedResult(remote);
@@ -5904,6 +5928,14 @@ function mergeSmartNode(local, remote){
     const localGenerationBusy = nodeGenerationAttempt(local)?.status === 'running' && localBusy;
     const remoteGenerationBusy = nodeGenerationAttempt(remote)?.status === 'running' && remoteBusy;
     let merged = localGenerationBusy ? {...local, images:local.images || []} : remoteGenerationBusy ? {...remote, images:remote.images || []} : null;
+    // 有共同基线且双方都不在生成中：按字段三方合并，双方各自改的字段都保留（位置、文字、参数……）。
+    // 以前这里以对方为准，本地尚未保存或刚被 409 拒绝的编辑会被整体丢掉（C1）。
+    if(!merged && base && !localBusy && !remoteBusy){
+        merged = {...threeWayMergeSmartFields(local, remote, base), images};
+        if(smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)){
+            merged = completeSmartNodeWithImages(merged, images);
+        }
+    }
     if(!merged && localDone && remoteBusy && !remoteDone) merged = completeSmartNodeWithImages(local, images);
     else if(!merged && remoteDone && localBusy && !localDone) merged = completeSmartNodeWithImages(remote, images);
     if(!merged && localDone && remoteDone){
@@ -5915,16 +5947,17 @@ function mergeSmartNode(local, remote){
     if(!merged && smartNodeInFlight(local)){
         merged = {...local, images};
     }
-    // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
+    // 否则以对方（最新保存方）为基底合并本地改过的字段，图片取并集——双方生成结果都不丢
     if(!merged){
-        merged = {...remote, images};
+        merged = {...threeWayMergeSmartFields(local, remote, base), images};
         if(smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)){
             merged = completeSmartNodeWithImages(merged, images);
         }
     }
     return mergeNodeGenerationState(merged, local, remote);
 }
-function mergeSmartNodeLists(localNodes, remoteNodes){
+function mergeSmartNodeLists(localNodes, remoteNodes, baseNodes=null){
+    const baseById = new Map((baseNodes || []).filter(n => n && n.id).map(n => [n.id, n]));
     const localById = new Map((localNodes || []).map(n => [n.id, n]));
     const remoteById = new Map((remoteNodes || []).map(n => [n.id, n]));
     const order = [];
@@ -5936,7 +5969,7 @@ function mergeSmartNodeLists(localNodes, remoteNodes){
         const remote = remoteById.get(id);
         if(local && !remote) return local;     // 仅本地存在：保留（我新建的节点；对方删了也宁可复活也不丢结果）
         if(remote && !local) return remote;     // 仅对方存在：加入对方新建的节点
-        return mergeSmartNode(local, remote);
+        return mergeSmartNode(local, remote, baseById.get(id) || null);
     }).filter(Boolean);
 }
 function mergeSmartConnections(localConns, remoteConns, nodeIds){
@@ -5953,8 +5986,11 @@ function mergeSmartConnections(localConns, remoteConns, nodeIds){
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
+    // 先深拷贝服务器节点作为新的基线：下面的规范化会原地修改对象，且对方新建的节点会直接成为本地对象。
+    const serverBaseNodes = cloneSmartJson(Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []);
     const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
-    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
+    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes, smartSyncBaseNodes);
+    smartSyncBaseNodes = serverBaseNodes;
     const nodeIds = new Set(mergedNodes.map(n => n.id));
     nodes = mergedNodes;
     canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
@@ -5985,6 +6021,11 @@ async function mergeReloadCanvasNow(){
         const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`);
         if(!res.ok) return;
         const data = await res.json();
+        // 拉取期间本页开始了保存：等保存结束再合并，避免用较旧的服务器版本覆盖刚发出的基线。
+        if(canvasSyncInFlight){
+            scheduleCanvasMergeReload(600);
+            return;
+        }
         if(data && data.canvas) applyMergedServerCanvas(data.canvas);
     } catch(e) {}
 }
@@ -6549,6 +6590,7 @@ async function loadCanvas(){
         if(!res.ok) return;
         const data = await res.json();
         canvas = data.canvas;
+        smartSyncBaseNodes = cloneSmartJson(Array.isArray(canvas?.nodes) ? canvas.nodes : []);
         undoStack.length = 0;
         redoStack.length = 0;
         rememberCanvasListProject(canvas.project || 'default');
@@ -6601,56 +6643,78 @@ async function loadCanvas(){
 }
 function scheduleSave(){
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveCanvas, 450);
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveCanvas();
+    }, 450);
 }
-async function saveCanvas(){
-    if(!canvasId || !canvas) return;
-    savePromptDraftForCurrent();
-    nodes.forEach(node => {
-        node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+// 保存串行化：同一时间只有一个 PUT 在途。以前 450ms 防抖后无条件发请求，上一次保存还没返回时
+// 下一次会带着同一个 base_updated_at 发出，必然 409，而 409 合并又以服务器（上一次保存）的节点为准，
+// 于是两次保存之间的编辑被丢掉（C1）。现在在途时只排队一次后续保存，等当前请求结束后用最新状态和
+// 新的 updated_at 再存；调用方 await saveCanvas() 会等到包含自己改动的那次保存完成。
+let smartSaveRunning = null;
+let smartSaveQueued = null;
+function saveCanvas(){
+    if(!canvasId || !canvas) return Promise.resolve();
+    if(smartSaveRunning){
+        if(!smartSaveQueued){
+            smartSaveQueued = smartSaveRunning.then(() => {
+                smartSaveQueued = null;
+                return saveCanvas();
+            });
+        }
+        return smartSaveQueued;
+    }
+    smartSaveRunning = performSmartCanvasSave().finally(() => {
+        smartSaveRunning = null;
     });
-    canvas.nodes = nodes;
-    canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
-    canvas.viewport = {...viewport};
-    const storageCanvas = canvasForStorage();
+    return smartSaveRunning;
+}
+async function performSmartCanvasSave(){
     canvasSyncInFlight = true;
     try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:storageCanvas.title || tr('smart.title'),
-                icon:storageCanvas.icon || 'sparkles',
-                nodes:storageCanvas.nodes || [],
-                connections:storageCanvas.connections || [],
-                viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
-                logs:storageCanvas.logs || [],
-                settings:storageCanvas.settings,
-                base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
-                client_id:smartClientId
-            })
-        });
-        if(res.ok){
-            const data = await res.json();
-            if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
-        } else if(res.status === 409) {
-            // 冲突：别人先保存了。合并对方的状态（节点 id 合并、图片取并集，谁都不丢），
+        // 409 时把服务器版本三方合并进本地，再用新的 base 立即重存；连续冲突最多重试几次。
+        for(let attempt = 0; attempt < 5; attempt++){
+            if(!canvasId || !canvas) return;
+            savePromptDraftForCurrent();
+            nodes.forEach(node => {
+                node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
+                if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+            });
+            canvas.nodes = nodes;
+            canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
+            canvas.viewport = {...viewport};
+            const storageCanvas = canvasForStorage();
+            const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
+                method:'PUT',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({
+                    title:storageCanvas.title || tr('smart.title'),
+                    icon:storageCanvas.icon || 'sparkles',
+                    nodes:storageCanvas.nodes || [],
+                    connections:storageCanvas.connections || [],
+                    viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
+                    logs:storageCanvas.logs || [],
+                    settings:storageCanvas.settings,
+                    base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
+                    client_id:smartClientId
+                })
+            });
+            if(res.ok){
+                const data = await res.json();
+                if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
+                // 服务器现在保存的正是这份节点（canvasForStorage 已深拷贝），作为下一次合并的基线。
+                smartSyncBaseNodes = storageCanvas.nodes || [];
+                return;
+            }
+            if(res.status !== 409) return;
+            // 冲突：别人先保存了。按字段三方合并对方的状态（双方各自的改动都保留，图片取并集），
             // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
             const data = await res.json().catch(() => ({}));
             const serverCanvas = data.detail?.canvas;
-            if(serverCanvas){
-                applyMergedServerCanvas(serverCanvas);
-                nodes.forEach(node => {
-                    node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
-                });
-                canvas.nodes = nodes;
-            } else if(data.detail?.updated_at) {
-                canvas.updated_at = data.detail.updated_at;
-            }
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(saveCanvas, 300);
+            if(serverCanvas) applyMergedServerCanvas(serverCanvas);
+            else if(data.detail?.updated_at) canvas.updated_at = data.detail.updated_at;
+            else return;
         }
     } catch(e) {} finally {
         canvasSyncInFlight = false;
