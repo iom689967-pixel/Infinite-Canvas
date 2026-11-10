@@ -1467,6 +1467,7 @@ function buildCanvasSaveBody(){
     });
 }
 function scheduleCanvasSaveRetry(error){
+    canvasConflictStreak = 0; // 下一次重试重新允许合并
     canvasSaveRetryDelay = Math.min(30000, canvasSaveRetryDelay ? canvasSaveRetryDelay * 2 : 1000);
     clearTimeout(canvasSaveRetryTimer);
     canvasSaveRetryTimer = setTimeout(() => {
@@ -1565,28 +1566,33 @@ async function saveCanvas(){
     saveCanvasAgain = false;
     if(!canvasSaveRetryTimer) setCanvasSaveState('saving');
     try {
+        const body = buildCanvasSaveBody();
         const res = await fetch(`/api/canvases/${canvas.id}`, {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
-            body:buildCanvasSaveBody()
+            body
         });
         if(res.status === 409){
+            // 冲突：别人先保存了。三方合并对方的版本（双方的改动都保留），再以对方的 updated_at 为基底重存。
+            // 以前这里直接拿对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）。
             const data = await res.json().catch(() => ({}));
             const remote = data.detail?.canvas || data.canvas;
-            if(localCanvasDirty || saveCanvasAgain){
-                lastCanvasUpdatedAt = Number(data.detail?.updated_at || data.updated_at || remote?.updated_at || lastCanvasUpdatedAt || 0);
-                saveCanvasAgain = true;
-                setStatus('Saving...');
-                return;
-            }
-            if(remote) applyRemoteCanvasData(remote);
-            setStatus('Synced');
+            canvasConflictStreak += 1;
+            if(canvasConflictStreak > 5) throw new Error('连续保存冲突');
+            if(remote) mergeRemoteCanvasIntoLocal(remote);
+            else lastCanvasUpdatedAt = Number(data.detail?.updated_at || data.updated_at || lastCanvasUpdatedAt || 0);
+            localCanvasDirty = true;
+            saveCanvasAgain = true;
+            setStatus('Merging...');
             return;
         }
         if(!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`));
         const data = await res.json().catch(() => ({}));
+        canvasConflictStreak = 0;
+        canvasSyncBaseJson = body; // 服务器现在保存的正是这份内容，作为下一次合并的基线
         const localViewport = {...viewport};
-        if(data.canvas) canvas = {...canvas, ...data.canvas, viewport:localViewport};
+        // logs/title/icon 以本地为准：保存在途时可能已经合并过远端版本，不能被这次响应里的旧内容盖回去。
+        if(data.canvas) canvas = {...canvas, ...data.canvas, logs:canvas.logs, title:canvas.title, icon:canvas.icon, viewport:localViewport};
         viewport = localViewport;
         canvas.updated_at = Number(canvas.updated_at || Date.now());
         lastCanvasUpdatedAt = canvas.updated_at;
@@ -2171,6 +2177,7 @@ async function openCanvas(id){
             return;
         }
         canvas.logs = canvas.logs || [];
+        rememberCanvasSyncBase(canvas);
         nodes = canvas.nodes || [];
         connections = canvas.connections || [];
         viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
@@ -2196,13 +2203,124 @@ async function openCanvas(id){
         window.location.replace(canvasListUrlForProject(canvas?.project || requestedCanvasListProject() || rememberedCanvasListProject()));
     }
 }
+// ---- 三方合并（C3 + C4）----
+// 以前：保存遇到 409 时直接用对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）；
+// 收到远端更新时先清掉本页未保存的修改再拉取，本页的编辑被丢掉（C4）。二者只能丢一方。
+// 现在：记住最近一次与服务器一致的内容作为共同基线，按字段三方合并——
+// 本地改过的字段保留本地值，否则采用对方的值；节点、连线、日志的增删也相对基线判断，双方的改动都保留。
+let canvasSyncBaseJson = '';
+let canvasConflictStreak = 0;
+function canvasSyncSnapshot(source){
+    return JSON.stringify({
+        title:source?.title || '',
+        icon:source?.icon || '',
+        nodes:(source?.nodes || []).map(serializableCanvasNode),
+        connections:source?.connections || [],
+        logs:source?.logs || [],
+    });
+}
+function rememberCanvasSyncBase(source){
+    try { canvasSyncBaseJson = canvasSyncSnapshot(source); } catch(e) { canvasSyncBaseJson = ''; }
+}
+function canvasJsonEqual(a, b){
+    if(a === b) return true;
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch(e) { return false; }
+}
+function mergeCanvasNodeFieldsInPlace(local, remote, base){
+    // 原地修改本地节点对象：正在运行的任务、选中状态等都持有它的引用。
+    const localSer = serializableCanvasNode(local);
+    const keys = new Set([...Object.keys(localSer), ...Object.keys(remote || {}), ...Object.keys(base || {})]);
+    keys.forEach(key => {
+        if(!canvasJsonEqual(localSer[key], base[key])) return; // 本地改过 → 保留本地
+        if(Object.prototype.hasOwnProperty.call(remote, key)) local[key] = remote[key];
+        else delete local[key];
+    });
+}
+// 按 key 合并列表：一方删除（基线里有、该方没有）就删除；任一方新增就保留；双方都有时用本地对象。
+function mergeKeyedCanvasLists(localList, remoteList, baseList, keyOf){
+    const baseKeys = new Set((baseList || []).map(keyOf).filter(Boolean));
+    const localByKey = new Map((localList || []).map(item => [keyOf(item), item]));
+    const remoteKeys = new Set((remoteList || []).map(keyOf).filter(Boolean));
+    const out = [];
+    const seen = new Set();
+    (remoteList || []).forEach(item => {
+        const key = keyOf(item);
+        if(!key || seen.has(key)) return;
+        if(baseKeys.has(key) && !localByKey.has(key)) return;
+        seen.add(key);
+        out.push(localByKey.get(key) || item);
+    });
+    (localList || []).forEach(item => {
+        const key = keyOf(item);
+        if(!key || seen.has(key)) return;
+        if(baseKeys.has(key) && !remoteKeys.has(key)) return;
+        seen.add(key);
+        out.push(item);
+    });
+    return out;
+}
+function mergeRemoteCanvasIntoLocal(remote){
+    if(!remote || !canvas || remote.id !== canvas.id) return false;
+    let base = null;
+    try { base = canvasSyncBaseJson ? JSON.parse(canvasSyncBaseJson) : null; } catch(e) { base = null; }
+    // 没有基线时把远端当作基线：本地全部胜出，等同旧行为，但不会丢本地修改。
+    const nextBaseJson = canvasSyncSnapshot(remote); // 必须在远端节点变成本地对象之前拍快照
+    if(!base) base = JSON.parse(nextBaseJson);
+    const baseNodes = new Map((base.nodes || []).map(n => [n.id, n]));
+    const remoteNodes = Array.isArray(remote.nodes) ? remote.nodes : [];
+    const remoteById = new Map(remoteNodes.map(n => [n.id, n]));
+    const localIds = new Set(nodes.map(n => n.id));
+    const merged = [];
+    nodes.forEach(local => {
+        const remoteNode = remoteById.get(local.id);
+        const baseNode = baseNodes.get(local.id);
+        if(remoteNode){
+            if(baseNode) mergeCanvasNodeFieldsInPlace(local, remoteNode, baseNode);
+            merged.push(local);
+            return;
+        }
+        // 对方删除了这个节点：本地没改过就接受删除，本地改过就保留（不丢数据）。
+        if(baseNode && canvasJsonEqual(serializableCanvasNode(local), baseNode)) return;
+        merged.push(local);
+    });
+    remoteNodes.forEach(remoteNode => {
+        if(localIds.has(remoteNode.id)) return;
+        const baseNode = baseNodes.get(remoteNode.id);
+        // 本地删除了这个节点：对方没改过就保持删除，对方改过就恢复。
+        if(baseNode && canvasJsonEqual(remoteNode, baseNode)) return;
+        resetTransientRunState([remoteNode]);
+        merged.push(remoteNode);
+    });
+    nodes = merged;
+    connections = mergeKeyedCanvasLists(connections, remote.connections, base.connections, c => c?.id || (c ? `${c.from}->${c.to}` : ''));
+    canvas.logs = mergeKeyedCanvasLists(canvas.logs, remote.logs, base.logs, l => l?.id || '')
+        .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
+        .slice(0, 500);
+    if(canvas.title === base.title && remote.title) canvas.title = remote.title;
+    if(canvas.icon === base.icon && remote.icon) canvas.icon = remote.icon;
+    ['owner', 'color', 'pinned', 'project', 'board_x', 'board_y'].forEach(key => {
+        if(Object.prototype.hasOwnProperty.call(remote, key)) canvas[key] = remote[key];
+    });
+    canvas.updated_at = Number(remote.updated_at || canvas.updated_at || 0);
+    lastCanvasUpdatedAt = canvas.updated_at;
+    canvasSyncBaseJson = nextBaseJson;
+    sanitizeConnections();
+    selected = new Set([...selected].filter(id => nodes.some(node => node.id === id)));
+    if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
+    render();
+    return true;
+}
 function applyRemoteCanvasData(remote){
     if(!remote || !canvas || remote.id !== canvas.id) return;
     if(localCanvasDirty || saveTimer || savingCanvasNow || saveCanvasAgain){
-        clearTimeout(remoteSyncTimer);
-        remoteSyncTimer = setTimeout(syncRemoteCanvasNow, 1000);
+        // 本地还有未保存的修改：不再无限推迟或丢弃，而是三方合并远端版本，再以远端的 updated_at 为基底保存。
+        if(Number(remote.updated_at || 0) <= Number(lastCanvasUpdatedAt || 0)) return;
+        mergeRemoteCanvasIntoLocal(remote);
+        if(savingCanvasNow) saveCanvasAgain = true;
+        else scheduleSave();
         return;
     }
+    rememberCanvasSyncBase(remote);
     applyingRemoteCanvas = true;
     try {
         resetCascadeRuntimeState();
@@ -2328,9 +2446,7 @@ function handleCanvasUpdatedMessage(data){
     if(data.canvas_id !== canvas.id) return;
     const remoteUpdatedAt = Number(data.updated_at || 0);
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(lastCanvasUpdatedAt || 0)) return;
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    localCanvasDirty = false;
+    // 不再清掉本页未保存的修改（C4）：拉取后由 applyRemoteCanvasData 做三方合并。
     clearTimeout(remoteSyncTimer);
     remoteSyncTimer = setTimeout(syncRemoteCanvasNow, savingCanvasNow ? 700 : 120);
     setStatus('Syncing...');
