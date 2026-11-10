@@ -49,8 +49,8 @@ class SmartNodeGenerationHistoryContractTests(unittest.TestCase):
 
     def test_02_history_is_optional_node_data_saved_by_existing_canvas_path(self):
         storage = function_source("canvasForStorage")
-        # 保存逻辑在 C1 修复中拆成 saveCanvas（串行化入口）+ performSmartCanvasSave（实际请求）。
-        save = function_source("saveCanvas") + function_source("performSmartCanvasSave")
+        # 保存逻辑拆成 saveCanvas（串行化入口）、performSmartCanvasSave（实际请求）、buildSmartSavePayload（组装请求体）。
+        save = function_source("saveCanvas") + function_source("performSmartCanvasSave") + function_source("buildSmartSavePayload")
         normalize = function_source("normalizeLegacySmartNode")
         self.assertIn("JSON.parse(JSON.stringify(canvas || {}))", storage)
         self.assertIn("canvas.nodes = nodes", save)

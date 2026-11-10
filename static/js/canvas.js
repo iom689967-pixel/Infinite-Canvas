@@ -1441,16 +1441,74 @@ function refreshGeometryAfterLayout(){
         requestAnimationFrame(refreshGeometry);
     });
 }
+// ---- 保存失败重试与离开提示（C2）----
+// 以前保存失败只显示 Save failed，不重试；修改留在内存里，刷新或关闭页面就丢了。
+// 现在失败后按 1s、2s、4s… 最长 30s 退避自动重试；离开页面时若仍有未保存修改则补发或提示。
+// <html data-canvas-save-state="saving|saved|dirty|error"> 供样式和回归脚本使用。
+let canvasSaveRetryTimer = null;
+let canvasSaveRetryDelay = 0;
+const CANVAS_KEEPALIVE_MAX_BYTES = 60000; // 浏览器对 keepalive 请求体的上限约 64KB
+function setCanvasSaveState(state){
+    document.documentElement.dataset.canvasSaveState = state;
+}
+function canvasHasUnsavedChanges(){
+    return Boolean(canvas) && (localCanvasDirty || savingCanvasNow || saveCanvasAgain || Boolean(saveTimer));
+}
+function buildCanvasSaveBody(){
+    return JSON.stringify({
+        title:canvas.title,
+        icon:canvas.icon || '🧩',
+        nodes:serializableCanvasNodes(),
+        connections,
+        viewport,
+        logs:canvas.logs || [],
+        client_id:CLIENT_ID,
+        base_updated_at:Number(lastCanvasUpdatedAt || canvas.updated_at || 0)
+    });
+}
+function scheduleCanvasSaveRetry(error){
+    canvasSaveRetryDelay = Math.min(30000, canvasSaveRetryDelay ? canvasSaveRetryDelay * 2 : 1000);
+    clearTimeout(canvasSaveRetryTimer);
+    canvasSaveRetryTimer = setTimeout(() => {
+        canvasSaveRetryTimer = null;
+        if(canvas && canvasHasUnsavedChanges()) saveCanvas();
+    }, canvasSaveRetryDelay);
+    setCanvasSaveState('error');
+    setStatus(`Save failed · retry in ${Math.round(canvasSaveRetryDelay / 1000)}s`);
+    const statusEl = document.getElementById('saveState');
+    if(statusEl) statusEl.title = String(error?.message || error || '');
+}
+window.addEventListener('beforeunload', event => {
+    if(!canvasHasUnsavedChanges()) return;
+    if(!savingCanvasNow){
+        try {
+            const body = buildCanvasSaveBody();
+            if(new TextEncoder().encode(body).length <= CANVAS_KEEPALIVE_MAX_BYTES){
+                fetch(`/api/canvases/${canvas.id}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body, keepalive:true}).catch(() => {});
+                return;
+            }
+        } catch(e) {}
+    }
+    event.preventDefault();
+    event.returnValue = '';
+});
 function scheduleSave(){
     if(!canvas || applyingRemoteCanvas) return;
     localCanvasDirty = true;
-    setStatus('Saving...');
+    if(!canvasSaveRetryTimer) setStatus('Saving...');
+    setCanvasSaveState(canvasSaveRetryTimer ? 'error' : 'dirty');
     clearTimeout(saveTimer);
+    saveTimer = null;
     if(savingCanvasNow){
         saveCanvasAgain = true;
         return;
     }
-    saveTimer = setTimeout(saveCanvas, 500);
+    // 触发后清空 saveTimer：否则它一直是旧的定时器 id，applyRemoteCanvasData 会永远认为“还有待保存的修改”，
+    // 轮询拿到的远端更新被无限推迟。
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveCanvas();
+    }, 500);
 }
 function scheduleViewportSave(){
     saveLocalViewport();
@@ -1499,24 +1557,18 @@ async function saveCanvas(){
         saveCanvasAgain = true;
         return;
     }
+    clearTimeout(saveTimer);
+    saveTimer = null;
     sanitizeConnections();
     normalizeStoredConnectionAnchors();
     savingCanvasNow = true;
     saveCanvasAgain = false;
+    if(!canvasSaveRetryTimer) setCanvasSaveState('saving');
     try {
         const res = await fetch(`/api/canvases/${canvas.id}`, {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:canvas.title,
-                icon:canvas.icon || '🧩',
-                nodes:serializableCanvasNodes(),
-                connections,
-                viewport,
-                logs:canvas.logs || [],
-                client_id:CLIENT_ID,
-                base_updated_at:Number(lastCanvasUpdatedAt || canvas.updated_at || 0)
-            })
+            body:buildCanvasSaveBody()
         });
         if(res.status === 409){
             const data = await res.json().catch(() => ({}));
@@ -1531,7 +1583,7 @@ async function saveCanvas(){
             setStatus('Synced');
             return;
         }
-        if(!res.ok) throw new Error('save failed');
+        if(!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`));
         const data = await res.json().catch(() => ({}));
         const localViewport = {...viewport};
         if(data.canvas) canvas = {...canvas, ...data.canvas, viewport:localViewport};
@@ -1540,11 +1592,15 @@ async function saveCanvas(){
         lastCanvasUpdatedAt = canvas.updated_at;
         localCanvasDirty = Boolean(saveCanvasAgain);
         if(currentCanvasTime) currentCanvasTime.textContent = formatCanvasTime(canvas.updated_at);
+        canvasSaveRetryDelay = 0;
+        clearTimeout(canvasSaveRetryTimer);
+        canvasSaveRetryTimer = null;
+        setCanvasSaveState(localCanvasDirty ? 'dirty' : 'saved');
         setStatus('Saved');
         loadCanvasList(false);
     } catch(e) {
-        setStatus('Save failed');
         console.error(e);
+        scheduleCanvasSaveRetry(e);
     } finally {
         savingCanvasNow = false;
         if(saveCanvasAgain && canvas && !applyingRemoteCanvas){
@@ -2282,7 +2338,11 @@ function handleCanvasUpdatedMessage(data){
 async function returnToCanvasManager(){
     if(canvasReferencePicker) cancelCanvasReferencePicker();
     clearTimeout(saveTimer);
+    saveTimer = null;
     if(canvas && localCanvasDirty) await saveCanvas();
+    if(canvas && canvasHasUnsavedChanges() && !confirm('画布还有未保存的修改，仍要离开吗？')) return;
+    clearTimeout(canvasSaveRetryTimer);
+    canvasSaveRetryTimer = null;
     stopCanvasRemotePolling();
     canvas = null;
     nodes = [];

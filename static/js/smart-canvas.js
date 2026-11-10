@@ -6641,7 +6641,80 @@ async function loadCanvas(){
         startCanvasMetaPoll();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
+// ---- 保存状态与失败重试（C2）----
+// 以前保存失败（5xx / 断网）被 catch 吞掉：不提示、不重试，内存里的修改在刷新后丢失。
+// 现在：用编辑版本号判断是否还有未落盘的修改；失败后按 1s、2s、4s… 最长 30s 退避自动重试，
+// 期间显示常驻提示（可点击立即重试）；离开页面时若仍有未保存修改则补发或提示。
+// <html data-canvas-save-state="saving|saved|dirty|error"> 供样式和回归脚本使用。
+let smartEditVersion = 0;
+let smartSavedVersion = 0;
+let smartSaveRetryTimer = null;
+let smartSaveRetryDelay = 0;
+let smartSaveFailing = false;
+const SMART_KEEPALIVE_MAX_BYTES = 60000; // 浏览器对 keepalive 请求体的上限约 64KB
+function smartUiIsEnglish(){
+    try { return window.StudioI18n?.lang?.() === 'en'; } catch(e) { return false; }
+}
+function setCanvasSaveState(state){
+    document.documentElement.dataset.canvasSaveState = state;
+}
+function canvasHasUnsavedChanges(){
+    return smartSavedVersion < smartEditVersion || Boolean(smartSaveRunning) || Boolean(saveTimer);
+}
+function smartSaveFailureBadge(){
+    let el = document.getElementById('smartSaveFailureBadge');
+    if(el) return el;
+    el = document.createElement('button');
+    el.id = 'smartSaveFailureBadge';
+    el.type = 'button';
+    Object.assign(el.style, {
+        position:'fixed', top:'12px', left:'50%', transform:'translateX(-50%)', zIndex:'100000',
+        display:'none', padding:'6px 14px', borderRadius:'999px', border:'1px solid rgba(220,38,38,.45)',
+        background:'rgba(254,242,242,.97)', color:'#b91c1c', font:'500 12px/1.5 system-ui, -apple-system, sans-serif',
+        boxShadow:'0 4px 14px rgba(0,0,0,.14)', cursor:'pointer'
+    });
+    el.onclick = () => {
+        clearTimeout(smartSaveRetryTimer);
+        smartSaveRetryTimer = null;
+        saveCanvas();
+    };
+    document.body.appendChild(el);
+    return el;
+}
+function noteSmartSaveSucceeded(builtVersion){
+    smartSavedVersion = Math.max(smartSavedVersion, builtVersion);
+    const recovered = smartSaveFailing;
+    smartSaveFailing = false;
+    smartSaveRetryDelay = 0;
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = null;
+    const badge = document.getElementById('smartSaveFailureBadge');
+    if(badge) badge.style.display = 'none';
+    setCanvasSaveState(smartSavedVersion < smartEditVersion ? 'dirty' : 'saved');
+    if(recovered) toast(smartUiIsEnglish() ? 'Canvas saved' : '画布已重新保存');
+}
+function noteSmartSaveFailed(error){
+    const message = String(error?.message || error || '').slice(0, 160) || (smartUiIsEnglish() ? 'Save failed' : '保存失败');
+    smartSaveRetryDelay = Math.min(30000, smartSaveRetryDelay ? smartSaveRetryDelay * 2 : 1000);
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = setTimeout(() => {
+        smartSaveRetryTimer = null;
+        saveCanvas();
+    }, smartSaveRetryDelay);
+    const seconds = Math.round(smartSaveRetryDelay / 1000);
+    if(!smartSaveFailing) toast(smartUiIsEnglish() ? `Canvas save failed, retrying: ${message}` : `画布保存失败，正在自动重试：${message}`);
+    smartSaveFailing = true;
+    setCanvasSaveState('error');
+    const badge = smartSaveFailureBadge();
+    badge.textContent = smartUiIsEnglish()
+        ? `Canvas not saved · retrying in ${seconds}s (click to retry now)`
+        : `画布未保存 · ${seconds} 秒后自动重试（点击立即重试）`;
+    badge.title = message;
+    badge.style.display = 'block';
+}
 function scheduleSave(){
+    smartEditVersion++;
+    if(!smartSaveFailing) setCanvasSaveState('dirty');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         saveTimer = null;
@@ -6656,6 +6729,8 @@ let smartSaveRunning = null;
 let smartSaveQueued = null;
 function saveCanvas(){
     if(!canvasId || !canvas) return Promise.resolve();
+    // 直接调用 saveCanvas() 的地方通常刚改过节点（例如写入 pendingTasks），同样计为一次编辑。
+    smartEditVersion++;
     if(smartSaveRunning){
         if(!smartSaveQueued){
             smartSaveQueued = smartSaveRunning.then(() => {
@@ -6665,58 +6740,85 @@ function saveCanvas(){
         }
         return smartSaveQueued;
     }
-    smartSaveRunning = performSmartCanvasSave().finally(() => {
+    if(!smartSaveFailing) setCanvasSaveState('saving');
+    smartSaveRunning = performSmartCanvasSave().catch(noteSmartSaveFailed).finally(() => {
         smartSaveRunning = null;
     });
     return smartSaveRunning;
 }
+function buildSmartSavePayload(){
+    savePromptDraftForCurrent();
+    nodes.forEach(node => {
+        node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
+        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+    });
+    canvas.nodes = nodes;
+    canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
+    canvas.viewport = {...viewport};
+    const builtVersion = smartEditVersion;
+    const storageCanvas = canvasForStorage();
+    const body = JSON.stringify({
+        title:storageCanvas.title || tr('smart.title'),
+        icon:storageCanvas.icon || 'sparkles',
+        nodes:storageCanvas.nodes || [],
+        connections:storageCanvas.connections || [],
+        viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
+        logs:storageCanvas.logs || [],
+        settings:storageCanvas.settings,
+        base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
+        client_id:smartClientId
+    });
+    return {storageCanvas, body, builtVersion};
+}
+// 离开页面时：没有在途保存且请求体足够小，就用 keepalive 补发；否则返回 false，由调用方弹出确认框。
+function trySmartKeepaliveSave(){
+    if(!canvasId || !canvas || smartSaveRunning) return false;
+    try {
+        const {body} = buildSmartSavePayload();
+        if(new TextEncoder().encode(body).length > SMART_KEEPALIVE_MAX_BYTES) return false;
+        fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body, keepalive:true}).catch(() => {});
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+window.addEventListener('beforeunload', event => {
+    if(!canvasHasUnsavedChanges()) return;
+    if(trySmartKeepaliveSave()) return;
+    event.preventDefault();
+    event.returnValue = '';
+});
 async function performSmartCanvasSave(){
     canvasSyncInFlight = true;
     try {
         // 409 时把服务器版本三方合并进本地，再用新的 base 立即重存；连续冲突最多重试几次。
         for(let attempt = 0; attempt < 5; attempt++){
             if(!canvasId || !canvas) return;
-            savePromptDraftForCurrent();
-            nodes.forEach(node => {
-                node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-                if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
-            });
-            canvas.nodes = nodes;
-            canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
-            canvas.viewport = {...viewport};
-            const storageCanvas = canvasForStorage();
+            const {storageCanvas, body, builtVersion} = buildSmartSavePayload();
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
                 method:'PUT',
                 headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({
-                    title:storageCanvas.title || tr('smart.title'),
-                    icon:storageCanvas.icon || 'sparkles',
-                    nodes:storageCanvas.nodes || [],
-                    connections:storageCanvas.connections || [],
-                    viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
-                    logs:storageCanvas.logs || [],
-                    settings:storageCanvas.settings,
-                    base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
-                    client_id:smartClientId
-                })
+                body
             });
             if(res.ok){
                 const data = await res.json();
                 if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
                 // 服务器现在保存的正是这份节点（canvasForStorage 已深拷贝），作为下一次合并的基线。
                 smartSyncBaseNodes = storageCanvas.nodes || [];
+                noteSmartSaveSucceeded(builtVersion);
                 return;
             }
-            if(res.status !== 409) return;
+            if(res.status !== 409) throw new Error(await smartResponseErrorMessage(res, `HTTP ${res.status}`));
             // 冲突：别人先保存了。按字段三方合并对方的状态（双方各自的改动都保留，图片取并集），
             // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
             const data = await res.json().catch(() => ({}));
             const serverCanvas = data.detail?.canvas;
             if(serverCanvas) applyMergedServerCanvas(serverCanvas);
             else if(data.detail?.updated_at) canvas.updated_at = data.detail.updated_at;
-            else return;
+            else throw new Error('HTTP 409');
         }
-    } catch(e) {} finally {
+        throw new Error(smartUiIsEnglish() ? 'Repeated save conflicts' : '连续保存冲突');
+    } finally {
         canvasSyncInFlight = false;
     }
 }
@@ -20621,7 +20723,9 @@ async function cancelSmartImageGeneration(nodeId){
     toast(localOnly ? '已停止本地等待；任务已提交服务商，可能仍会继续执行。' : '生成已取消');
     return true;
 }
-window.addEventListener('beforeunload', () => {
+// 只在真正离开页面时取消本地任务轮询：beforeunload 可能因为“未保存修改”确认框而被用户取消，
+// 那时不能已经把任务取消掉。
+window.addEventListener('pagehide', () => {
     [...activeSmartTaskControllers.keys()].forEach(cancelSmartCanvasTask);
 });
 window.addEventListener('pagehide', () => {
