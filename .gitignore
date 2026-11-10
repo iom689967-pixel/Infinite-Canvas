@@ -51,3 +51,6 @@ __pycache__/
 /Infinite-Canvas-启动.command
 /Infinite-Canvas-停止.command
 /Infinite-Canvas-重启.command
+
+# Audit repro outputs
+/tests/repro/results*.json
