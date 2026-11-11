@@ -1418,12 +1418,13 @@ function scheduleCanvasSaveRetry(error){
     if(statusEl) statusEl.title = String(error?.message || error || '');
 }
 window.addEventListener('beforeunload', event => {
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面不保存；草稿已暂存，刷新时不再拦截
     if(!canvasHasUnsavedChanges()) return;
     if(!savingCanvasNow){
         try {
             const body = buildCanvasSaveBody();
             if(new TextEncoder().encode(body).length <= CANVAS_KEEPALIVE_MAX_BYTES){
-                fetch(`/api/canvases/${canvas.id}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body, keepalive:true}).catch(() => {});
+                fetch(`/api/canvases/${canvas.id}`, {method:'PUT', headers:StalePage.withBuildHeader({'Content-Type':'application/json'}), body, keepalive:true}).catch(() => {});
                 return;
             }
         } catch(e) {}
@@ -1500,8 +1501,87 @@ async function fetchServerCanvasForMerge(id){
         return null;
     }
 }
+// ---- 页面版本过期（后端已更新、页面未刷新）----
+// 过期后不再保存；未保存的修改只记相对上次同步内容的变化，暂存到本机浏览器，刷新后可恢复（见 stale-page.js）。
+let pageOutdated = false;
+const OUTDATED_PAGE_ID = uid('page');
+function buildClassicOutdatedDraft(){
+    let base = null;
+    try { base = canvasSyncBaseJson ? JSON.parse(canvasSyncBaseJson) : null; } catch(e) { base = null; }
+    const patch = CanvasMerge.buildDraftPatch({
+        localNodes:serializableCanvasNodes(), baseNodes:base?.nodes || [],
+        localConnections:connections, baseConnections:base?.connections || [],
+        connectionKey:CanvasMerge.classicConnectionKey,
+    });
+    return {version:1, kind:'classic', canvasId:canvas.id, title:canvas.title || '', savedAt:Date.now(),
+            clientBuild:StalePage.clientBuild(), baseUpdatedAt:Number(lastCanvasUpdatedAt || 0), patch};
+}
+function refreshOutdatedDraft(){
+    if(!canvas) return;
+    let draft = null;
+    let state = 'none';
+    try {
+        draft = buildClassicOutdatedDraft();
+        if(CanvasMerge.draftPatchCount(draft.patch) > 0){
+            state = StalePage.saveDraft(canvas.id, OUTDATED_PAGE_ID, draft) ? 'stored' : 'failed';
+        } else {
+            StalePage.clearDrafts([StalePage.draftKey(canvas.id, OUTDATED_PAGE_ID)]);
+        }
+    } catch(e) {
+        console.error(e);
+    }
+    StalePage.showOutdatedBanner({draftState:state, draft});
+}
+function enterOutdatedMode(){
+    if(pageOutdated) return;
+    pageOutdated = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(canvasSaveRetryTimer);
+    canvasSaveRetryTimer = null;
+    setCanvasSaveState('outdated');
+    setStatus(langIsEn() ? 'Page out of date — refresh' : '页面已过期，请刷新');
+    refreshOutdatedDraft();
+}
+// 刷新后：这张画布有旧页面留下的草稿时，提示恢复（合并到服务器最新版本后正常保存）或丢弃。
+function offerOutdatedDraftRestore(){
+    if(!canvas || pageOutdated) return;
+    const drafts = StalePage.loadDrafts(canvas.id).filter(d => d.kind === 'classic');
+    const count = drafts.reduce((sum, d) => sum + CanvasMerge.draftPatchCount(d.patch), 0);
+    if(!drafts.length || !count) return;
+    StalePage.offerRestore({
+        drafts, count,
+        onDiscard:() => StalePage.clearDrafts(drafts.map(d => d.key)),
+        onRestore:async () => {
+            let mergedNodes = nodes.map(serializableCanvasNode);
+            let mergedConnections = connections.slice();
+            const total = {applied:0, merged:0, skippedDeletedOnServer:0, keptChangedOnServer:0, connections:0};
+            drafts.forEach(draft => {
+                const result = CanvasMerge.applyDraftPatch({
+                    serverNodes:mergedNodes, serverConnections:mergedConnections, patch:draft.patch,
+                    mergeNode:CanvasMerge.mergeClassicNode, connectionKey:CanvasMerge.classicConnectionKey,
+                });
+                mergedNodes = result.nodes;
+                mergedConnections = result.connections;
+                Object.keys(total).forEach(key => { total[key] += result.report[key] || 0; });
+            });
+            nodes = mergedNodes;
+            connections = mergedConnections;
+            resetTransientRunState(nodes);
+            sanitizeConnections();
+            localCanvasDirty = true;
+            render();
+            await saveCanvas();
+            if(localCanvasDirty && !pageOutdated) throw new Error(langIsEn() ? 'Restored, but saving failed; it will retry' : '已恢复，但保存失败，会自动重试');
+            StalePage.clearDrafts(drafts.map(d => d.key));
+            setStatus(StalePage.restoreSummary(total));
+            return total;
+        },
+    });
+}
 async function saveCanvas(){
     if(!canvas || applyingRemoteCanvas) return;
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面：只更新暂存的草稿，不再请求服务器
     if(savingCanvasNow){
         saveCanvasAgain = true;
         return;
@@ -1517,9 +1597,17 @@ async function saveCanvas(){
         const body = buildCanvasSaveBody();
         const res = await fetch(`/api/canvases/${canvas.id}`, {
             method:'PUT',
-            headers:{'Content-Type':'application/json'},
+            headers:StalePage.withBuildHeader({'Content-Type':'application/json'}),
             body
         });
+        if(res.status === 412){
+            const data = await res.json().catch(() => ({}));
+            if(StalePage.isOutdatedPayload(data)){
+                enterOutdatedMode();
+                return;
+            }
+            throw new Error(ApiErrors.message(data, `HTTP ${res.status}`));
+        }
         if(res.status === 409){
             // 冲突：别人先保存了。三方合并对方的版本（双方的改动都保留），再以对方的 updated_at 为基底重存。
             // 以前这里直接拿对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）。
@@ -2150,6 +2238,7 @@ async function openCanvas(id){
         resumeCanvasImageTasks();
         startCanvasRemotePolling();
         setStatus('Ready');
+        offerOutdatedDraftRestore();
     } catch(e) {
         setStatus(tr('canvas.openFailed'));
         console.error(e);
@@ -2337,6 +2426,7 @@ async function checkRemoteCanvasVersion(){
         const res = await fetch(`/api/canvases/${canvas.id}/meta`);
         if(!res.ok) throw new Error('meta failed');
         const meta = await res.json();
+        if(StalePage.serverBuildDiffers(meta.client_build)){ enterOutdatedMode(); return; }
         applyRemoteCanvasTitleIcon(meta);
         const remoteUpdatedAt = Number(meta.updated_at || 0);
         if(remoteUpdatedAt > Number(lastCanvasUpdatedAt || 0)){

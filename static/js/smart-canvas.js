@@ -6150,6 +6150,7 @@ function startCanvasMetaPoll(){
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/meta`);
             if(!res.ok) return;
             const meta = await res.json();
+            if(StalePage.serverBuildDiffers(meta.client_build)){ enterOutdatedMode(); return; }
             applyRemoteSmartTitleIcon(meta);
             if(Number(meta.updated_at || 0) > Number(canvas.updated_at || 0)) mergeReloadCanvasNow();
         } catch(e) {}
@@ -6740,7 +6741,84 @@ async function loadCanvas(){
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
         warnAboutMissingProviders();
+        offerOutdatedDraftRestore();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
+}
+// ---- 页面版本过期（后端已更新、页面未刷新）----
+// 过期后不再保存；未保存的修改只记相对上次同步内容的变化，暂存到本机浏览器，刷新后可恢复（见 stale-page.js）。
+let pageOutdated = false;
+const OUTDATED_PAGE_ID = uid('page');
+function buildSmartOutdatedDraft(){
+    const {storageCanvas} = buildSmartSavePayload();
+    const patch = CanvasMerge.buildDraftPatch({
+        localNodes:storageCanvas.nodes || [], baseNodes:smartSyncBaseNodes || [],
+        localConnections:storageCanvas.connections || [], baseConnections:smartSyncBaseConnections || [],
+        connectionKey:CanvasMerge.smartConnectionKey, comparable:smartNodeComparable,
+    });
+    return {version:1, kind:'smart', canvasId, title:canvas?.title || '', savedAt:Date.now(),
+            clientBuild:StalePage.clientBuild(), baseUpdatedAt:Number(canvas?.updated_at || 0), patch};
+}
+function refreshOutdatedDraft(){
+    if(!canvasId || !canvas) return;
+    let draft = null;
+    let state = 'none';
+    try {
+        draft = buildSmartOutdatedDraft();
+        if(CanvasMerge.draftPatchCount(draft.patch) > 0){
+            state = StalePage.saveDraft(canvasId, OUTDATED_PAGE_ID, draft) ? 'stored' : 'failed';
+        } else {
+            StalePage.clearDrafts([StalePage.draftKey(canvasId, OUTDATED_PAGE_ID)]);
+        }
+    } catch(e) {
+        console.error(e);
+    }
+    StalePage.showOutdatedBanner({draftState:state, draft});
+}
+function enterOutdatedMode(){
+    if(pageOutdated) return;
+    pageOutdated = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = null;
+    const badge = document.getElementById('smartSaveFailureBadge');
+    if(badge) badge.style.display = 'none';
+    setCanvasSaveState('outdated');
+    refreshOutdatedDraft();
+}
+// 刷新后：这张画布有旧页面留下的草稿时，提示恢复（合并到服务器最新版本后正常保存）或丢弃。
+function offerOutdatedDraftRestore(){
+    if(!canvasId || !canvas || pageOutdated) return;
+    const drafts = StalePage.loadDrafts(canvasId).filter(d => d.kind === 'smart');
+    const count = drafts.reduce((sum, d) => sum + CanvasMerge.draftPatchCount(d.patch), 0);
+    if(!drafts.length || !count) return;
+    StalePage.offerRestore({
+        drafts, count,
+        onDiscard:() => StalePage.clearDrafts(drafts.map(d => d.key)),
+        onRestore:async () => {
+            let mergedNodes = cloneSmartJson(nodes);
+            let mergedConnections = cloneSmartJson(canvas.connections || []);
+            const total = {applied:0, merged:0, skippedDeletedOnServer:0, keptChangedOnServer:0, connections:0};
+            drafts.forEach(draft => {
+                const result = CanvasMerge.applyDraftPatch({
+                    serverNodes:mergedNodes, serverConnections:mergedConnections, patch:draft.patch,
+                    mergeNode:mergeSmartNode, connectionKey:CanvasMerge.smartConnectionKey, comparable:smartNodeComparable,
+                });
+                mergedNodes = result.nodes;
+                mergedConnections = result.connections;
+                Object.keys(total).forEach(key => { total[key] += result.report[key] || 0; });
+            });
+            nodes = mergedNodes.map(normalizeLegacySmartNode).filter(Boolean);
+            canvas.connections = mergedConnections;
+            render();
+            if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
+            await saveCanvas();
+            if(smartSavedVersion < smartEditVersion && !pageOutdated) throw new Error(smartUiIsEnglish() ? 'Restored, but saving failed; it will retry' : '已恢复，但保存失败，会自动重试');
+            StalePage.clearDrafts(drafts.map(d => d.key));
+            toast(StalePage.restoreSummary(total));
+            return total;
+        },
+    });
 }
 // ---- 保存状态与失败重试（C2）----
 // 以前保存失败（5xx / 断网）被 catch 吞掉：不提示、不重试，内存里的修改在刷新后丢失。
@@ -6795,6 +6873,7 @@ function noteSmartSaveSucceeded(builtVersion){
     if(recovered) toast(smartUiIsEnglish() ? 'Canvas saved' : '画布已重新保存');
 }
 function noteSmartSaveFailed(error){
+    if(pageOutdated) return;
     const message = String(error?.message || error || '').slice(0, 160) || (smartUiIsEnglish() ? 'Save failed' : '保存失败');
     smartSaveRetryDelay = Math.min(30000, smartSaveRetryDelay ? smartSaveRetryDelay * 2 : 1000);
     clearTimeout(smartSaveRetryTimer);
@@ -6830,6 +6909,7 @@ let smartSaveRunning = null;
 let smartSaveQueued = null;
 function saveCanvas(){
     if(!canvasId || !canvas) return Promise.resolve();
+    if(pageOutdated){ refreshOutdatedDraft(); return Promise.resolve(); } // 过期页面：只更新暂存的草稿
     // 直接调用 saveCanvas() 的地方通常刚改过节点（例如写入 pendingTasks），同样计为一次编辑。
     smartEditVersion++;
     if(smartSaveRunning){
@@ -6877,13 +6957,14 @@ function trySmartKeepaliveSave(){
     try {
         const {body} = buildSmartSavePayload();
         if(new TextEncoder().encode(body).length > SMART_KEEPALIVE_MAX_BYTES) return false;
-        fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body, keepalive:true}).catch(() => {});
+        fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {method:'PUT', headers:StalePage.withBuildHeader({'Content-Type':'application/json'}), body, keepalive:true}).catch(() => {});
         return true;
     } catch(e) {
         return false;
     }
 }
 window.addEventListener('beforeunload', event => {
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面不保存；草稿已暂存，刷新时不再拦截
     if(!canvasHasUnsavedChanges()) return;
     if(trySmartKeepaliveSave()) return;
     event.preventDefault();
@@ -6908,9 +6989,17 @@ async function performSmartCanvasSave(){
             const {storageCanvas, body, builtVersion} = buildSmartSavePayload();
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
                 method:'PUT',
-                headers:{'Content-Type':'application/json'},
+                headers:StalePage.withBuildHeader({'Content-Type':'application/json'}),
                 body
             });
+            if(res.status === 412){
+                const data = await res.json().catch(() => ({}));
+                if(StalePage.isOutdatedPayload(data)){
+                    enterOutdatedMode();
+                    return;
+                }
+                throw new Error(ApiErrors.message(data, `HTTP ${res.status}`));
+            }
             if(res.ok){
                 const data = await res.json();
                 // C6：成功响应只有 updated_at（旧后端会带整张画布，这里只取它的 updated_at）。

@@ -275,6 +275,90 @@
         return live;
     }
 
+    // ---------------- 过期页面的未保存修改（草稿） ----------------
+    // 页面是旧代码、不能再保存时，只把“相对上次同步内容有变化的部分”记下来，体积小，能放进 localStorage。
+    // comparable：比较前把节点规整成可比较的形式（智能画布要补默认字段）；默认原样比较。
+    function buildDraftPatch({localNodes, baseNodes, localConnections, baseConnections, connectionKey, comparable}){
+        const cmp = comparable || (node => node);
+        const keyOf = connectionKey || (c => c?.id || (c ? `${c.from}->${c.to}` : ''));
+        const baseList = Array.isArray(baseNodes) ? baseNodes : [];
+        const baseById = new Map(baseList.filter(n => n && n.id).map(n => [n.id, n]));
+        const localById = new Map((localNodes || []).filter(n => n && n.id).map(n => [n.id, n]));
+        const changed = [];
+        localById.forEach((local, id) => {
+            const base = baseById.get(id);
+            if(!base) changed.push({id, base:null, local});
+            else if(!stableEqual(cmp(local), cmp(base))) changed.push({id, base, local});
+        });
+        const removed = [];
+        baseById.forEach((base, id) => { if(!localById.has(id)) removed.push({id, base}); });
+        const baseKeys = new Set((baseConnections || []).map(keyOf));
+        const localKeys = new Set((localConnections || []).map(keyOf));
+        return {
+            version:1,
+            changed,
+            removed,
+            addedConnections:(localConnections || []).filter(c => !baseKeys.has(keyOf(c))),
+            removedConnections:(baseConnections || []).filter(c => !localKeys.has(keyOf(c))),
+        };
+    }
+
+    function draftPatchCount(patch){
+        if(!patch) return 0;
+        return (patch.changed || []).length + (patch.removed || []).length
+            + (patch.addedConnections || []).length + (patch.removedConnections || []).length;
+    }
+
+    // 把草稿合并到服务器上的最新版本：
+    //   服务器上没动过的节点 → 用草稿里的版本；两边都改过 → mergeNode 按字段三方合并；
+    //   服务器上已删除的节点 → 跳过（不复活）；草稿里删掉、但服务器上又改过的节点 → 保留服务器版本。
+    function applyDraftPatch({serverNodes, serverConnections, patch, mergeNode, connectionKey, comparable}){
+        const cmp = comparable || (node => node);
+        const keyOf = connectionKey || (c => c?.id || (c ? `${c.from}->${c.to}` : ''));
+        const nodes = (serverNodes || []).slice();
+        const indexOf = id => nodes.findIndex(n => n && n.id === id);
+        const report = {applied:0, merged:0, skippedDeletedOnServer:0, keptChangedOnServer:0, connections:0};
+        (patch?.changed || []).forEach(({id, base, local}) => {
+            const index = indexOf(id);
+            if(index < 0){
+                if(base){ report.skippedDeletedOnServer += 1; return; }
+                nodes.push(local);
+                report.applied += 1;
+                return;
+            }
+            const server = nodes[index];
+            if(base && stableEqual(cmp(server), cmp(base))){
+                nodes[index] = local;
+                report.applied += 1;
+            } else {
+                nodes[index] = mergeNode ? mergeNode(local, server, base || null) : local;
+                report.merged += 1;
+            }
+        });
+        (patch?.removed || []).forEach(({id, base}) => {
+            const index = indexOf(id);
+            if(index < 0) return;
+            if(stableEqual(cmp(nodes[index]), cmp(base))){
+                nodes.splice(index, 1);
+                report.applied += 1;
+            } else {
+                report.keptChangedOnServer += 1;
+            }
+        });
+        const nodeIds = new Set(nodes.map(n => n && n.id));
+        const removedKeys = new Set((patch?.removedConnections || []).map(keyOf));
+        const connections = (serverConnections || []).filter(c => !removedKeys.has(keyOf(c)));
+        report.connections += (serverConnections || []).length - connections.length;
+        const present = new Set(connections.map(keyOf));
+        (patch?.addedConnections || []).forEach(c => {
+            if(present.has(keyOf(c))) return;
+            connections.push(c);
+            present.add(keyOf(c));
+            report.connections += 1;
+        });
+        return {nodes, connections:connections.filter(c => c && nodeIds.has(c.from) && nodeIds.has(c.to)), report};
+    }
+
     const api = {
         jsonEqual,
         stableEqual,
@@ -293,6 +377,10 @@
         CLASSIC_APPEND_LIST_KEYS,
         classicConnectionKey,
         classicLogKey,
+        smartConnectionKey,
+        buildDraftPatch,
+        applyDraftPatch,
+        draftPatchCount,
     };
     if(typeof module !== 'undefined' && module.exports) module.exports = api;
     else root.CanvasMerge = api;

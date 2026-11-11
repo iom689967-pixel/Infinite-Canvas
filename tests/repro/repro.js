@@ -643,6 +643,64 @@ async function c8ClassicSameOutputBothImages(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- 第六批：页面版本过期时不能保存；未保存的修改暂存，刷新后恢复 ----------------
+async function outdatedPageKeepsDraft(browser, kind) {
+  const smart = kind === 'smart';
+  const id = await createTestCanvas(kind, smart ? smartNodes() : classicNodes());
+  const [n1, n2] = smart ? ['audit-s1', 'audit-s2'] : ['audit-n1', 'audit-n2'];
+  const page = smart ? await openSmart(browser, id, 2) : await openClassic(browser, id, 3);
+  const puts = []; trackPuts(page, id, puts);
+  const c0 = await getCanvas(id);
+  // 模拟“页面是在后端更新之前打开的”：把页面里的构建号改成旧值
+  await page.evaluate(`document.querySelector('meta[name="ic-client-build"]').content = 'old-build-000000'`);
+  let detectedBy;
+  if (smart) {
+    await sleep(9500);           // 智能画布：8 秒一次的 /meta 轮询发现构建号不同
+    detectedBy = 'meta-poll';
+  } else {
+    await page.evaluate(`stopCanvasRemotePolling(); nodes.find(n => n.id === ${JSON.stringify(n1)}).x += 1; saveCanvas();`);
+    await sleep(1500);           // 普通画布：保存被服务端以 412 拒绝
+    detectedBy = 'save-412';
+  }
+  const bannerAfterDetect = await page.evaluate(`Boolean(document.getElementById('icOutdatedBanner'))`);
+  const putsBeforeEdit = puts.map(p => p.status);
+  // 过期后继续编辑：改 n1、加一个节点，然后触发保存
+  const newNode = smart ? { id: 'audit-draft-new', type: 'smart-text', x: 100, y: 500, w: 440, h: 250, title: 'D', text: 'draft' }
+                        : { id: 'audit-draft-new', type: 'prompt', x: 100, y: 500, text: 'draft' };
+  await page.evaluate(`nodes.find(n => n.id === ${JSON.stringify(n1)}).x += 30; nodes.push(${JSON.stringify(newNode)}); render(); saveCanvas();`);
+  await sleep(1500);
+  const afterOutdatedEdit = await getCanvas(id);
+  const draftInfo = await page.evaluate(`(() => {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith('ic-outdated-draft:' + ${JSON.stringify(id)} + ':'));
+    const draft = keys.length ? JSON.parse(localStorage.getItem(keys[0])) : null;
+    return { keys: keys.length, changed: draft ? draft.patch.changed.map(c => c.id).sort() : [], banner: document.getElementById('icOutdatedBanner')?.textContent || '' };
+  })()`);
+  // 期间别处改了另一个节点
+  const ext = await api('PUT', `/api/canvases/${id}`, { nodes: afterOutdatedEdit.nodes.map(n => n.id === n2 ? { ...n, x: n.x + 77 } : n), base_updated_at: afterOutdatedEdit.updated_at });
+  // 刷新页面 → 新代码 → 提示恢复 → 点“恢复到画布”
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(`typeof canvas!=='undefined' && canvas && Array.isArray(nodes) && nodes.length > 0`, { timeout: 20000 });
+  await page.waitForSelector('#icOutdatedDraftRestore', { timeout: 15000 }).catch(() => null);
+  const restoreOffered = await page.evaluate(`Boolean(document.getElementById('icOutdatedDraftRestore'))`);
+  await page.evaluate(`(() => { const b = [...document.querySelectorAll('#icOutdatedDraftRestore button')].pop(); if (b) b.click(); })()`);
+  await sleep(4000);
+  const final = await getCanvas(id);
+  const draftsLeft = await page.evaluate(`Object.keys(localStorage).filter(k => k.startsWith('ic-outdated-draft:' + ${JSON.stringify(id)} + ':')).length`);
+  const checks = {
+    detected: bannerAfterDetect,
+    noSaveWhileOutdated: nodeX(afterOutdatedEdit, n1) === nodeX(c0, n1) && !nodeOf(afterOutdatedEdit, 'audit-draft-new'),
+    serverRejectedOrNotAsked: smart ? putsBeforeEdit.length === 0 : putsBeforeEdit.includes(412) && !putsBeforeEdit.includes(200),
+    draftStored: draftInfo.keys === 1 && draftInfo.changed.includes(n1) && draftInfo.changed.includes('audit-draft-new') && /暂存|kept/.test(draftInfo.banner),
+    externalSaved: ext.status === 200,
+    restoreOffered,
+    restored: nodeX(final, n1) === nodeX(c0, n1) + (smart ? 30 : 31) && Boolean(nodeOf(final, 'audit-draft-new')) && nodeX(final, n2) === nodeX(c0, n2) + 77,
+    draftCleared: draftsLeft === 0,
+  };
+  record(`OUTDATED_${kind}_page_cannot_save_and_restores_draft`, Object.values(checks).every(Boolean),
+    { detectedBy, checks, putsBeforeEdit, draftInfo, n1: { start: nodeX(c0, n1), final: nodeX(final, n1) }, n2: { start: nodeX(c0, n2), final: nodeX(final, n2) } });
+  await page.close();
+}
+
 // ---------------- 第六批：online.html、gpt-chat.html 只用 api_providers（/api/config 不再有全局模型列表） ----------------
 async function standalonePagesUseProviders(browser) {
   const cfg = (await api('GET', '/api/config')).json;
@@ -879,6 +937,7 @@ async function apiSemantics() {
     ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
     ['RH', () => rhPrefetchSkipsUnsavedWorkflows(browser)],
     ['STANDALONE', () => standalonePagesUseProviders(browser)],
+    ['OUTDATED', () => outdatedPageKeepsDraft(browser, 'classic')], ['OUTDATED', () => outdatedPageKeepsDraft(browser, 'smart')],
     ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C6', () => apiSemantics()],

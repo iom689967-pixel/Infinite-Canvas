@@ -2127,7 +2127,51 @@ def fetch_release_update_notes(version: str, timeout: float = 3.0) -> Dict[str, 
         "items": [],
     }
 
+def compute_client_build_id() -> str:
+    """页面版本过期检测：对程序代码（后端 .py、static 下的 js/css/html、VERSION）的内容做哈希。
+    代码有任何变化（git 更新、应用内更新）构建号就变；只是重启服务、代码没变时不变。"""
+    digest = hashlib.sha256()
+    candidates = [os.path.join(PROGRAM_ROOT, "VERSION")]
+    for name in sorted(os.listdir(PROGRAM_ROOT)):
+        if name.endswith(".py"):
+            candidates.append(os.path.join(PROGRAM_ROOT, name))
+    for top, suffixes in ((os.path.join(PROGRAM_ROOT, "providers"), (".py",)), (STATIC_DIR, (".js", ".css", ".html"))):
+        for root, dirs, files in os.walk(top):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            candidates.extend(os.path.join(root, f) for f in sorted(files) if f.endswith(suffixes))
+    for path in candidates:
+        try:
+            with open(path, "rb") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        digest.update(os.path.relpath(path, PROGRAM_ROOT).encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()[:16]
+
+
+CLIENT_BUILD_ID = compute_client_build_id()
+CLIENT_BUILD_META_RE = re.compile(r"<head(\s[^>]*)?>", re.I)
+
+
+def inject_client_build_meta(html: str) -> str:
+    """每个页面都带上下发时的构建号，编辑器保存时用 X-Client-Build 头回传。"""
+    tag = f'<meta name="ic-client-build" content="{CLIENT_BUILD_ID}">'
+    match = CLIENT_BUILD_META_RE.search(html)
+    if not match:
+        return tag + html
+    return html[:match.end()] + tag + html[match.end():]
+
+
+def client_build_is_outdated(request_build: str) -> bool:
+    """页面带了构建号且与当前不同 → 页面是旧代码。没带（测试、工具、本功能上线前打开的页面）不判断。"""
+    value = str(request_build or "").strip()
+    return bool(value) and value != CLIENT_BUILD_ID
+
+
 def versioned_static_html(html: str) -> str:
+    html = inject_client_build_meta(html)
     if PATHS.explicit:
         from instance_frontend import authenticated_html
         html = authenticated_html(html, PATHS, PRINCIPAL.get())
@@ -17625,6 +17669,7 @@ async def get_canvas_meta(canvas_id: str):
     canvas = load_canvas(canvas_id)
     return {
         "id": canvas.get("id"),
+        "client_build": CLIENT_BUILD_ID,  # 编辑器据此提前发现自己是旧代码
         "updated_at": canvas.get("updated_at", 0),
         "title": canvas.get("title", "未命名画布"),
         "icon": canvas.get("icon", "layers"),
@@ -18784,7 +18829,14 @@ async def batch_crop_asset_library_items(payload: AssetLibraryBatchCropRequest):
     return {"library": lib, "added": len(added), "items": added}
 
 @app.put("/api/canvases/{canvas_id}")
-async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
+async def update_canvas(canvas_id: str, payload: CanvasSaveRequest, x_client_build: str = Header(default="")):
+    # 页面版本过期（后端已更新、页面未刷新）：旧代码不能再保存画布，提示刷新。
+    if client_build_is_outdated(x_client_build):
+        raise HTTPException(status_code=412, detail={
+            "code": "client_outdated",
+            "message": "页面版本已过期：服务已经更新，这个页面还是旧代码。为避免覆盖数据，已拒绝保存，请刷新页面。",
+            "client_build": CLIENT_BUILD_ID,
+        })
     # 只更新请求里实际提供的字段：漏传 logs/settings/title 不再把它们清空或改成默认值。
     provided = payload.model_fields_set
     # 冲突检查与写入放在同一把锁里：logs/delete 等在线程中持锁读改写画布，
