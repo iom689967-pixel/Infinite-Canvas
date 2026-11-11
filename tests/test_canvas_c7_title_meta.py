@@ -134,11 +134,11 @@ class EditorsStopSendingTitleTests(unittest.TestCase):
         self.assertNotRegex(body, r"\btitle\s*:")
         self.assertNotRegex(body, r"\bicon\s*:")
 
-    def test_classic_sidebar_rename_and_icon_use_meta(self):
-        for name in ("setCanvasTitle", "setCanvasIcon"):
-            body = function_body(self.classic, name)
-            self.assertIn("patchCanvasMeta(", body, name)
-            self.assertNotIn("'PUT'", body, name)
+    def test_classic_editor_has_no_rename_path_of_its_own(self):
+        # C10：编辑器里接不到界面的旧列表（含改名、改图标）已删除；改名只在列表页走 /meta
+        for name in ("setCanvasTitle", "setCanvasIcon", "patchCanvasMeta"):
+            self.assertNotRegex(self.classic, r"function\s+" + name + r"\s*\(", name)
+        self.assertIn("/meta", (ROOT / "static/js/canvas-list.js").read_text(encoding="utf-8"))
 
     def test_editors_pick_up_title_from_meta_poll(self):
         self.assertIn("applyRemoteCanvasTitleIcon(meta)", function_body(self.classic, "checkRemoteCanvasVersion"))

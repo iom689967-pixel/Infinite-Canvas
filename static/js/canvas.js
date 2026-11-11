@@ -220,11 +220,9 @@ function scheduleCanvasImageResolutionSync(root=nodesEl, delay=120){
 function applyLanguage(lang){
     if(lang && window.StudioI18n) StudioI18n.set(lang);
     document.title = tr('canvas.title');
-    refreshGateViewControls();
     if(canvas) {
         currentCanvasTitle.textContent = canvas?.title || tr('canvas.untitled');
     }
-    renderCanvasList();
     render();
 }
 async function refreshCanvasConfigFromSettings(){
@@ -253,14 +251,11 @@ window.addEventListener('message', event => {
 });
 window.addEventListener('studio-lang-change', () => {
     document.title = tr('canvas.title');
-    refreshGateViewControls();
     if(canvas) currentCanvasTitle.textContent = canvas?.title || tr('canvas.untitled');
-    renderCanvasList();
     render();
 });
 window.addEventListener('studio-ui-scale-change', applyQuickToolbarState);
 const shell = document.getElementById('shell');
-const canvasGate = document.getElementById('canvasGate');
 const board = document.getElementById('board');
 const world = document.getElementById('world');
 const nodesEl = document.getElementById('nodes');
@@ -278,20 +273,6 @@ const nodeOutputMenu = document.getElementById('nodeOutputMenu');
 const imageNodeMenu = document.getElementById('imageNodeMenu');
 const selectionBox = document.getElementById('selectionBox');
 const selectionHub = document.getElementById('selectionHub');
-const gateStatus = document.getElementById('gateStatus');
-const gateCreateBtn = document.getElementById('gateCreateBtn');
-const gateCreateSmartBtn = document.getElementById('gateCreateSmartBtn');
-const gateRefreshBtn = document.getElementById('gateRefreshBtn');
-const gateBackBtn = document.getElementById('gateBackBtn');
-const gateTrashBtn = document.getElementById('gateTrashBtn');
-const gateAssetManagerBtn = document.getElementById('gateAssetManagerBtn');
-const gateTrashCount = document.getElementById('gateTrashCount');
-const gateTitleText = document.getElementById('gateTitleText');
-const gateSubtitle = document.getElementById('gateSubtitle');
-const gateCanvasList = document.getElementById('gateCanvasList');
-const gateTitleInput = document.getElementById('gateTitleInput');
-const gateConfirmBtn = document.getElementById('gateConfirmBtn');
-const gateCancelBtn = document.getElementById('gateCancelBtn');
 const backToManagerBtn = document.getElementById('backToManagerBtn');
 const currentCanvasTitle = document.getElementById('currentCanvasTitle');
 const currentCanvasTime = document.getElementById('currentCanvasTime');
@@ -350,8 +331,6 @@ const logList = document.getElementById('logList');
 const errorModal = document.getElementById('errorModal');
 const errorTitle = document.getElementById('errorTitle');
 const errorMessage = document.getElementById('errorMessage');
-let canvases = [];
-let deletedCanvases = [];
 let canvas = null;
 let nodes = [];
 let connections = [];
@@ -390,16 +369,7 @@ let selected = new Set();
 // 连线选择与节点选择完全独立；这里只保存临时 UI 状态，绝不写入画布数据。
 let selectedConnections = new Set();
 let saveTimer = null;
-let creatingCanvas = false;
-let createCanvasKind = 'classic';
-let trashMode = false;
-let pendingDeleteCanvasId = null;
-let pendingPurgeCanvasId = null;
-let emojiPickerCanvasId = null;
-let canvasMetaAnchorId = '';
-let canvasSortMode = (() => { try { return localStorage.getItem('canvasSortMode') || 'recent'; } catch(e){ return 'recent'; } })();
 const CANVAS_LIST_PROJECT_KEY = 'canvasListCurrentProjectId';
-const CANVAS_COLOR_OPTIONS = ['red','orange','amber','green','teal','blue','violet','pink','slate'];
 // 先绑定返回，避免编辑器后续初始化较慢时丢失来源项目。
 backToManagerBtn?.addEventListener('click', () => {
     window.location.href = canvasListUrlForProject(canvas?.project || requestedCanvasListProject() || rememberedCanvasListProject());
@@ -516,14 +486,6 @@ const LTX_DIRECTOR_WORKFLOW = 'LTXDirectorv2-API.json';
 const LTX_DIRECTOR_WF_NODE = '46';
 const LTX_DIRECTOR_SEED_NODE = '94:28';
 const LTX_SEGMENT_COLORS = ['#e07b3a', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#f59e0b'];
-const CANVAS_EMOJIS = ['layers','sparkles','image','palette','wand-2','star','heart','rocket','flame','moon','cloud','leaf','gem','compass','pin','flag','bookmark','crown'];
-function renderCanvasIcon(icon, size = 14) {
-    // 旧的默认 emoji 或空值都映射为 layers
-    if(!icon || icon === '🧩') return `<i data-lucide="layers" style="width:${size}px;height:${size}px"></i>`;
-    // 含非 ASCII 字符（用户旧选过的 emoji）继续按文本渲染
-    if(/[^\x00-\x7F]/.test(icon)) return escapeHtml(icon);
-    return `<i data-lucide="${escapeHtml(icon)}" style="width:${size}px;height:${size}px"></i>`;
-}
 
 const SIZE_MAP = {
     square: { '1k':'1024x1024', '2k':'2048x2048', '4k':'4096x4096' },
@@ -1075,7 +1037,6 @@ function formatCanvasTime(value){
 }
 function setStatus(text){
     document.getElementById('saveState').textContent = text;
-    if(gateStatus) gateStatus.textContent = text;
 }
 let generationCompleteSoundAt = 0;
 function playGenerationCompleteSound(){
@@ -1108,30 +1069,6 @@ function playGenerationCompleteSound(){
         else play();
     } catch(e) {}
 }
-function refreshGateViewControls(){
-    if(!canvasGate) return;
-    canvasGate.classList.toggle('trash-mode', trashMode);
-    if(gateTitleText) gateTitleText.textContent = trashMode ? tr('canvas.trash') : tr('canvas.selectCanvas');
-    if(gateSubtitle) gateSubtitle.textContent = trashMode ? tr('canvas.trashSubtitle') : tr('canvas.subtitle');
-    const trashCount = deletedCanvases.length;
-    if(gateTrashCount){
-        gateTrashCount.textContent = String(trashCount);
-        gateTrashCount.classList.toggle('visible', trashCount > 0);
-    }
-    const countPill = document.getElementById('gateCountPill');
-    if(countPill){
-        const items = trashMode ? deletedCanvases : canvases;
-        const suffix = tr('canvas.countSuffix');
-        countPill.textContent = suffix ? `${items.length} ${suffix}` : String(items.length);
-    }
-    const sortSwitch = document.getElementById('gateSortSwitch');
-    if(sortSwitch){
-        sortSwitch.classList.toggle('hidden', trashMode);
-        sortSwitch.querySelectorAll('[data-sort]').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.sort === canvasSortMode);
-        });
-    }
-}
 function setCanvasMode(open){
     shell.classList.toggle('no-canvas', !open);
     if(!open){
@@ -1149,25 +1086,6 @@ function ensureCanvas(){
     if(canvas) return true;
     setStatus(tr('canvas.needCanvas'));
     return false;
-}
-function setCreateMode(active, kind='classic'){
-    creatingCanvas = active;
-    createCanvasKind = active ? ((kind === 'smart') ? 'smart' : 'classic') : 'classic';
-    if(active) trashMode = false;
-    canvasGate.classList.toggle('creating', active);
-    refreshGateViewControls();
-    setStatus(active ? tr('canvas.enterCanvasName') : (canvases.length ? tr('canvas.chooseFirst') : tr('canvas.noCanvasCreateFirst')));
-    if(active) {
-        gateTitleInput.placeholder = createCanvasKind === 'smart'
-            ? (tr('canvas.newSmartCanvasPlaceholder') || tr('canvas.newCanvasPlaceholder'))
-            : tr('canvas.newCanvasPlaceholder');
-        gateTitleInput.focus();
-        gateTitleInput.select();
-    } else {
-        gateTitleInput.value = '';
-        gateTitleInput.placeholder = tr('canvas.newCanvasPlaceholder');
-    }
-    refreshIcons();
 }
 function screenToWorld(clientX, clientY){
     const rect = board.getBoundingClientRect();
@@ -1638,7 +1556,6 @@ async function saveCanvas(){
         canvasSaveRetryTimer = null;
         setCanvasSaveState(localCanvasDirty ? 'dirty' : 'saved');
         setStatus('Saved');
-        loadCanvasList(false);
     } catch(e) {
         console.error(e);
         scheduleCanvasSaveRetry(e);
@@ -1759,448 +1676,21 @@ function msChatModelOptions(selected){
     const sel = selected && list.includes(selected) ? selected : list[0];
     return list.map(m => `<option value="${escapeHtml(m)}" ${m === sel ? 'selected' : ''}>${escapeHtml(m.split('/').pop().split(':')[0])}</option>`).join('');
 }
-async function loadCanvasList(openFirst=true){
-    try {
-        const res = await fetch('/api/canvases');
-        if(!res.ok) throw new Error(tr('canvas.canvasListFailed'));
-        const data = await res.json();
-        canvases = data.canvases || [];
-        sortCanvasListByUpdated();
-        refreshGateViewControls();
-        renderCanvasList();
-        refreshTrashCount();
-        if(openFirst && canvases[0]) await openCanvas(canvases[0].id);
-        else if(!canvas) {
-            setCanvasMode(false);
-            setStatus(trashMode ? (deletedCanvases.length ? tr('canvas.trash') : tr('canvas.trashEmpty')) : (canvases.length ? tr('canvas.chooseFirst') : tr('canvas.noCanvasCreateFirst')));
-        }
-    } catch(e) {
-        setStatus(tr('canvas.canvasListFailed'));
-        console.error(e);
-    }
-}
-async function loadTrashList(){
-    try {
-        const res = await fetch('/api/canvases/trash');
-        if(!res.ok) throw new Error(tr('canvas.trashLoadFailed'));
-        const data = await res.json();
-        deletedCanvases = data.canvases || [];
-        refreshGateViewControls();
-        renderCanvasList();
-        setStatus(deletedCanvases.length ? tr('canvas.trash') : tr('canvas.trashEmpty'));
-    } catch(e) {
-        setStatus(tr('canvas.trashLoadFailed'));
-        console.error(e);
-    }
-}
-async function refreshTrashCount(){
-    if(trashMode) return;
-    try {
-        const res = await fetch('/api/canvases/trash');
-        if(!res.ok) return;
-        const data = await res.json();
-        deletedCanvases = data.canvases || [];
-        refreshGateViewControls();
-    } catch(e) {}
-}
-async function setTrashMode(active){
-    trashMode = active;
-    creatingCanvas = false;
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = null;
-    closeCanvasMetaPopover();
-    canvasGate.classList.toggle('creating', false);
-    refreshGateViewControls();
-    if(trashMode) await loadTrashList();
-    else await loadCanvasList(false);
-    refreshIcons();
-}
-function renderCanvasList(){
-    // 选画布 gate 已拆分到独立页面 canvas-list.html；编辑器页不再有该 DOM，调用直接跳过。
-    if(!gateCanvasList) return;
-    renderCanvasListInto(gateCanvasList);
-}
-function compareCanvasRecords(a, b){
-    // 置顶始终排在最前；其余按当前排序模式（最近编辑 / 名称）。
-    const ap = a.pinned ? 1 : 0, bp = b.pinned ? 1 : 0;
-    if(ap !== bp) return bp - ap;
-    if(canvasSortMode === 'name'){
-        const cmp = String(a.title || '').localeCompare(String(b.title || ''), 'zh-Hans-CN', {numeric:true, sensitivity:'base'});
-        if(cmp !== 0) return cmp;
-    }
-    return Number(b.updated_at || b.created_at || 0) - Number(a.updated_at || a.created_at || 0);
-}
-function sortCanvasListByUpdated(){
-    canvases.sort(compareCanvasRecords);
-}
-function setCanvasSortMode(mode){
-    const next = mode === 'name' ? 'name' : 'recent';
-    if(next === canvasSortMode) { refreshGateViewControls(); return; }
-    canvasSortMode = next;
-    try { localStorage.setItem('canvasSortMode', canvasSortMode); } catch(e){}
-    sortCanvasListByUpdated();
-    renderCanvasList();
-    refreshGateViewControls();
-}
-async function patchCanvasMeta(id, patch){
-    const item = canvases.find(c => c.id === id);
-    if(item) Object.assign(item, patch);
-    if(canvas?.id === id) Object.assign(canvas, patch);
-    sortCanvasListByUpdated();
-    renderCanvasList();
-    try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}/meta`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(patch)
-        });
-        if(!res.ok) throw new Error('meta save failed');
-        const data = await res.json();
-        if(data.canvas) updateCanvasListRecord(data.canvas);
-    } catch(e){
-        setStatus(tr('canvas.metaSaveFailed') || '保存失败');
-        console.error(e);
-        await loadCanvasList(false);
-    }
-}
-function togglePinCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    const item = canvases.find(c => c.id === id);
-    closeCanvasMetaPopover();
-    patchCanvasMeta(id, {pinned: !(item && item.pinned)});
-}
-function setCanvasColorValue(id, color, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    patchCanvasMeta(id, {color: color || ''});
-}
-function commitCanvasOwner(id, value){
-    const owner = String(value || '').trim().slice(0, 40);
-    const item = canvases.find(c => c.id === id);
-    if((item?.owner || '') === owner) return;
-    patchCanvasMeta(id, {owner});
-}
-function updateCanvasListRecord(record){
-    if(!record?.id) return;
-    const index = canvases.findIndex(item => item.id === record.id);
-    if(index >= 0) canvases[index] = {...canvases[index], ...record};
-    else canvases.unshift(record);
-    sortCanvasListByUpdated();
-    renderCanvasList();
-}
 async function touchCanvasOpened(id){
     if(!id) return null;
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(id)}/touch`, {method:'POST'});
         if(!res.ok) return null;
         const data = await res.json();
-        if(data.canvas) updateCanvasListRecord(data.canvas);
         return data.canvas || data;
     } catch(e) {
         console.warn('touch canvas failed', e);
         return null;
     }
 }
-function renderCanvasListInto(list){
-    if(!list) return;
-    refreshGateViewControls();
-    const items = trashMode ? deletedCanvases : canvases;
-    list.innerHTML = '';
-    if(!items.length){
-        const empty = document.createElement('div');
-        empty.className = 'gate-list-empty';
-        empty.innerHTML = trashMode
-            ? `<div class="gate-list-empty-icon"><i data-lucide="trash-2" class="w-6 h-6"></i></div>${tr('canvas.trashEmpty')}`
-            : `<div class="gate-list-empty-icon"><i data-lucide="layout-grid" class="w-6 h-6"></i></div>${tr('canvas.noCanvas')}<br>${tr('canvas.startWithNewCanvas')}`;
-        list.appendChild(empty);
-        refreshIcons();
-        return;
-    }
-    items.forEach(item => {
-        const row = document.createElement('div');
-        const isSmartCanvas = (item.kind || 'classic') === 'smart';
-        const color = String(item.color || '').trim();
-        const owner = String(item.owner || '').trim();
-        const pinned = !!item.pinned && !trashMode;
-        row.className = `canvas-item ${isSmartCanvas ? 'smart-canvas' : ''} ${canvas?.id === item.id ? 'active' : ''} ${pinned ? 'pinned' : ''} ${color ? 'has-color' : ''}`;
-        row.dataset.canvasId = item.id;
-        const ownerChip = owner
-            ? `<span class="canvas-owner-chip" role="button" tabindex="0" title="${escapeAttr(owner)}"><i data-lucide="user-round" class="w-3 h-3"></i><span class="canvas-owner-text">${escapeHtml(owner)}</span></span>`
-            : '';
-        row.innerHTML = `
-            <div class="canvas-open" role="button" tabindex="${trashMode ? '-1' : '0'}">
-                <div class="canvas-card-icon-row">
-                    <span class="canvas-preview-mark ${color ? `icon-has-color cc-${escapeAttr(color)}` : ''}" role="button" tabindex="0" title="${trashMode ? tr('canvas.deletedCanvas') : (tr('canvas.editMeta') || '编辑图标 / 颜色 / 负责人')}">${renderCanvasIcon(isSmartCanvas && /[^\x00-\x7F]/.test(item.icon || '') ? 'sparkles' : item.icon, 16)}</span>
-                    ${isSmartCanvas ? `<span class="canvas-kind-chip">${tr('canvas.smartCanvasShort')}</span>` : ''}
-                </div>
-                <div class="canvas-card-title">${escapeHtml(item.title)}</div>
-                ${ownerChip}
-                <div class="canvas-card-meta">
-                    <span class="canvas-card-meta-dot"></span>
-                    <div class="canvas-card-time">${trashMode ? `${tr('canvas.deletedAt')} ${formatCanvasTime(item.deleted_at)}` : formatCanvasTime(item.updated_at || item.created_at)}</div>
-                </div>
-            </div>
-            ${trashMode ? (pendingPurgeCanvasId === item.id ? `
-                <div class="canvas-delete-confirm">
-                    <div class="canvas-delete-box">
-                        <div class="canvas-delete-title">${tr('canvas.purgeConfirm')}</div>
-                        <div class="canvas-delete-actions">
-                            <button class="canvas-confirm-btn" type="button">${tr('common.confirm')}</button>
-                            <button class="canvas-cancel-btn" type="button">${tr('common.cancel')}</button>
-                        </div>
-                    </div>
-                </div>
-            ` : `
-                <button class="canvas-delete canvas-restore" type="button" title="${tr('canvas.restoreCanvas')}" aria-label="${tr('canvas.restoreCanvas')} ${escapeHtml(item.title)}" style="right:42px">
-                    <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-delete canvas-purge" type="button" title="${tr('canvas.purgeCanvas')}" aria-label="${tr('canvas.purgeCanvas')} ${escapeHtml(item.title)}">
-                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
-                </button>
-            `) : (pendingDeleteCanvasId === item.id ? `
-                <div class="canvas-delete-confirm">
-                    <div class="canvas-delete-box">
-                        <div class="canvas-delete-title">${tr('canvas.moveToTrashConfirm')}</div>
-                        <div class="canvas-delete-actions">
-                            <button class="canvas-confirm-btn" type="button">${tr('common.confirm')}</button>
-                            <button class="canvas-cancel-btn" type="button">${tr('common.cancel')}</button>
-                        </div>
-                    </div>
-                </div>
-            ` : `
-                <button class="canvas-pin-btn ${pinned ? 'active' : ''}" type="button" title="${pinned ? (tr('canvas.unpin') || '取消置顶') : (tr('canvas.pin') || '置顶')}" aria-label="${pinned ? (tr('canvas.unpin') || '取消置顶') : (tr('canvas.pin') || '置顶')}">
-                    <i data-lucide="pin" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-card-edit" type="button" title="${tr('canvas.rename')}" aria-label="${tr('canvas.rename')} ${escapeHtml(item.title)}">
-                    <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-delete" type="button" title="${tr('canvas.moveToTrash')}" aria-label="${tr('canvas.moveToTrash')} ${escapeHtml(item.title)}">
-                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-                </button>
-            `)}
-        `;
-        if(!trashMode) row.querySelector('.canvas-open').onclick = () => openCanvas(item.id);
-        const titleEl = row.querySelector('.canvas-card-title');
-        const editBtn = row.querySelector('.canvas-card-edit');
-        if(editBtn && titleEl && !trashMode) {
-            editBtn.onmousedown = e => e.stopPropagation();
-            editBtn.onclick = e => { e.stopPropagation(); startTitleEdit(item.id, titleEl); };
-        }
-        const iconBtn = row.querySelector('.canvas-preview-mark');
-        if(iconBtn && !trashMode) {
-            iconBtn.onclick = e => toggleEmojiPicker(item.id, e);
-            iconBtn.onkeydown = e => {
-                if(e.key === 'Enter' || e.key === ' ') toggleEmojiPicker(item.id, e);
-            };
-        }
-        row.querySelectorAll('.emoji-option').forEach(btn => {
-            btn.onclick = e => setCanvasIcon(item.id, btn.dataset.icon, e);
-        });
-        const pinBtn = row.querySelector('.canvas-pin-btn');
-        if(pinBtn){
-            pinBtn.onmousedown = e => e.stopPropagation();
-            pinBtn.onclick = e => togglePinCanvas(item.id, e);
-        }
-        const ownerChipEl = row.querySelector('.canvas-owner-chip');
-        if(ownerChipEl && !trashMode){
-            ownerChipEl.onmousedown = e => e.stopPropagation();
-            ownerChipEl.onclick = e => { e.stopPropagation(); toggleEmojiPicker(item.id, e); };
-        }
-        const deleteBtn = row.querySelector('.canvas-delete');
-        if(deleteBtn) deleteBtn.onclick = e => requestDeleteCanvas(item.id, e);
-        const confirmBtn = row.querySelector('.canvas-confirm-btn');
-        if(confirmBtn) confirmBtn.onclick = e => trashMode ? purgeCanvas(item.id, e) : deleteCanvas(item.id, e);
-        const cancelBtn = row.querySelector('.canvas-cancel-btn');
-        if(cancelBtn) cancelBtn.onclick = e => cancelDeleteCanvas(e);
-        const restoreBtn = row.querySelector('.canvas-restore');
-        if(restoreBtn) restoreBtn.onclick = e => restoreCanvas(item.id, e);
-        const purgeBtn = row.querySelector('.canvas-purge');
-        if(purgeBtn) purgeBtn.onclick = e => requestPurgeCanvas(item.id, e);
-        list.appendChild(row);
-    });
-    refreshIcons();
-    renderCanvasMetaPopover();
-}
-function closeCanvasMetaPopover(){
-    emojiPickerCanvasId = null;
-    canvasMetaAnchorId = '';
-    document.querySelector('.canvas-meta-pop')?.remove();
-}
-function renderCanvasMetaPopover(){
-    document.querySelector('.canvas-meta-pop')?.remove();
-    if(trashMode || !emojiPickerCanvasId) return;
-    const item = canvases.find(entry => entry.id === emojiPickerCanvasId);
-    if(!item) return;
-    const color = String(item.color || '').trim();
-    const owner = String(item.owner || '').trim();
-    const pop = document.createElement('div');
-    pop.className = 'canvas-meta-pop';
-    pop.dataset.canvasMetaPop = item.id;
-    pop.innerHTML = `
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.ownerLabel') || '负责人 / 项目'}</div>
-            <input class="canvas-owner-input" type="text" maxlength="40" value="${escapeAttr(owner)}" placeholder="${escapeAttr(tr('canvas.ownerPlaceholder') || '如：张三 / 双十一项目')}">
-        </div>
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.colorLabel') || '颜色标记'}</div>
-            <div class="canvas-color-row">
-                <button class="canvas-color-swatch cc-none ${!color ? 'active' : ''}" type="button" data-color="" title="${tr('canvas.colorNone') || '无'}"><i data-lucide="ban" class="w-3 h-3"></i></button>
-                ${CANVAS_COLOR_OPTIONS.map(c => `<button class="canvas-color-swatch cc-${c} ${color === c ? 'active' : ''}" type="button" data-color="${c}" aria-label="${c}"></button>`).join('')}
-            </div>
-        </div>
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.changeIcon')}</div>
-            <div class="emoji-picker-grid">
-                ${CANVAS_EMOJIS.map(icon => `<button class="emoji-option" type="button" data-icon="${escapeHtml(icon)}">${renderCanvasIcon(icon, 14)}</button>`).join('')}
-            </div>
-        </div>
-    `;
-    document.body.appendChild(pop);
-    pop.querySelectorAll('.emoji-option').forEach(btn => {
-        btn.onclick = e => setCanvasIcon(item.id, btn.dataset.icon, e);
-    });
-    pop.querySelectorAll('.canvas-color-swatch').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => setCanvasColorValue(item.id, btn.dataset.color || '', e);
-    });
-    const ownerInput = pop.querySelector('.canvas-owner-input');
-    if(ownerInput){
-        ownerInput.onmousedown = e => e.stopPropagation();
-        ownerInput.onclick = e => e.stopPropagation();
-        ownerInput.onkeydown = e => {
-            e.stopPropagation();
-            if(e.key === 'Enter'){ e.preventDefault(); ownerInput.blur(); }
-            if(e.key === 'Escape'){ e.preventDefault(); closeCanvasMetaPopover(); renderCanvasList(); }
-        };
-        ownerInput.onblur = () => commitCanvasOwner(item.id, ownerInput.value);
-    }
-    refreshIcons();
-    requestAnimationFrame(positionCanvasMetaPopover);
-}
-function positionCanvasMetaPopover(){
-    if(!emojiPickerCanvasId) return;
-    const pop = document.querySelector('.canvas-meta-pop');
-    const anchorId = canvasMetaAnchorId || emojiPickerCanvasId;
-    const row = document.querySelector(`.canvas-item[data-canvas-id="${CSS.escape(anchorId)}"]`);
-    const icon = row?.querySelector('.canvas-preview-mark') || row?.querySelector('.canvas-owner-chip');
-    if(!pop || !icon) return;
-    const iconRect = icon.getBoundingClientRect();
-    const width = pop.offsetWidth || 212;
-    const height = pop.offsetHeight || 260;
-    const margin = 12;
-    let left = Math.min(Math.max(iconRect.left, margin), window.innerWidth - width - margin);
-    let top = iconRect.bottom + 8;
-    if(top + height > window.innerHeight - margin) top = iconRect.top - height - 8;
-    if(top < margin) top = margin;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
-}
-async function createCanvas(){
-    const customTitle = gateTitleInput?.value.trim();
-    const isSmart = createCanvasKind === 'smart';
-    const titleBase = isSmart ? tr('canvas.newSmartCanvas') : tr('canvas.newCanvas');
-    const title = customTitle || `${titleBase} ${new Date().toLocaleTimeString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN', {hour:'2-digit', minute:'2-digit'})}`;
-    trashMode = false;
-    refreshGateViewControls();
-    setStatus('Creating...');
-    try {
-        const res = await fetch('/api/canvases', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({title, icon:isSmart ? 'sparkles' : '🧩', kind:isSmart ? 'smart' : 'classic'})
-        });
-        if(!res.ok) throw new Error(tr('canvas.createFailed'));
-        const data = await res.json();
-        if(isSmart){
-            setCreateMode(false);
-            await loadCanvasList(false);
-            openSmartCanvasPage(data.canvas?.id);
-            return;
-        }
-        resetCascadeRuntimeState();
-        canvas = data.canvas;
-        canvas.logs = canvas.logs || [];
-        nodes = canvas.nodes || [];
-        connections = canvas.connections || [];
-        undoStack = [];
-        redoStack = [];
-        viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
-        canvas.viewport = {...viewport};
-        resetTransientRunState(nodes);
-        sanitizeConnections();
-        selected.clear();
-        setCanvasMode(true);
-        render();
-        setStatus('Saved');
-        setCreateMode(false);
-        await loadCanvasList(false);
-        renderCanvasList();
-    } catch(e) {
-        setStatus(tr('canvas.createFailed'));
-        console.error(e);
-    }
-}
-async function createSmartCanvas(){
-    setCreateMode(true, 'smart');
-}
 function openSmartCanvasPage(id){
     if(!id) return;
     window.location.href = `/static/smart-canvas.html?id=${encodeURIComponent(id)}&v=2026.05.22.1`;
-}
-function toggleEmojiPicker(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    pendingDeleteCanvasId = null;
-    const opening = emojiPickerCanvasId !== id;
-    emojiPickerCanvasId = opening ? id : null;
-    canvasMetaAnchorId = opening ? id : '';
-    renderCanvasList();
-}
-async function setCanvasIcon(id, icon, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    closeCanvasMetaPopover();
-    // C7：改图标走 /meta，不再整张画布 PUT（那样不带基线，会绕过冲突检查覆盖其他页面的修改）。
-    await patchCanvasMeta(id, {icon: icon || 'layers'});
-}
-function startTitleEdit(id, titleEl){
-    if(!titleEl || titleEl.querySelector('input')) return;
-    const item = canvases.find(c => c.id === id);
-    const current = item?.title || titleEl.textContent || '';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.maxLength = 80;
-    input.value = current;
-    input.className = 'canvas-card-title-input';
-    titleEl.innerHTML = '';
-    titleEl.appendChild(input);
-    input.onmousedown = e => e.stopPropagation();
-    input.onclick = e => e.stopPropagation();
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = async (commit) => {
-        if(done) return;
-        done = true;
-        const newTitle = input.value.trim();
-        if(commit && newTitle && newTitle !== current){
-            await setCanvasTitle(id, newTitle);
-        } else {
-            renderCanvasList();
-        }
-    };
-    input.onblur = () => finish(true);
-    input.onkeydown = e => {
-        e.stopPropagation();
-        if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
-        if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
-    };
-}
-async function setCanvasTitle(id, title){
-    // C7：改名走 /meta，和列表页一致；不再整张画布 PUT。
-    if(currentCanvasTitle && canvas?.id === id) currentCanvasTitle.textContent = title;
-    await patchCanvasMeta(id, {title});
 }
 async function openCanvas(id){
     if(canvasReferencePicker) cancelCanvasReferencePicker();
@@ -2233,7 +1723,6 @@ async function openCanvas(id){
         selected.clear();
         selectedConnections.clear();
         setCanvasMode(true);
-        renderCanvasList();
         render();
         resumeCanvasImageTasks();
         startCanvasRemotePolling();
@@ -2334,7 +1823,6 @@ function applyRemoteCanvasData(remote){
         pruneMissingComfyWorkflows();
         refreshMissingCanvasAssets().then(() => render());
         selected = new Set([...localSelectedIds].filter(id => nodes.some(node => node.id === id)));
-        renderCanvasList();
         render();
         resumeCanvasImageTasks();
         if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
@@ -2415,8 +1903,6 @@ function applyRemoteCanvasTitleIcon(meta){
     if(meta.icon && meta.icon !== canvas.icon){ canvas.icon = meta.icon; changed = true; }
     if(!changed) return;
     if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
-    const item = canvases.find(c => c.id === canvas.id);
-    if(item){ item.title = canvas.title; item.icon = canvas.icon; renderCanvasList(); }
 }
 async function checkRemoteCanvasVersion(){
     if(!canvas || applyingRemoteCanvas || remoteSyncBusy) return;
@@ -2459,142 +1945,7 @@ function handleCanvasUpdatedMessage(data){
     remoteSyncTimer = setTimeout(syncRemoteCanvasNow, savingCanvasNow ? 700 : 120);
     setStatus('Syncing...');
 }
-async function returnToCanvasManager(){
-    if(canvasReferencePicker) cancelCanvasReferencePicker();
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    if(canvas && localCanvasDirty) await saveCanvas();
-    if(canvas && canvasHasUnsavedChanges() && !confirm('画布还有未保存的修改，仍要离开吗？')) return;
-    clearTimeout(canvasSaveRetryTimer);
-    canvasSaveRetryTimer = null;
-    stopCanvasRemotePolling();
-    canvas = null;
-    nodes = [];
-    connections = [];
-    undoStack = [];
-    redoStack = [];
-    selected.clear();
-    viewport = {x: -1800, y: -1000, scale: 1};
-    setCanvasMode(false);
-    trashMode = false;
-    pendingPurgeCanvasId = null;
-    refreshGateViewControls();
-    await loadCanvasList(false);
-    setCreateMode(false);
-}
-function requestDeleteCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    closeCanvasMetaPopover();
-    pendingPurgeCanvasId = null;
-    pendingDeleteCanvasId = id;
-    renderCanvasList();
-}
-function requestPurgeCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    closeCanvasMetaPopover();
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = id;
-    renderCanvasList();
-}
-function cancelDeleteCanvas(event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = null;
-    renderCanvasList();
-}
-async function deleteCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Moving to trash...');
-    try {
-        const res = await fetch(`/api/canvases/${id}`, {method:'DELETE'});
-        if(!res.ok) throw new Error(tr('canvas.moveToTrashFailed'));
-        const deletingCurrent = canvas?.id === id;
-        pendingDeleteCanvasId = null;
-        canvases = canvases.filter(item => item.id !== id);
-        if(deletingCurrent){
-            canvas = null;
-            nodes = [];
-            connections = [];
-            selected.clear();
-            viewport = {x: -1800, y: -1000, scale: 1};
-            setCanvasMode(false);
-        }
-        renderCanvasList();
-        setStatus(canvases.length ? tr('canvas.movedToTrash') : tr('canvas.noCanvasCreateFirst'));
-        await loadCanvasList(false);
-    } catch(e) {
-        setStatus(tr('canvas.moveToTrashFailed'));
-        console.error(e);
-    }
-}
-async function restoreCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Restoring...');
-    try {
-        const res = await fetch(`/api/canvases/${id}/restore`, {method:'POST'});
-        if(!res.ok) throw new Error(tr('canvas.restoreFailed'));
-        pendingPurgeCanvasId = null;
-        deletedCanvases = deletedCanvases.filter(item => item.id !== id);
-        await loadCanvasList(false);
-        await loadTrashList();
-        setStatus(tr('canvas.restored'));
-    } catch(e) {
-        setStatus(tr('canvas.restoreFailed'));
-        console.error(e);
-    }
-}
-async function purgeCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Deleting...');
-    try {
-        const res = await fetch(`/api/canvases/${id}/purge`, {method:'DELETE'});
-        if(!res.ok) throw new Error(tr('canvas.purgeFailed'));
-        pendingPurgeCanvasId = null;
-        deletedCanvases = deletedCanvases.filter(item => item.id !== id);
-        renderCanvasList();
-        setStatus(deletedCanvases.length ? tr('canvas.purged') : tr('canvas.trashEmpty'));
-        await loadTrashList();
-    } catch(e) {
-        setStatus(tr('canvas.purgeFailed'));
-        console.error(e);
-    }
-}
-window.createCanvas = createCanvas;
-window.createSmartCanvas = createSmartCanvas;
-window.loadCanvasList = loadCanvasList;
 window.openCanvas = openCanvas;
-window.deleteCanvas = deleteCanvas;
-window.returnToCanvasManager = returnToCanvasManager;
-// 选画布 gate 已拆分到 canvas-list.html；编辑器页不再含这些元素，用可选链避免空引用报错。
-gateCreateBtn?.addEventListener('click', () => setCreateMode(true));
-gateCreateSmartBtn?.addEventListener('click', createSmartCanvas);
-gateBackBtn?.addEventListener('click', () => setTrashMode(false));
-gateTrashBtn?.addEventListener('click', () => setTrashMode(true));
-gateRefreshBtn?.addEventListener('click', () => trashMode ? loadTrashList() : loadCanvasList(false));
-document.getElementById('gateSortSwitch')?.addEventListener('click', e => {
-    const btn = e.target.closest('[data-sort]');
-    if(btn) setCanvasSortMode(btn.dataset.sort);
-});
-gateConfirmBtn?.addEventListener('click', createCanvas);
-gateCancelBtn?.addEventListener('click', () => setCreateMode(false));
-gateTitleInput?.addEventListener('keydown', e => {
-    if(e.key === 'Enter') createCanvas();
-    if(e.key === 'Escape') setCreateMode(false);
-});
-document.addEventListener('mousedown', e => {
-    if(emojiPickerCanvasId === null) return;
-    if(e.target.closest('.canvas-meta-pop') || e.target.closest('.canvas-preview-mark') || e.target.closest('.canvas-owner-chip')) return;
-    closeCanvasMetaPopover();
-    renderCanvasList();
-});
-gateCanvasList?.addEventListener('scroll', () => requestAnimationFrame(positionCanvasMetaPopover), {passive:true});
-window.addEventListener('resize', () => requestAnimationFrame(positionCanvasMetaPopover));
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
 function cropDragModeFromPointer(event){
     const explicit = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle;
@@ -15273,7 +14624,6 @@ canvasAssetDropZone?.addEventListener('drop', async event => {
         showErrorModal(err.message || '保存资产失败', '保存资产失败');
     }
 });
-gateAssetManagerBtn?.addEventListener('click', openAssetManager);
 document.querySelectorAll('[data-manager-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
         assetManagerTab = btn.dataset.managerTab || 'assets';

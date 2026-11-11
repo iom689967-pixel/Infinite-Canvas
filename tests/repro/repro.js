@@ -921,6 +921,31 @@ async function apiSemantics() {
     { metaBumpsUpdatedAt: afterMeta.updated_at !== beforeMeta.updated_at, editorPutStatus: r.status, titleAfterEditorPut: afterPut.title });
 }
 
+// ---------------- C10：普通画布编辑器删掉接不到界面的"选画布"旧代码后，打开、编辑、保存、同步标题都正常 ----------------
+// 修复前每次自动保存后还会请求整个画布列表和回收站（/api/canvases、/api/canvases/trash），只为渲染一个不存在的列表。
+async function c10ClassicEditorWithoutGateCode(browser) {
+  const id = await createTestCanvas('classic', [{ id: 'audit-c10', type: 'text', x: 100, y: 100, text: 'c10' }]);
+  const p = await browser.newPage();
+  const errors = [], listRequests = [];
+  p.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
+  p.on('request', r => { const path = new URL(r.url()).pathname; if (path === '/api/canvases' || path === '/api/canvases/trash') listRequests.push(r.method() + ' ' + path); });
+  await p.goto(`${B}/static/canvas.html?id=${id}`, { waitUntil: 'domcontentloaded' });
+  await p.waitForFunction(`typeof canvas!=='undefined' && canvas && canvas.id===${JSON.stringify(id)} && nodes.length===1`, { timeout: 20000 });
+  await sleep(1500);
+  const before = (await getCanvas(id)).updated_at;
+  await p.evaluate(`(() => { nodes[0].x = 345; scheduleSave(); })()`);
+  let saved = null;
+  for (let i = 0; i < 40; i++) { await sleep(250); const c = await getCanvas(id); if (c.updated_at !== before && nodeX(c, 'audit-c10') === 345) { saved = c; break; } }
+  await sleep(1000);
+  // 在列表页改名（/meta），编辑器靠 meta 轮询同步标题
+  await api('POST', `/api/canvases/${id}/meta`, { title: 'AUDIT-c10-renamed' });
+  let shownTitle = '';
+  for (let i = 0; i < 40 && shownTitle !== 'AUDIT-c10-renamed'; i++) { await sleep(250); shownTitle = await p.evaluate(`document.getElementById('currentCanvasTitle')?.textContent || ''`); }
+  await p.close();
+  const pass = Boolean(saved) && !errors.length && !listRequests.length && shownTitle === 'AUDIT-c10-renamed';
+  record('C10_classic_editor_saves_without_list_refetch', pass, { saved: Boolean(saved), errors, listRequests, shownTitle });
+}
+
 (async () => {
   const only = (process.env.REPRO_ONLY || '').split(',').map(s => s.trim()).filter(Boolean);
   const want = name => !only.length || only.some(o => name.startsWith(o));
@@ -940,6 +965,7 @@ async function apiSemantics() {
     ['OUTDATED', () => outdatedPageKeepsDraft(browser, 'classic')], ['OUTDATED', () => outdatedPageKeepsDraft(browser, 'smart')],
     ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
+    ['C10', () => c10ClassicEditorWithoutGateCode(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
