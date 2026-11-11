@@ -163,6 +163,19 @@ class AuthHTTPTests(unittest.TestCase):
         with self.assertRaises(InvalidStatus):
             self.ws("A", {})
 
+    def test_favicon_is_an_empty_public_response_without_relaxing_auth(self):
+        for method in ("GET", "HEAD"):
+            response = self.raw("A", method, "/favicon.ico")
+            self.assertEqual(response.status_code, 204, method)
+            self.assertEqual(response.content, b"", method)
+            self.assertEqual(response.headers["cache-control"], "no-store, private")
+            self.assertNotIn("set-cookie", response.headers)
+        # 只放行这一个精确路径的读请求：写方法、相似路径和不可信 Host 仍按原规则处理。
+        self.assertEqual(self.raw("A", "POST", "/favicon.ico").status_code, 401)
+        for path in ("/favicon.ico/", "/favicon.icox", "/static/favicon.ico"):
+            self.assertEqual(self.raw("A", "GET", path).status_code, 401, path)
+        self.assertEqual(self.raw("A", "GET", "/favicon.ico", headers={"Host": "evil.example"}).status_code, 403)
+
     def test_cookie_rotation_expiry_attributes_and_private_cache(self):
         cookies, me, response = self.login()
         header = response.headers["set-cookie"]

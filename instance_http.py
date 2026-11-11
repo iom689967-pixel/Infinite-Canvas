@@ -82,6 +82,10 @@ class InstanceAuthMiddleware:
         method = scope["method"]
         if path == "/healthz" and method == "GET":
             return await self.reply(scope, receive, send, JSONResponse({"ok": True}))
+        if path == "/favicon.ico" and method in {"GET", "HEAD"}:
+            # 页面没有声明图标，浏览器会自动请求 /favicon.ico；登录前也回一个空的 204，
+            # 不再在登录页上产生 401。不读取任何文件，Host/传输方式的校验仍在上面先执行。
+            return await self.reply(scope, receive, send, Response(status_code=204))
         if getattr(self.paths, "public_beta", False) and path == '/__mio/health' and method == 'GET':
             from public_beta_handoff import health_proof
             return await self.reply(scope, receive, send, JSONResponse({'proof':health_proof(self.store.root, headers.get('x-mio-challenge',''))}))
