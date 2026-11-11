@@ -3461,6 +3461,62 @@ CANVAS_TASK_PERSISTED_KEYS = ("id", "type", "status", "created_at", "updated_at"
                               "canceled_at", "restored_after_restart", "recovery_attempts", "validation")
 CANVAS_TASK_DB_LOCK = Lock()
 CANVAS_TASK_REFRESHING: set = set()
+# 账本不存：result.raw（上游原始响应）、result.prompt（完整提示词，history.json 和画布日志里已有）。
+CANVAS_TASK_RESULT_DROPPED_KEYS = ("raw", "prompt")
+# error、message 落盘前把已知的密钥值替换掉：环境变量和 API/.env 里名字像密钥的项（KEY/SECRET/TOKEN/PASSWORD），
+# 值至少 8 个字符（太短的值替换会误伤正常文字）。上游报错时原样回显请求地址或密钥也不会写进文件。
+CANVAS_TASK_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD", re.IGNORECASE)
+CANVAS_TASK_SECRET_MIN_LENGTH = 8
+CANVAS_TASK_REDACTED = "[redacted]"
+CANVAS_TASK_REDACTED_KEYS = ("error", "message")
+
+
+def known_secret_values() -> List[str]:
+    values = set()
+
+    def add(name, value):
+        value = str(value or "").strip().strip('"').strip("'")
+        if CANVAS_TASK_SECRET_NAME_RE.search(str(name or "")) and len(value) >= CANVAS_TASK_SECRET_MIN_LENGTH:
+            values.add(value)
+
+    for name, value in os.environ.items():
+        add(name, value)
+    try:
+        # 设置页刚保存、还没进环境变量的密钥也算
+        with open(API_ENV_FILE, "r", encoding="utf-8-sig") as f:
+            for raw_line in f.read().splitlines():
+                line = raw_line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    name, value = line.split("=", 1)
+                    add(name.strip(), value)
+    except OSError:
+        pass
+    return sorted(values, key=len, reverse=True)
+
+
+def redact_known_secrets(value, secrets: List[str]):
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret in value:
+                value = value.replace(secret, CANVAS_TASK_REDACTED)
+        return value
+    if isinstance(value, dict):
+        return {k: redact_known_secrets(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_known_secrets(v, secrets) for v in value]
+    return value
+
+
+def canvas_task_ledger_snapshot(task: Dict[str, Any], secrets: Optional[List[str]] = None) -> Dict[str, Any]:
+    """一个任务写进账本的内容：只保留恢复需要的字段，去掉提示词和上游原始响应，错误信息里的已知密钥替换掉。"""
+    snapshot = {key: task[key] for key in CANVAS_TASK_PERSISTED_KEYS if task and key in task}
+    if isinstance(snapshot.get("result"), dict):
+        snapshot["result"] = {k: v for k, v in snapshot["result"].items() if k not in CANVAS_TASK_RESULT_DROPPED_KEYS}
+    secrets = known_secret_values() if secrets is None else secrets
+    for key in CANVAS_TASK_REDACTED_KEYS:
+        if key in snapshot:
+            snapshot[key] = redact_known_secrets(snapshot[key], secrets)
+    return snapshot
 
 
 def canvas_task_persistence_enabled():
@@ -3488,9 +3544,8 @@ def persist_canvas_task(task_id: str):
         snapshot = {key: task[key] for key in CANVAS_TASK_PERSISTED_KEYS if task and key in task}
     if not snapshot:
         return
-    if isinstance(snapshot.get("result"), dict):
-        snapshot["result"] = {k: v for k, v in snapshot["result"].items() if k != "raw"}
     try:
+        snapshot = canvas_task_ledger_snapshot(snapshot)
         data = json.dumps(snapshot, ensure_ascii=False, default=str)
         with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
             db.execute("INSERT OR REPLACE INTO jobs (id, status, data, updated) VALUES (?, ?, ?, ?)",
@@ -3553,15 +3608,28 @@ def restore_canvas_tasks():
     except Exception as exc:
         print(f"读取画布任务账本失败: {exc}")
         return 0
+    # 旧版本写进账本的行可能带着提示词或未替换的密钥：按现在的规则重写一遍
+    secrets = known_secret_values()
+    rewrites = []
     for task_id, data in rows:
         try:
-            task = restored_canvas_task(json.loads(data))
+            stored = json.loads(data)
+            clean = json.dumps(canvas_task_ledger_snapshot(stored, secrets), ensure_ascii=False, default=str)
+            if clean != data:
+                rewrites.append((clean, task_id))
+            task = restored_canvas_task(stored)
         except Exception:
             continue
         with CANVAS_TASK_LOCK:
             if task_id not in CANVAS_TASKS:
                 CANVAS_TASKS[task_id] = task
                 restored.append(task_id)
+    if rewrites:
+        try:
+            with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+                db.executemany("UPDATE jobs SET data = ? WHERE id = ?", rewrites)
+        except Exception as exc:
+            print(f"重写画布任务账本失败: {exc}")
     for task_id in restored:
         if CANVAS_TASKS[task_id].get("restored_after_restart"):
             persist_canvas_task(task_id)
