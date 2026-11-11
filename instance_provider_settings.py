@@ -39,14 +39,15 @@ class FullProviderSettings:
         return {'providers':items}
 
     def normalize(self, body):
+        if isinstance(body,dict) and 'image_edit_route' in body:
+            # 已删除的死字段：旧页面还会带上它，丢掉而不是拒绝整份配置
+            body={k:v for k,v in body.items() if k!='image_edit_route'}
         if not isinstance(body,dict) or set(body)-set(ApiProviderPayload.model_fields):
             raise ValueError('Unexpected Provider fields')
         if body.get('protocol','openai') not in NETWORK_PROTOCOLS:
             raise HTTPException(403,'此实例不开放 CLI / Shell 协议')
         if body.get('image_request_mode','openai') not in self.models.app.SUPPORTED_IMAGE_REQUEST_MODES | {'kie'}:
             raise ValueError('Invalid request mode')
-        if body.get('image_edit_route','general') not in {'general','auto','chat'}:
-            raise ValueError('Invalid edit route')
         parsed=ApiProviderPayload(**body).model_dump()
         item=self.models.app.normalize_provider(parsed)
         if item['protocol'] not in NETWORK_PROTOCOLS:
@@ -84,7 +85,7 @@ class FullProviderSettings:
                 previous=old.get(pid,{});refs=dict(previous.get('secret_refs',{}))
                 if previous.get('credential_file'):refs['api_key']=previous['credential_file']
                 before=self.settings(previous) if previous else {}
-                target_changed=previous and any(before.get(k)!=item.get(k) for k in ('base_url','protocol','image_request_mode','image_edit_route','image_generation_endpoint','image_edit_endpoint','model_protocols','volcengine_project_name','volcengine_region'))
+                target_changed=previous and any(before.get(k)!=item.get(k) for k in ('base_url','protocol','image_request_mode','image_request_mode_manual','image_generation_endpoint','image_edit_endpoint','model_protocols','volcengine_project_name','volcengine_region'))
                 for secret,clear_field in SECRET_FIELDS.items():
                     key=parsed[secret];clear=parsed[clear_field]
                     if key is not None and (not key or len(key)>4096 or any(c in key for c in '\r\n')):raise ValueError('Invalid credential')

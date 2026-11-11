@@ -14,7 +14,6 @@ const idInput = document.getElementById('idInput');
 const baseInput = document.getElementById('baseInput');
 const protocolInput = document.getElementById('protocolInput');
 const imageRequestModeInput = document.getElementById('imageRequestModeInput');
-const imageEditRouteInput = document.getElementById('imageEditRouteInput');
 const providerEnabledInput = document.getElementById('providerEnabledInput');
 const providerPrimaryInput = document.getElementById('providerPrimaryInput');
 const imageGenerationEndpointInput = document.getElementById('imageGenerationEndpointInput');
@@ -297,6 +296,7 @@ function applyLockedRecommendedProtocol(item){
     if(!item || !api) return false;
     item.protocol = String(api.protocol || 'openai').toLowerCase();
     item.image_request_mode = normalizeImageRequestMode(api.image_request_mode);
+    item.image_request_mode_manual = false;
     return true;
 }
 
@@ -787,11 +787,6 @@ function syncEditor(){
             ? lockedApi.image_request_mode
             : (imageRequestModeInput?.value || item.image_request_mode)
     );
-    item.image_edit_route = normalizeImageEditRoute(
-        item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
-            ? 'general'
-            : (imageEditRouteInput?.value || item.image_edit_route)
-    );
     item.image_generation_endpoint = imageGenerationEndpointInput?.value.trim() || '';
     item.image_edit_endpoint = imageEditEndpointInput?.value.trim() || '';
     item.enabled = providerEnabledInput ? providerEnabledInput.checked : item.enabled !== false;
@@ -806,7 +801,7 @@ function syncEditor(){
         item.base_url = KIE_DEFAULT_BASE_URL;
         item.protocol = 'kie';
         item.image_request_mode = 'openai';
-        item.image_edit_route = 'general';
+        item.image_request_mode_manual = false;
         item.image_models = [...KIE_IMAGE_MODELS];
         item.chat_models = [];
         item.video_models = [];
@@ -2296,7 +2291,7 @@ function recommendedProviderForApi(api){
         item.base_url = api.base_url || item.base_url || '';
         item.protocol = api.protocol || item.protocol || 'openai';
         item.image_request_mode = normalizeImageRequestMode(api.image_request_mode || item.image_request_mode);
-        item.image_edit_route = normalizeImageEditRoute(api.image_edit_route || item.image_edit_route);
+        item.image_request_mode_manual = false;
         if(Array.isArray(api.video_models)) item.video_models = [...api.video_models];
         if(api.empty_models_on_save){
             item.image_models = [];
@@ -2316,7 +2311,7 @@ function recommendedProviderForApi(api){
         base_url:api.base_url,
         protocol:api.protocol,
         image_request_mode:normalizeImageRequestMode(api.image_request_mode),
-        image_edit_route:normalizeImageEditRoute(api.image_edit_route),
+        image_request_mode_manual:false,
         image_generation_endpoint:'',
         image_edit_endpoint:'',
         enabled:true,
@@ -2515,11 +2510,9 @@ function renderEditor(){
         const requestedMode = isKie ? 'kie' : normalizeImageRequestMode(item.image_request_mode);
         imageRequestModeInput.value = requestedMode;
         imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
-        imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
-    }
-    if(imageEditRouteInput){
-        imageEditRouteInput.value = normalizeImageEditRoute(item.image_edit_route);
-        imageEditRouteInput.disabled = item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isKie || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        imageRequestModeInput.title = lockedApi
+            ? '推荐平台使用固定图片协议'
+            : item.image_request_mode_manual === true ? '已手动选择：自动识别和检测不会再改动这里' : '';
     }
     if(personalSettings){
         let hint=document.getElementById('personalModelSupport');
@@ -2948,10 +2941,6 @@ function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'tudou-async'].includes(mode) ? mode : 'openai';
 }
-function normalizeImageEditRoute(value){
-    const route = String(value || '').trim().toLowerCase();
-    return ['general', 'auto', 'chat'].includes(route) ? route : 'general';
-}
 function imageRequestModeLabel(mode){
     if(String(mode || '').trim().toLowerCase() === 'kie') return 'Kie Image';
     const normalized = normalizeImageRequestMode(mode);
@@ -2980,6 +2969,11 @@ function applyDetectedImageRequestMode(mode){
     if(applyLockedRecommendedProtocol(item)){
         if(protocolInput) protocolInput.value = item.protocol;
         imageRequestModeInput.value = item.image_request_mode;
+        return false;
+    }
+    if(item.image_request_mode_manual === true){
+        // 用户明确选过图片接口：检测结果只作参考，不覆盖
+        imageRequestModeInput.value = normalizeImageRequestMode(item.image_request_mode);
         return false;
     }
     const detected = normalizeImageRequestMode(mode);
@@ -3064,7 +3058,7 @@ async function probeAsync(){
     // The official Tudou host has a dedicated GPT-Image-2 async image route.
     // Select it before the network check so a failed probe never leaves this
     // known platform displayed as the generic OpenAI image interface.
-    if(isTudouHost && imageRequestModeInput){
+    if(isTudouHost && imageRequestModeInput && item.image_request_mode_manual !== true){
         item.image_request_mode = 'tudou-async';
         imageRequestModeInput.value = 'tudou-async';
     }
@@ -3689,7 +3683,7 @@ function addProvider(){
     let id = 'custom-api';
     let index = 2;
     while(providers.some(item => item.id === id)) id = `custom-api-${index++}`;
-    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_edit_route:'general', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
+    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
     selectedId = id;
     renderEditor();
 }
@@ -3710,7 +3704,6 @@ async function addCliProvider(kind){
             base_url:'',
             protocol:preset.protocol,
             image_request_mode:'openai',
-            image_edit_route:'general',
             image_generation_endpoint:'',
             image_edit_endpoint:'',
             enabled:true,
@@ -3909,11 +3902,6 @@ async function saveProviders(){
                 ? 'openai'
                 : item.image_request_mode
         );
-        item.image_edit_route = normalizeImageEditRoute(
-            item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
-                ? 'general'
-                : item.image_edit_route
-        );
         if(isCliProtocol) applyCliProtocolDefaults(item, item.protocol);
         if(item.id === 'runninghub'){
             item.base_url = normalizeRunningHubBaseUrl(item.base_url);
@@ -3960,7 +3948,7 @@ async function saveProviders(){
                 base_url:item.base_url,
                 protocol:(item.id === 'modelscope') ? 'openai' : item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai'),
                 image_request_mode:item.image_request_mode || 'openai',
-                image_edit_route:item.image_edit_route || 'general',
+                image_request_mode_manual:item.image_request_mode_manual === true,
                 image_generation_endpoint:item.image_generation_endpoint || '',
                 image_edit_endpoint:item.image_edit_endpoint || '',
                 enabled:item.enabled !== false,
@@ -4065,7 +4053,7 @@ window.onload = () => {
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
     if(baseInput) baseInput.addEventListener('input', () => updateApimartDomesticHint());
-    if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
+    if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', event => {
         const item = provider();
         if(!item) return;
         if(applyLockedRecommendedProtocol(item)){
@@ -4074,11 +4062,11 @@ window.onload = () => {
             return;
         }
         item.image_request_mode = normalizeImageRequestMode(imageRequestModeInput.value);
-    });
-    if(imageEditRouteInput) imageEditRouteInput.addEventListener('change', () => {
-        const item = provider();
-        if(!item) return;
-        item.image_edit_route = normalizeImageEditRoute(imageEditRouteInput.value);
+        // 只有用户亲手改的下拉框才算“明确选择”；代码里 dispatchEvent 触发的不算
+        if(event.isTrusted){
+            item.image_request_mode_manual = true;
+            imageRequestModeInput.title = '已手动选择：自动识别和检测不会再改动这里';
+        }
     });
     [keyInput, rhFreeKeyInput, rhWalletKeyInput].forEach(input => {
         if(input) input.addEventListener('input', () => {

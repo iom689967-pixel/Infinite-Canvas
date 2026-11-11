@@ -6,7 +6,7 @@ function section(start,end){return source.slice(source.indexOf(start),source.ind
 const item={id:'personal-example',name:'old',base_url:'https://old.example',protocol:'openai',image_models:[],model_names:{}};
 const input=value=>({value});
 const context={item,providers:[item],provider:()=>item,nameInput:input('Kie Test'),baseInput:input('https://api.kie.ai'),protocolInput:input('kie'),
- imageRequestModeInput:input('openai'),imageEditRouteInput:input('general'),imageGenerationEndpointInput:input(''),imageEditEndpointInput:input(''),
+ imageRequestModeInput:input('openai'),imageGenerationEndpointInput:input(''),imageEditEndpointInput:input(''),
  providerEnabledInput:{checked:true},providerPrimaryInput:{checked:false},keyInput:input('fake-secret'),
  personalSettings:true,selectedId:item.id,CLI_PROTOCOLS:new Set(),API_PROTOCOLS:['openai','kie'],
  deriveIdFromName:(_name,id)=>id,lockedRecommendedApi:()=>null,normalizeImageRequestMode:v=>v,normalizeImageEditRoute:v=>v,

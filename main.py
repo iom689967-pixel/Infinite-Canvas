@@ -1721,7 +1721,12 @@ def normalize_provider(item):
         protocol = "openai"
     if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
-    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
+    # 用户在设置页明确选过图片接口时（image_request_mode_manual），以用户的选择为准；
+    # 否则按地址和模型自动识别，识别不出时用保存的值。
+    image_request_mode_manual = bool(item.get("image_request_mode_manual"))
+    requested_image_request_mode = normalize_image_request_mode(item.get("image_request_mode"))
+    image_request_mode = requested_image_request_mode if image_request_mode_manual else (
+        detect_image_request_mode(base_url, item.get("image_models") or []) or requested_image_request_mode)
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
     volc_project = re.sub(r"\s+", " ", str(item.get("volcengine_project_name") or "").strip())[:80]
@@ -1744,12 +1749,14 @@ def normalize_provider(item):
         protocol = "kie"
         base_url = KIE_BASE_URL
         image_request_mode = "openai"
+        image_request_mode_manual = False
         image_generation_endpoint = ""
         image_edit_endpoint = ""
     locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
     if locked_rule:
         protocol = locked_rule["protocol"]
         image_request_mode = locked_rule["image_request_mode"]
+        image_request_mode_manual = False
     video_models = model_list_from_values(item.get("video_models") or [])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
@@ -1759,7 +1766,7 @@ def normalize_provider(item):
         "base_url": base_url,
         "protocol": protocol,
         "image_request_mode": image_request_mode,
-        "image_edit_route": (item.get("image_edit_route") if item.get("image_edit_route") in {"general", "auto", "chat"} else "general"),
+        "image_request_mode_manual": image_request_mode_manual,
         "image_generation_endpoint": image_generation_endpoint,
         "image_edit_endpoint": image_edit_endpoint,
         "enabled": bool(item.get("enabled", True)),
@@ -5548,6 +5555,8 @@ def detect_image_request_mode(base_url="", models=None):
     return ""
 
 def effective_image_request_mode(provider, model=""):
+    if (provider or {}).get("image_request_mode_manual"):
+        return normalize_image_request_mode(provider.get("image_request_mode"))
     detected = detect_image_request_mode((provider or {}).get("base_url"), [model])
     if detected:
         return detected
@@ -14511,8 +14520,6 @@ async def ai_config():
         "config_version": canvas_config_version(providers, COMFYUI_INSTANCES),
         "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
-        "has_api_key": bool(AI_API_KEY),
-        "has_ms_key": bool(modelscope_api_key()),
     }
 
 @app.get("/api/models")

@@ -54,7 +54,8 @@ class ConfigEndpointTests(unittest.TestCase):
 
     def test_no_global_model_lists_remain(self):
         # 第六批：所有页面都只用 api_providers，全局模型列表字段全部删除（/api/models 不变）
-        self.assertEqual(set(self.config()), {"config_version", "comfy_instances", "api_providers", "has_api_key", "has_ms_key"})
+        # 第七批：没有页面读取的 has_api_key、has_ms_key 一并删除
+        self.assertEqual(set(self.config()), {"config_version", "comfy_instances", "api_providers"})
 
 
 class StandalonePagesUseOnlyProvidersTests(unittest.TestCase):
