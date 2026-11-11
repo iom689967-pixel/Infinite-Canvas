@@ -8092,9 +8092,9 @@ async def list_storage_files(kind: str = "generated", offset: int = 0, limit: in
     items.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
     total = len(items)
     page_items = items[offset:offset + limit]
+    # 不返回服务器上的绝对路径（root）：前端只用 items 里的相对路径和 url
     return {
         "kind": kind,
-        "root": root,
         "items": page_items,
         "total": total,
         "offset": offset,
