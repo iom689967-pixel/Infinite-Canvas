@@ -10,6 +10,19 @@
         try { return JSON.stringify(a) === JSON.stringify(b); } catch(e) { return false; }
     }
 
+    // 忽略对象字段顺序的深比较（数组仍按顺序比较）。jsonEqual 用 JSON.stringify 比较，
+    // 同样的内容只要字段顺序不同就算“不相等”；判断“相对基线没改过”时要用这个。
+    function stableEqual(a, b){
+        if(a === b) return true;
+        if(typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+        if(Array.isArray(a) !== Array.isArray(b)) return false;
+        if(Array.isArray(a)) return a.length === b.length && a.every((item, i) => stableEqual(item, b[i]));
+        const keysA = Object.keys(a).filter(k => a[k] !== undefined);
+        const keysB = Object.keys(b).filter(k => b[k] !== undefined);
+        if(keysA.length !== keysB.length) return false;
+        return keysA.every(k => Object.prototype.hasOwnProperty.call(b, k) && stableEqual(a[k], b[k]));
+    }
+
     function hasOwn(obj, key){
         return Boolean(obj) && Object.prototype.hasOwnProperty.call(obj, key);
     }
@@ -77,7 +90,8 @@
         return out;
     }
 
-    // 节点列表按 id 取并集（不判断删除，见审计 C8）：只在一方存在的节点保留，双方都有的交给 mergeNode。
+    // 节点列表按 id 取并集，不判断删除：只在一方存在的节点保留，双方都有的交给 mergeNode。
+    // 智能画布已改用 mergeNodeListsWithBase（C8）；这里保留并集版本，供没有基线时回退和差分测试对照。
     function mergeNodeListsUnion(localNodes, remoteNodes, baseNodes, mergeNode){
         const baseById = new Map((baseNodes || []).filter(n => n && n.id).map(n => [n.id, n]));
         const localById = new Map((localNodes || []).map(n => [n.id, n]));
@@ -95,7 +109,7 @@
         }).filter(Boolean);
     }
 
-    // 连线取并集，按 from->to:kind 去重，并丢掉指向不存在节点的连线。
+    // 连线取并集，按 from->to:kind 去重，并丢掉指向不存在节点的连线（没有基线时的回退，见 mergeConnectionsWithBase）。
     function mergeConnectionsUnion(localConns, remoteConns, nodeIds){
         const out = [];
         const seen = new Set();
@@ -109,10 +123,101 @@
         return out;
     }
 
+    // ---------------- 按基线判断删除（C8） ----------------
+
+    // 按 key 对两个列表做三方合并，逐元素处理：
+    // - 两边都有：元素是对象且有基线时做字段级三方合并，否则用本地的元素；
+    // - 只有一方有、基线里也有（另一方删掉了）：这一方相对基线没改过就删除；改过就保留（修改优先于删除）；
+    // - 只有一方有、基线里没有：新增，保留。
+    // 顺序：先按本地顺序，再追加对方独有的元素。没有 key 的元素原样保留本地的。
+    // unchanged(item, baseItem) 判断“相对基线没改过”，keep(item) 为 true 时不删除（例如正在生成中的节点）。
+    function mergeListWithBase(localList, remoteList, baseList, keyOf, options={}){
+        const unchanged = options.unchanged || jsonEqual;
+        const keep = options.keep || (() => false);
+        const mergeItem = options.mergeItem || ((local, remote, base) => (
+            base && local && remote && typeof local === 'object' && typeof remote === 'object' && !Array.isArray(local)
+                ? threeWayMergeFields(local, remote, base) : local));
+        const baseByKey = new Map();
+        (baseList || []).forEach(item => { const key = keyOf(item); if(key && !baseByKey.has(key)) baseByKey.set(key, item); });
+        const remoteByKey = new Map();
+        (remoteList || []).forEach(item => { const key = keyOf(item); if(key && !remoteByKey.has(key)) remoteByKey.set(key, item); });
+        const localKeys = new Set();
+        const out = [];
+        (localList || []).forEach(item => {
+            const key = keyOf(item);
+            if(!key){ out.push(item); return; }
+            if(localKeys.has(key)) return;
+            localKeys.add(key);
+            const remote = remoteByKey.get(key);
+            const base = baseByKey.get(key);
+            if(remote !== undefined){ out.push(mergeItem(item, remote, base || null)); return; }
+            if(base !== undefined && !keep(item) && unchanged(item, base)) return;   // 对方删了，本地没改
+            out.push(item);
+        });
+        (remoteList || []).forEach(item => {
+            const key = keyOf(item);
+            if(!key || localKeys.has(key)) return;
+            localKeys.add(key);
+            const base = baseByKey.get(key);
+            if(base !== undefined && !keep(item) && unchanged(item, base)) return;   // 本地删了，对方没改
+            out.push(item);
+        });
+        return out;
+    }
+
+    // 智能画布节点：有基线时按基线判断删除；没有基线时退回并集（旧行为）。
+    // 双方都有的节点交给 mergeNode；unchanged / keep 见 mergeListWithBase。
+    function mergeNodeListsWithBase(localNodes, remoteNodes, baseNodes, mergeNode, options={}){
+        if(!Array.isArray(baseNodes)) return mergeNodeListsUnion(localNodes, remoteNodes, baseNodes, mergeNode);
+        const baseById = new Map(baseNodes.filter(n => n && n.id).map(n => [n.id, n]));
+        return mergeListWithBase(localNodes, remoteNodes, baseNodes, n => n?.id || '', {
+            unchanged:options.unchanged,
+            keep:options.keep,
+            mergeItem:(local, remote) => mergeNode(local, remote, baseById.get(local.id) || null),
+        }).filter(Boolean);
+    }
+
+    const smartConnectionKey = c => (c ? `${c.from}->${c.to}:${c.kind || 'flow'}` : '');
+
+    // 智能画布连线：有基线时按基线判断删除，否则取并集；最后丢掉指向不存在节点的连线。
+    function mergeConnectionsWithBase(localConns, remoteConns, baseConns, nodeIds){
+        if(!Array.isArray(baseConns)) return mergeConnectionsUnion(localConns, remoteConns, nodeIds);
+        return mergeListWithBase(localConns, remoteConns, baseConns, smartConnectionKey)
+            .filter(c => c && nodeIds.has(c.from) && nodeIds.has(c.to));
+    }
+
+    // ---------------- 普通画布：追加型数组字段 ----------------
+
+    // 这些字段是“不断往后追加”的媒体列表，按 url 逐元素合并，而不是整个数组当一个值。
+    const CLASSIC_APPEND_LIST_KEYS = ['images', 'generatedOutputs'];
+    const mediaItemKey = item => (typeof item === 'string' ? item : (item && (item.url || item.path || item.src))) || '';
+
+    function mergeMediaList(localList, remoteList, baseList){
+        return mergeListWithBase(localList, remoteList, baseList, mediaItemKey);
+    }
+
     // ---------------- 普通画布 ----------------
 
     const classicConnectionKey = c => c?.id || (c ? `${c.from}->${c.to}` : '');
     const classicLogKey = l => l?.id || '';
+
+    // 普通画布单个节点：普通字段做字段级三方合并；images 这类追加型数组逐元素合并（C8）。
+    function mergeClassicNode(localNode, remoteNode, baseNode){
+        const merged = threeWayMergeFields(localNode, remoteNode, baseNode, {skipKeys:CLASSIC_APPEND_LIST_KEYS});
+        CLASSIC_APPEND_LIST_KEYS.forEach(key => {
+            const lists = [localNode, remoteNode, baseNode].map(n => n?.[key]);
+            if(!lists.some(Array.isArray)){
+                // 三方都不是数组：按普通字段处理（与旧行为相同）
+                if(jsonEqual(localNode?.[key], baseNode?.[key])){
+                    if(hasOwn(remoteNode, key)) merged[key] = remoteNode[key]; else delete merged[key];
+                }
+                return;
+            }
+            if(!hasOwn(localNode, key) && !hasOwn(remoteNode, key)){ delete merged[key]; return; }
+            merged[key] = mergeMediaList(lists[0], lists[1], lists[2]);
+        });
+        return merged;
+    }
 
     // 普通画布的整体合并。local.nodes 必须是序列化后的节点（不含运行时临时字段）。
     // 返回：
@@ -135,7 +240,7 @@
             const remoteNode = remoteById.get(localNode.id);
             const baseNode = baseNodes.get(localNode.id);
             if(remoteNode){
-                nodes.push({id:localNode.id, source:'local', node:baseNode ? threeWayMergeFields(localNode, remoteNode, baseNode) : {...localNode}});
+                nodes.push({id:localNode.id, source:'local', node:baseNode ? mergeClassicNode(localNode, remoteNode, baseNode) : {...localNode}});
                 return;
             }
             if(baseNode && jsonEqual(localNode, baseNode)) return;
@@ -172,13 +277,20 @@
 
     const api = {
         jsonEqual,
+        stableEqual,
         threeWayMergeFields,
         mergeKeyedLists,
         mergeImageLists,
         mergeNodeListsUnion,
         mergeConnectionsUnion,
         mergeClassicCanvas,
+        mergeClassicNode,
+        mergeListWithBase,
+        mergeMediaList,
+        mergeNodeListsWithBase,
+        mergeConnectionsWithBase,
         syncNodeFields,
+        CLASSIC_APPEND_LIST_KEYS,
         classicConnectionKey,
         classicLogKey,
     };

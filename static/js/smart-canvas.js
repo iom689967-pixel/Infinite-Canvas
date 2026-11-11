@@ -5671,6 +5671,8 @@ let canvasSyncInFlight = false;
 // 三方合并的共同基线：最近一次与服务器一致的节点（深拷贝，绝不与 nodes 共享对象）。
 // 加载画布、保存成功、合并服务器版本后更新。合并时据此判断某个字段是“本地改的”还是“对方改的”。
 let smartSyncBaseNodes = null;
+// 连线的同步基线（C8）：与 smartSyncBaseNodes 同时更新，用来判断对方是否删除了某条连线。
+let smartSyncBaseConnections = null;
 let canvasSyncTimer = null;
 let canvasMetaPollTimer = null;
 let connectionLayerRaf = 0;
@@ -5996,22 +5998,43 @@ function mergeSmartNode(local, remote, base=null){
     }
     return mergeNodeGenerationState(merged, local, remote);
 }
-function mergeSmartNodeLists(localNodes, remoteNodes, baseNodes=null){
-    return CanvasMerge.mergeNodeListsUnion(localNodes, remoteNodes, baseNodes, mergeSmartNode);
+// 判断节点“相对基线没改过”：两边都按保存时的形式规整后再比较，
+// 页面里的规范化和运行时状态（生成中、DOM 引用等）不算修改。
+// 保存时 buildSmartSavePayload / canvasForStorage 会把缺少的 images 补成 []、把 minimax 的 timelinePlaying 置为 false，
+// 这里同样处理，否则首次加载的基线（服务器原样数据）与保存过一次的本地节点会被误判为“改过”。
+// 规整会改变字段顺序，所以用忽略字段顺序的 stableEqual 比较。
+function smartNodeComparable(node){
+    const copy = serializableSmartNode(node);
+    if(!Array.isArray(copy.images)) copy.images = [];
+    if(copy.type === 'smart-minimax') copy.timelinePlaying = false;
+    return copy;
 }
-function mergeSmartConnections(localConns, remoteConns, nodeIds){
-    return CanvasMerge.mergeConnectionsUnion(localConns, remoteConns, nodeIds);
+function smartNodeUnchangedSinceBase(node, baseNode){
+    return CanvasMerge.stableEqual(smartNodeComparable(node), smartNodeComparable(baseNode));
+}
+// 节点和连线按基线判断删除（C8）：一方删除、另一方没改过就删除；另一方改过则保留；
+// 正在生成中的节点一律保留，不丢掉进行中的任务。没有基线时退回并集。
+function mergeSmartNodeLists(localNodes, remoteNodes, baseNodes=null){
+    return CanvasMerge.mergeNodeListsWithBase(localNodes, remoteNodes, baseNodes, mergeSmartNode, {
+        unchanged:smartNodeUnchangedSinceBase,
+        keep:node => smartNodeInFlight(node),
+    });
+}
+function mergeSmartConnections(localConns, remoteConns, nodeIds, baseConns=null){
+    return CanvasMerge.mergeConnectionsWithBase(localConns, remoteConns, baseConns, nodeIds);
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
     // 先深拷贝服务器节点作为新的基线：下面的规范化会原地修改对象，且对方新建的节点会直接成为本地对象。
     const serverBaseNodes = cloneSmartJson(Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []);
+    const serverBaseConnections = cloneSmartJson(Array.isArray(serverCanvas.connections) ? serverCanvas.connections : []);
     const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
     const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes, smartSyncBaseNodes);
     smartSyncBaseNodes = serverBaseNodes;
     const nodeIds = new Set(mergedNodes.map(n => n.id));
     nodes = mergedNodes;
-    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
+    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds, smartSyncBaseConnections);
+    smartSyncBaseConnections = serverBaseConnections;
     const cleanedState = clearCompletedNodeBusyStates();
     const reconciledGenerationHistory = nodes.map(reconcileNodeGenerationHistory).some(Boolean);
     const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
@@ -6609,6 +6632,7 @@ async function loadCanvas(){
         const data = await res.json();
         canvas = data.canvas;
         smartSyncBaseNodes = cloneSmartJson(Array.isArray(canvas?.nodes) ? canvas.nodes : []);
+        smartSyncBaseConnections = cloneSmartJson(Array.isArray(canvas?.connections) ? canvas.connections : []);
         undoStack.length = 0;
         redoStack.length = 0;
         rememberCanvasListProject(canvas.project || 'default');
@@ -6824,6 +6848,7 @@ async function performSmartCanvasSave(){
                 if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
                 // 服务器现在保存的正是这份节点（canvasForStorage 已深拷贝），作为下一次合并的基线。
                 smartSyncBaseNodes = storageCanvas.nodes || [];
+                smartSyncBaseConnections = storageCanvas.connections || [];
                 noteSmartSaveSucceeded(builtVersion);
                 return;
             }

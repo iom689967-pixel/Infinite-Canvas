@@ -130,7 +130,7 @@ out.connections = M.mergeConnectionsUnion(
         self.assertEqual(self.r["nodeIds"], ["a", "l", "r"])
         self.assertEqual(self.r["callArgs"], [["L", "R", "B"]])
 
-    def test_smart_deletions_are_resurrected(self):  # 现有行为（审计 C8，智能画布未修复）
+    def test_union_fallback_keeps_one_sided_nodes(self):  # 并集版本：没有基线时的回退，智能画布已改用 mergeNodeListsWithBase
         self.assertEqual(self.r["resurrected"], ["a", "deleted-locally"])
 
     def test_connections_union_drops_dangling(self):
@@ -199,12 +199,114 @@ out.sync = {same:synced === live, value:{...synced}};
         self.assertEqual(self.r["logCap"], 500)
         self.assertEqual(self.r["newestLog"], "x599")
 
-    def test_array_field_both_appended_local_wins(self):  # 现有行为：数组整体比较
-        self.assertEqual(self.r["arrayField"], ["1", "L"])
+    def test_append_list_field_merged_per_element(self):  # C8：images 按元素合并，两边追加的都保留
+        self.assertEqual(self.r["arrayField"], ["1", "L", "R"])
 
     def test_sync_node_fields_in_place(self):
         self.assertTrue(self.r["sync"]["same"])
         self.assertEqual(self.r["sync"]["value"], {"id": "s", "x": 2, "added": "y", "running": True})
+
+
+class BaseAwareListTests(unittest.TestCase):
+    """C8：节点、连线和追加型数组按基线判断删除。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = run_cases(r"""
+const n = (id, x=0) => ({id, x});
+const mn = (l, r, b) => ({...l, merged:true, sawBase:Boolean(b)});
+const ids = list => list.map(x => x.id);
+const W = (l, r, b, o) => ids(M.mergeNodeListsWithBase(l, r, b, mn, o));
+out.remoteDeletedLocalUnchanged = W([n('a'), n('b')], [n('a')], [n('a'), n('b')]);
+out.remoteDeletedLocalEdited = W([n('a'), n('b', 5)], [n('a')], [n('a'), n('b')]);
+out.localDeletedRemoteUnchanged = W([n('a')], [n('a'), n('b')], [n('a'), n('b')]);
+out.localDeletedRemoteEdited = W([n('a')], [n('a'), n('b', 7)], [n('a'), n('b')]);
+out.bothAdd = W([n('a'), n('c')], [n('a'), n('d')], [n('a')]);
+out.keepInFlight = W([n('a'), n('b')], [n('a')], [n('a'), n('b')], {keep:x => x.id === 'b'});
+out.customUnchanged = W([n('a'), n('b', 1)], [n('a')], [n('a'), n('b')], {unchanged:(x, b) => x.id === b.id});
+out.noBaseFallsBackToUnion = W([n('a'), n('b')], [n('a')], null);
+const both = M.mergeNodeListsWithBase([n('a')], [n('a')], [n('a')], mn)[0];
+out.bothSidesUseMergeNode = [both.merged, both.sawBase];
+const c = (f, t, k) => ({from:f, to:t, kind:k});
+const nodeIds = new Set(['a', 'b', 'c']);
+const C = (l, r, b) => M.mergeConnectionsWithBase(l, r, b, nodeIds).map(x => `${x.from}>${x.to}:${x.kind || 'flow'}`);
+out.connDeletedRemotely = C([c('a','b'), c('b','c')], [c('a','b')], [c('a','b'), c('b','c')]);
+out.connAddedRemotely = C([c('a','b')], [c('a','b'), c('a','c')], [c('a','b')]);
+out.connKindsDistinct = C([c('a','b'), c('a','b','ref')], [c('a','b')], [c('a','b')]);
+out.connDanglingDropped = C([c('a','b'), c('a','x')], [c('a','b')], [c('a','b')]);
+out.connNoBaseUnion = C([c('a','b')], [c('b','c')], null);
+const im = (u, v=false) => ({url:u, viewed:v});
+const ob = {id:'o', type:'output', images:[im('s')]};
+const CN = (l, r) => M.mergeClassicNode(l, r, ob);
+out.twoTabsAppend = CN({...ob, images:[im('s'), im('t1')]}, {...ob, images:[im('s'), im('t2')]}).images.map(i => i.url);
+out.localClearedRemoteAdded = CN({...ob, images:[]}, {...ob, images:[im('s'), im('t2')]}).images.map(i => i.url);
+out.viewedFlagAndRemoteAdd = CN({...ob, images:[im('s', true)]}, {...ob, images:[im('s'), im('t2')]}).images;
+const plain = M.mergeClassicNode({...ob, x:5}, {...ob, y:9}, {...ob});
+out.plainFieldsStillMerged = [plain.x, plain.y, plain.images.length];
+out.noImagesKeyCreated = 'images' in M.mergeClassicNode({id:'g', text:'a'}, {id:'g', text:'a'}, {id:'g', text:'a'});
+out.generatedOutputsStrings = M.mergeClassicNode({id:'g', generatedOutputs:['u1','u2']}, {id:'g', generatedOutputs:['u1','u3']}, {id:'g', generatedOutputs:['u1']}).generatedOutputs;
+out.nonAppendArrayStillAtomic = M.mergeClassicNode({id:'g', tags:['L']}, {id:'g', tags:['R']}, {id:'g', tags:[]}).tags;
+const local = [n('a'), n('b')], remote = [n('a')], base = [n('a'), n('b')];
+const snapshot = JSON.stringify([local, remote, base]);
+M.mergeNodeListsWithBase(local, remote, base, mn);
+out.inputsNotMutated = JSON.stringify([local, remote, base]) === snapshot;
+out.stableEqual = [
+  M.stableEqual({a:1, b:[1, {c:2, d:3}]}, {b:[1, {d:3, c:2}], a:1}),
+  M.stableEqual({a:1}, {a:1, b:undefined}),
+  !M.stableEqual([1, 2], [2, 1]),
+  !M.stableEqual({a:1}, {a:'1'}),
+  !M.stableEqual({a:null}, {}),
+  !M.stableEqual({a:{}}, {a:[]}),
+];
+""")
+
+    def test_smart_node_deletion_follows_base(self):
+        self.assertEqual(self.r["remoteDeletedLocalUnchanged"], ["a"])
+        self.assertEqual(self.r["localDeletedRemoteUnchanged"], ["a"])
+
+    def test_edit_wins_over_delete(self):
+        self.assertEqual(self.r["remoteDeletedLocalEdited"], ["a", "b"])
+        self.assertEqual(self.r["localDeletedRemoteEdited"], ["a", "b"])
+
+    def test_additions_and_protection(self):
+        self.assertEqual(self.r["bothAdd"], ["a", "c", "d"])
+        self.assertEqual(self.r["keepInFlight"], ["a", "b"])
+        self.assertEqual(self.r["customUnchanged"], ["a"])
+        self.assertEqual(self.r["noBaseFallsBackToUnion"], ["a", "b"])
+        self.assertEqual(self.r["bothSidesUseMergeNode"], [True, True])
+        self.assertTrue(self.r["inputsNotMutated"])
+
+    def test_connections_follow_base(self):
+        self.assertEqual(self.r["connDeletedRemotely"], ["a>b:flow"])
+        self.assertEqual(self.r["connAddedRemotely"], ["a>b:flow", "a>c:flow"])
+        self.assertEqual(self.r["connKindsDistinct"], ["a>b:flow", "a>b:ref"])
+        self.assertEqual(self.r["connDanglingDropped"], ["a>b:flow"])
+        self.assertEqual(self.r["connNoBaseUnion"], ["a>b:flow", "b>c:flow"])
+
+    def test_classic_append_lists_merge_per_element(self):
+        self.assertEqual(self.r["twoTabsAppend"], ["s", "t1", "t2"])
+        self.assertEqual(self.r["localClearedRemoteAdded"], ["t2"])
+        self.assertEqual(self.r["viewedFlagAndRemoteAdd"], [{"url": "s", "viewed": True}, {"url": "t2", "viewed": False}])
+        self.assertEqual(self.r["plainFieldsStillMerged"], [5, 9, 1])
+        self.assertFalse(self.r["noImagesKeyCreated"])
+        self.assertEqual(self.r["generatedOutputsStrings"], ["u1", "u2", "u3"])
+        self.assertEqual(self.r["nonAppendArrayStillAtomic"], ["L"])  # 其他数组字段仍按整体比较（现有行为）
+
+    def test_stable_equal_ignores_key_order(self):
+        self.assertEqual(self.r["stableEqual"], [True] * 6)
+
+
+class SmartCanvasUsesBaseAwareMergeTests(unittest.TestCase):
+    def test_smart_canvas_wiring(self):
+        source = (ROOT / "static/js/smart-canvas.js").read_text(encoding="utf-8")
+        self.assertIn("CanvasMerge.mergeNodeListsWithBase(", source)
+        self.assertIn("CanvasMerge.mergeConnectionsWithBase(", source)
+        self.assertNotIn("CanvasMerge.mergeNodeListsUnion(", source)
+        self.assertNotIn("CanvasMerge.mergeConnectionsUnion(", source)
+        self.assertIn("CanvasMerge.stableEqual(smartNodeComparable(node), smartNodeComparable(baseNode))", source)
+        # 连线基线与节点基线在同样的三个地方更新：加载、保存成功、合并服务器版本
+        import re
+        self.assertEqual(len(re.findall(r"^\s+smartSyncBaseConnections = ", source, re.M)), 3)
 
 
 if __name__ == "__main__":

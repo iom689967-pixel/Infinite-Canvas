@@ -581,6 +581,68 @@ async function genClassicTwoTabsLogs(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- C8：删除按基线判断；追加型数组逐元素合并 ----------------
+const smartC8Nodes = () => [
+  { id: 'audit-s1', type: 'smart-text', x: 100, y: 100, w: 440, h: 250, title: 'S1', text: '' },
+  { id: 'audit-s2', type: 'smart-text', x: 700, y: 100, w: 440, h: 250, title: 'S2', text: '' },
+  { id: 'audit-s3', type: 'smart-text', x: 1300, y: 100, w: 440, h: 250, title: 'S3', text: '' },
+];
+
+async function c8SmartDeleteStaysDeleted(browser) {
+  const id = await createTestCanvas('smart', smartC8Nodes());
+  const c0 = await getCanvas(id);
+  await api('PUT', `/api/canvases/${id}`, { connections: [{ id: 'audit-e12', from: 'audit-s1', to: 'audit-s2' }, { id: 'audit-e23', from: 'audit-s2', to: 'audit-s3' }], base_updated_at: c0.updated_at });
+  const p1 = await openSmart(browser, id, 3);
+  const p2 = await openSmart(browser, id, 3);
+  const p1Puts = []; trackPuts(p1, id, p1Puts);
+  const start = await getCanvas(id);
+  // P2 删除 S3（连同它的连线）和 S1→S2 这条连线并保存；P1 几乎同时改 S1 的位置（P1 的基线已过期 → 409 → 合并）
+  await p2.evaluate(`nodes = nodes.filter(n => n.id !== 'audit-s3');
+    canvas.connections = (canvas.connections || []).filter(c => c.to !== 'audit-s3' && c.from !== 'audit-s3' && !(c.from === 'audit-s1' && c.to === 'audit-s2'));
+    render(); saveCanvas();`);
+  await p1.evaluate(`nodes.find(n => n.id === 'audit-s1').x += 50; saveCanvas();`);
+  await sleep(9000);
+  const c1 = await getCanvas(id);
+  const serverIds = c1.nodes.map(n => n.id).sort();
+  const serverConns = (c1.connections || []).map(c => `${c.from}->${c.to}`).sort();
+  const p1Ids = (await p1.evaluate(`nodes.map(n => n.id)`)).sort();
+  const p1Conns = (await p1.evaluate(`(canvas.connections || []).map(c => c.from + '->' + c.to)`)).sort();
+  const pass = serverIds.join(',') === 'audit-s1,audit-s2' && serverConns.length === 0
+    && p1Ids.join(',') === 'audit-s1,audit-s2' && p1Conns.length === 0 && nodeX(c1, 'audit-s1') === nodeX(start, 'audit-s1') + 50;
+  record('C8_smart_deleted_node_stays_deleted', pass, { serverIds, serverConns, p1Ids, p1Conns, s1x: nodeX(c1, 'audit-s1'), expectedS1x: nodeX(start, 'audit-s1') + 50, p1Puts: p1Puts.map(p => p.status) });
+  await p1.close(); await p2.close();
+}
+
+async function c8ClassicSameOutputBothImages(browser) {
+  const id = await createTestCanvas('classic', [
+    { id: 'audit-n1', type: 'prompt', x: 100, y: 100, text: 'a cat' },
+    { id: 'audit-g1', type: 'generator', x: 600, y: 100, apiProvider: 'codex', model: 'gpt-image-2' },
+    { id: 'audit-out', type: 'output', x: 1100, y: 100, images: [{ url: '/assets/output/audit-seed.png', viewed: true }] },
+  ]);
+  const c0 = await getCanvas(id);
+  await api('PUT', `/api/canvases/${id}`, { connections: [{ id: 'audit-e1', from: 'audit-n1', to: 'audit-g1' }, { id: 'audit-e2', from: 'audit-g1', to: 'audit-out' }], base_updated_at: c0.updated_at });
+  const p1 = await openClassic(browser, id, 3);
+  const p2 = await openClassic(browser, id, 3);
+  await p1.evaluate('stopCanvasRemotePolling()');
+  await p2.evaluate('stopCanvasRemotePolling()');
+  const c1 = await installGenMocks(p1, { canvasId: id, prefix: 'mock-c8tab1' });
+  const c2 = await installGenMocks(p2, { canvasId: id, prefix: 'mock-c8tab2' });
+  // 两个标签页都运行同一个生成节点，结果都追加到同一个输出节点
+  await Promise.all([p1.evaluate(`void runGenerator('audit-g1')`), p2.evaluate(`void runGenerator('audit-g1')`)]);
+  await sleep(4000);
+  c1.releasedAll = true;
+  c2.releasedAll = true;
+  await sleep(14000);
+  const c = await getCanvas(id);
+  const out = nodeOf(c, 'audit-out');
+  const urls = (out?.images || []).map(i => i?.url || i);
+  const outputNodes = (c.nodes || []).filter(n => n.type === 'output').map(n => n.id);
+  const pass = urls.some(u => u.includes('audit-seed')) && urls.some(u => u.includes('mock-c8tab1')) && urls.some(u => u.includes('mock-c8tab2'))
+    && outputNodes.join(',') === 'audit-out';
+  record('C8_classic_two_tabs_same_output_both_images_kept', pass, { outputImages: urls, outputNodes, tab1Puts: c1.putStatuses, tab2Puts: c2.putStatuses });
+  await p1.close(); await p2.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -615,6 +677,7 @@ async function apiSemantics() {
     ['A3', () => a3Smart(browser)],
     ['GEN', () => genSmartWhileSaving(browser)], ['GEN', () => genSmartDuring409(browser)], ['GEN', () => genSmartTwoTabsHistory(browser)],
     ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
+    ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
