@@ -523,6 +523,20 @@ def atomic_write_json(path, data, **dump_kwargs):
     # 先在内存里完整序列化：序列化失败时磁盘上的旧文件保持不变。
     atomic_write_text(path, json.dumps(data, **dump_kwargs))
 
+# 画布文件用紧凑格式写入：不改数据结构，任何 JSON 解析器（包括旧版代码的 json.load）都能读取。
+# 缩进格式会让大画布的文件明显变大（几十 MB 的画布里空白占了相当比例），每次保存都要多写这么多。
+CANVAS_JSON_SEPARATORS = (",", ":")
+
+def canvas_json_text(canvas):
+    return json.dumps(canvas, ensure_ascii=False, separators=CANVAS_JSON_SEPARATORS)
+
+def write_canvas_json(path, canvas):
+    """写一个画布文件：独立实例走存储配额，否则原子写入。调用方负责持有 CANVAS_LOCK。"""
+    if INSTANCE_STORAGE:
+        INSTANCE_STORAGE.replace_json(path, canvas, separators=CANVAS_JSON_SEPARATORS)
+        return
+    atomic_write_text(path, canvas_json_text(canvas))
+
 def _storage_abs_path(value, fallback):
     text = str(value or "").strip()
     if not text:
@@ -4114,10 +4128,7 @@ def canvas_path(canvas_id):
 def save_canvas(canvas):
     with CANVAS_LOCK:
         canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
-        if INSTANCE_STORAGE:
-            INSTANCE_STORAGE.replace_json(canvas_path(canvas['id']), canvas)
-            return
-        atomic_write_json(canvas_path(canvas["id"]), canvas, ensure_ascii=False, indent=2)
+        write_canvas_json(canvas_path(canvas["id"]), canvas)
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -17394,7 +17405,7 @@ async def delete_project(project_id: str):
                 continue
             if str(data.get("project") or "") == project_id:
                 data["project"] = DEFAULT_PROJECT_ID
-                atomic_write_json(path, data, ensure_ascii=False, indent=2)
+                write_canvas_json(path, data)
                 moved += 1
     return {"ok": True, "moved": moved}
 
@@ -17442,7 +17453,7 @@ def _update_canvas_meta_locked(canvas_id: str, payload: CanvasMetaUpdate):
         canvas["board_x"] = float(payload.board_x)
     if payload.board_y is not None:
         canvas["board_y"] = float(payload.board_y)
-    atomic_write_json(canvas_path(canvas["id"]), canvas, ensure_ascii=False, indent=2)
+    write_canvas_json(canvas_path(canvas["id"]), canvas)
     return {"canvas": canvas_record(canvas)}
 
 @app.get("/api/canvases/{canvas_id}")
