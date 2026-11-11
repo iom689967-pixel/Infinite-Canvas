@@ -47,7 +47,7 @@ class CrossSiteGuardTests(unittest.TestCase):
 
     def test_dns_rebinding_host_rejected(self):
         self.assertTrue(reason("GET", "/api/config/token", host="evil.example:3000"))
-        self.assertTrue(reason("GET", "/api/providers/kie/fetch-models", host="evil.example:3000"))
+        self.assertTrue(reason("GET", "/api/providers", host="evil.example:3000"))
         self.assertTrue(reason("POST", "/api/canvases", host="evil.example:3000", origin="http://evil.example:3000"))
 
     def test_all_get_and_websocket_host_checked(self):

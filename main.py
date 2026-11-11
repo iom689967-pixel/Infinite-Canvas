@@ -3591,9 +3591,6 @@ class CanvasVideoRequest(BaseModel):
     multimodal: bool = False
     trusted_asset: bool = False
 
-class TempShUploadRequest(BaseModel):
-    url: str = ""
-
 class CloudVideoUploadRequest(BaseModel):
     url: str = ""
     service: str = "auto"
@@ -10518,9 +10515,6 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
             errors.append(f"{name}: {exc.detail}")
     raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))
 
-async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
-    return await upload_local_video_to_cloud(ref_url, "auto")
-
 async def save_ai_image_to_output(image_data, prefix="online_", category="output", *, require_local=False):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
@@ -13869,11 +13863,6 @@ async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest):
     atomic_write_text(txt_path, caption, newline="")
     return {"ok": True, "caption": caption, "caption_file": os.path.basename(txt_path)}
 
-@app.post("/api/temp-sh/upload")
-async def temp_sh_upload(payload: TempShUploadRequest, request: Request):
-    ensure_same_origin_request(request)
-    return await upload_local_video_to_cloud(payload.url, "auto")
-
 @app.post("/api/cloud-video/upload")
 async def cloud_video_upload(payload: CloudVideoUploadRequest, request: Request):
     ensure_same_origin_request(request)
@@ -15029,23 +15018,6 @@ async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
     protocol = protocol_from_payload(payload)
     api_key = api_key_from_payload(payload, protocol)
     return await fetch_models_from_upstream(payload.base_url, api_key, protocol, payload.image_request_mode)
-
-@app.get("/api/providers/{provider_id}/fetch-models")
-async def fetch_upstream_models(provider_id: str):
-    """从已保存的上游 OpenAI 兼容接口拉取 /v1/models 列表，按名称智能分类为 image/chat/video。"""
-    provider = get_api_provider_exact(provider_id)
-    if provider["id"] == "kie":
-        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
-    if is_codex_provider(provider):
-        return await fetch_models_from_upstream("", "", "codex", provider.get("image_request_mode") or "openai")
-    if is_gemini_cli_provider(provider):
-        return await fetch_models_from_upstream("", "", "gemini-cli", provider.get("image_request_mode") or "openai")
-    api_key = os.getenv(runninghub_wallet_key_env(), "") if provider["id"] == "runninghub" else ""
-    if not api_key:
-        api_key = provider_env_key_value(provider["id"])
-    if not api_key:
-        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
-    return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
 async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event=None, status_callback=None):
     validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
