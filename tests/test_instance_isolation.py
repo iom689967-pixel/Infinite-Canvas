@@ -463,6 +463,7 @@ class TwoProcessIsolationTests(unittest.TestCase):
                     self.assertTrue(Path(value).is_relative_to(self.roots[name]), (key, value))
             config = self.ok(name, "GET", "/api/config")
             self.assertRegex(config.get("config_version", ""), r"^[0-9a-f]{16}$")  # A6：实例模式同样带版本号
+            self.assertEqual(set(config), {"api_providers", "config_version"})  # 第六批：不再附带全局模型列表
             self.assertNotIn("has_api_key", config)
             self.assertNotIn("has_ms_key", config)
             self.assertNotIn("base_url", json.dumps(config))

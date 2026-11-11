@@ -643,6 +643,47 @@ async function c8ClassicSameOutputBothImages(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- 第六批：online.html、gpt-chat.html 只用 api_providers（/api/config 不再有全局模型列表） ----------------
+async function standalonePagesUseProviders(browser) {
+  const cfg = (await api('GET', '/api/config')).json;
+  const legacyKeys = ['chat_model', 'image_model', 'chat_models', 'image_models', 'video_models', 'ms_chat_models', 'base_url'].filter(k => k in cfg);
+  const enabled = (cfg.api_providers || []).filter(p => p.enabled !== false);
+  const imageIds = enabled.filter(p => (p.image_models || []).length || (p.rh_apps || []).length || (p.rh_workflows || []).length).map(p => p.id);
+  const chatIds = enabled.filter(p => (p.chat_models || []).length).map(p => p.id);
+  const errors = [];
+  const online = await browser.newPage();
+  online.on('pageerror', e => errors.push('online: ' + e.message));
+  await online.goto(`${B}/static/online.html`, { waitUntil: 'domcontentloaded' });
+  await online.waitForFunction(`document.querySelectorAll('#providerSelect option').length > 0`, { timeout: 20000 });
+  await sleep(1500);
+  const onlineView = await online.evaluate(`(() => {
+    const providers = [...document.querySelectorAll('#providerSelect option')].filter(o => !o.disabled).map(o => o.value);
+    const selected = document.getElementById('providerSelect').value;
+    const p = apiProviders.find(x => x.id === selected);
+    const isRh = String(p?.protocol || p?.id || '').toLowerCase() === 'runninghub';
+    return { providers, selected, isRh, models: [...document.querySelectorAll('#modelSelect option')].map(o => o.value), expectedModels: p?.image_models || [] };
+  })()`);
+  await online.close();
+  const chat = await browser.newPage();
+  chat.on('pageerror', e => errors.push('chat: ' + e.message));
+  await chat.goto(`${B}/static/gpt-chat.html`, { waitUntil: 'domcontentloaded' });
+  await chat.waitForFunction(`typeof apiProviders !== 'undefined' && apiProviders.length > 0`, { timeout: 20000 });
+  await sleep(1500);
+  const chatView = await chat.evaluate(`({ chatProviders: chatProviders().map(p => p.id), imageProviders: imageProviders().map(p => p.id),
+    provider, activeChatModel, chatModelsOfProvider: (apiProviders.find(p => p.id === provider)?.chat_models || []) })`);
+  await chat.close();
+  const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+  const checks = {
+    configHasNoLegacyLists: legacyKeys.length === 0,
+    onlineProviders: same(onlineView.providers, imageIds),
+    onlineModels: onlineView.isRh || same(onlineView.models, onlineView.expectedModels),
+    chatProviders: same(chatView.chatProviders, chatIds),
+    chatModelFromProvider: chatView.chatModelsOfProvider.includes(chatView.activeChatModel),
+    noPageErrors: errors.length === 0,
+  };
+  record('STANDALONE_pages_use_only_api_providers', Object.values(checks).every(Boolean), { checks, legacyKeys, onlineView, chatView, errors });
+}
+
 // ---------------- RunningHub：打开画布时只预取保存过参数的工作流，不再对没有参数的条目产生 404 ----------------
 async function rhPrefetchSkipsUnsavedWorkflows(browser) {
   const cfg = (await api('GET', '/api/config')).json;
@@ -837,6 +878,7 @@ async function apiSemantics() {
     ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
     ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
     ['RH', () => rhPrefetchSkipsUnsavedWorkflows(browser)],
+    ['STANDALONE', () => standalonePagesUseProviders(browser)],
     ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C6', () => apiSemantics()],

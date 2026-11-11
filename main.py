@@ -14459,21 +14459,15 @@ def canvas_config_version(api_providers, comfy_instances=()):
 
 @app.get("/api/config")
 async def ai_config():
-    preferred_chat_model = next((m for m in CHAT_MODELS if m == "gpt-5.5"), CHAT_MODELS[0] if CHAT_MODELS else CHAT_MODEL)
     providers = public_api_providers()
-    # A4：不再返回旧的 base_url（没有页面读取它，而且指向的是旧的默认平台地址）。
-    # chat_models / image_models 等全局列表仍保留给 online.html、gpt-chat.html 作兜底；画布已不再读取。
+    # A4：所有页面的平台和模型都只来自 api_providers。旧的全局字段（base_url、chat_model、image_model、
+    # chat_models、image_models、video_models、ms_chat_models）来自旧环境变量，和用户配置的平台无关，已全部删除。
+    # /api/models 仍按原样返回全局列表（实例模式的模型目录在用）。
     return {
         "config_version": canvas_config_version(providers, COMFYUI_INSTANCES),
-        "chat_model": preferred_chat_model,
-        "image_model": IMAGE_MODEL,
-        "chat_models": CHAT_MODELS,
-        "image_models": IMAGE_MODELS,
-        "video_models": VIDEO_MODELS,
         "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
         "has_api_key": bool(AI_API_KEY),
-        "ms_chat_models": MODELSCOPE_CHAT_MODELS,
         "has_ms_key": bool(modelscope_api_key()),
     }
 

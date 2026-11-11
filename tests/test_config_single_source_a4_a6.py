@@ -52,6 +52,27 @@ class ConfigEndpointTests(unittest.TestCase):
     def test_legacy_base_url_is_gone(self):
         self.assertNotIn("base_url", self.config())
 
+    def test_no_global_model_lists_remain(self):
+        # 第六批：所有页面都只用 api_providers，全局模型列表字段全部删除（/api/models 不变）
+        self.assertEqual(set(self.config()), {"config_version", "comfy_instances", "api_providers", "has_api_key", "has_ms_key"})
+
+
+class StandalonePagesUseOnlyProvidersTests(unittest.TestCase):
+    LEGACY = re.compile(r"\b(?:cfg|config)\.(?:image_models?|chat_models?|video_models|ms_chat_models|base_url)\b")
+
+    def test_online_and_chat_pages_do_not_read_global_lists(self):
+        for name in ("online.html", "gpt-chat.html"):
+            source = (ROOT / "static" / name).read_text(encoding="utf-8")
+            self.assertEqual(self.LEGACY.findall(source), [], name)
+
+    def test_no_phantom_fallback_models(self):
+        online = (ROOT / "static/online.html").read_text(encoding="utf-8")
+        chat = (ROOT / "static/gpt-chat.html").read_text(encoding="utf-8")
+        self.assertNotIn("models.gpt", online)
+        self.assertNotIn("[models.gpt]", online)
+        self.assertNotIn("name:'ModelScope', chat_models:config.ms_chat_models", chat)
+        self.assertNotIn("chat_model: 'gpt-5.5'", chat)
+
     def test_version_depends_only_on_content(self):
         a = main.canvas_config_version([{"id": "x", "image_models": ["a"]}], ["http://h:1"])
         b = main.canvas_config_version([{"image_models": ["a"], "id": "x"}], ["http://h:1"])

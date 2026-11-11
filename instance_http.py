@@ -287,7 +287,9 @@ class InstanceAuthMiddleware:
                     # A6：与本地模式的 canvas_config_version 相同的算法（实例模式没有 ComfyUI 地址）
                     payload = json.dumps({"api_providers": result.get("api_providers") or [], "comfy_instances": []},
                                          ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-                    result = {**result, "config_version": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]}
+                    # 和本地模式一致：/api/config 只给 api_providers，不再附带全局模型列表（/api/models 照旧）
+                    result = {"api_providers": result.get("api_providers") or [],
+                              "config_version": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]}
                 elif path == "/api/providers":
                     result = {"providers": result["api_providers"]}
                 elif path == "/api/models":

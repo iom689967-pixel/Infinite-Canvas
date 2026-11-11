@@ -272,7 +272,6 @@
         let kieParams = {};
         let kieParamsKey = '';
         const onlineKie = () => KieImageParams.isKie(providerById(provider));
-        let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
         let allHistory = [], currentIndex = 0, currentResult = null, currentLightboxData = null, isLoading = false;
         const PAGE_SIZE = 24;
         const SIZE_OPTIONS = {
@@ -330,7 +329,8 @@
             return imageProviders().find(p => p.id === id) || imageProviders()[0] || null;
         }
         function providerModels(id){
-            return uniqueModels(providerById(id)?.image_models || [models.gpt]);
+            // 只用平台自己配置的模型；没有模型时为空，不再凭空补一个 gpt-image-2
+            return uniqueModels(providerById(id)?.image_models || []);
         }
         /* ---- RunningHub：同一平台下同步模型 API / 工作流 / AI 应用。
          * 模型 API 直接提交原始模型名；value=app:ID / workflow:ID 走 RH 应用/工作流路径。 */
@@ -371,7 +371,7 @@
                     : `<option value="">${escapeHtml(tr('online.rhNoEntries'))}</option>`;
             } else {
                 const modelsForProvider = providerModels(provider);
-                if(!modelsForProvider.includes(selectedModel)) selectedModel = modelsForProvider[0] || models.gpt;
+                if(!modelsForProvider.includes(selectedModel)) selectedModel = modelsForProvider[0] || '';
                 modelSelect.innerHTML = modelsForProvider.map(m => `<option value="${escapeHtml(m)}" ${m === selectedModel ? 'selected' : ''}>${escapeHtml(providerById(provider)?.model_names?.[m] || m)}</option>`).join('');
             }
             updateAdaptivePanel();
@@ -425,12 +425,10 @@
 
         async function initModels(){
             try {
+                // 平台和模型只来自 api_providers（/api/config 已不再返回全局模型列表）
                 const cfg = await fetch('/api/config').then(r=>r.json());
-                const imageModels = cfg.image_models || [];
-                models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
-                models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
                 apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-                selectedModel = providerModels(provider)[0] || models.gpt;
+                selectedModel = providerModels(provider)[0] || '';
             } catch(e) {}
             renderProviderControls();
         }
@@ -439,9 +437,6 @@
         async function refreshProvidersFromApiSettings(){
             try {
                 const cfg = await fetch('/api/config').then(r=>r.json());
-                const imageModels = cfg.image_models || [];
-                models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
-                models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
                 apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
             } catch(e) { return; }
             renderProviderControls();
