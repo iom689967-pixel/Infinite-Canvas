@@ -248,6 +248,7 @@ WORKBENCH_STATIC = frozenset([
     # 画布页面依赖的共享脚本（合并规则、提示词长度、Kie 参数校验）
     "/static/js/api-errors.js",
     "/static/js/stale-page.js",
+    "/static/js/workspace-socket.js",
     "/static/js/canvas-merge.js",
     "/static/js/kie-image-params.js",
     "/static/js/model-prompt-limits.js",

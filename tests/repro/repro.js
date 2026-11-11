@@ -946,6 +946,40 @@ async function c10ClassicEditorWithoutGateCode(browser) {
   record('C10_classic_editor_saves_without_list_refetch', pass, { saved: Boolean(saved), errors, listRequests, shownTitle });
 }
 
+// ---------------- C10：外壳页（index.html）的 WebSocket 断线后自动重连，重连后照常收到画布更新通知 ----------------
+// 修复前断开一次就再也不连，之后打开的画布只能靠轮询发现别处的修改。
+async function wsShellReconnects(browser) {
+  const p = await browser.newPage();
+  // 包一层 WebSocket，记录页面创建的每个连接和收到的消息类型（不改变行为）
+  await p.evaluateOnNewDocument(`(() => {
+    const Native = window.WebSocket; window.__ws = [];
+    window.WebSocket = function(url, protocols) {
+      const ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
+      const rec = { ws, url: String(url), messages: [] }; window.__ws.push(rec);
+      ws.addEventListener('message', e => { try { rec.messages.push(JSON.parse(e.data).type); } catch (_) {} });
+      return ws;
+    };
+    window.WebSocket.prototype = Native.prototype;
+    Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+  })()`);
+  await p.goto(`${B}/`, { waitUntil: 'domcontentloaded' });
+  const statsSockets = `window.__ws.filter(r => r.url.includes('/ws/stats') && r.url.includes('client_id=') && !r.url.includes('audit-'))`;
+  await p.waitForFunction(`${statsSockets}.some(r => r.ws.readyState === 1)`, { timeout: 15000 });
+  const firstCount = await p.evaluate(`${statsSockets}.length`);
+  await p.evaluate(`${statsSockets}.forEach(r => r.ws.close())`);
+  let reconnected = false;
+  try { await p.waitForFunction(`${statsSockets}.length > ${firstCount} && ${statsSockets}.at(-1).ws.readyState === 1`, { timeout: 8000 }); reconnected = true; } catch (e) {}
+  // 重连后在别处保存一张画布，新连接应收到 canvas_updated
+  const id = await createTestCanvas('classic', [{ id: 'audit-ws', type: 'text', x: 1, y: 1, text: 'ws' }]);
+  const c = await getCanvas(id);
+  await api('PUT', `/api/canvases/${id}`, { nodes: [{ id: 'audit-ws', type: 'text', x: 2, y: 1, text: 'ws' }], connections: [], base_updated_at: c.updated_at, client_id: 'audit-ws-writer' });
+  let gotUpdate = false;
+  for (let i = 0; i < 20 && !gotUpdate; i++) { await sleep(250); gotUpdate = reconnected && await p.evaluate(`${statsSockets}.at(-1).messages.includes('canvas_updated')`); }
+  const sockets = await p.evaluate(`${statsSockets}.length`);
+  await p.close();
+  record('WS_shell_socket_reconnects_and_keeps_receiving_updates', reconnected && gotUpdate, { firstCount, sockets, reconnected, gotUpdate });
+}
+
 (async () => {
   const only = (process.env.REPRO_ONLY || '').split(',').map(s => s.trim()).filter(Boolean);
   const want = name => !only.length || only.some(o => name.startsWith(o));
@@ -966,6 +1000,7 @@ async function c10ClassicEditorWithoutGateCode(browser) {
     ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C10', () => c10ClassicEditorWithoutGateCode(browser)],
+    ['WS', () => wsShellReconnects(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
