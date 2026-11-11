@@ -6883,6 +6883,16 @@ window.addEventListener('beforeunload', event => {
     event.preventDefault();
     event.returnValue = '';
 });
+async function fetchSmartServerCanvasForMerge(id){
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}`, {cache:'no-store'});
+        if(!res.ok) return null;
+        const data = await res.json();
+        return data?.canvas?.id === id ? data.canvas : null;
+    } catch(e) {
+        return null;
+    }
+}
 async function performSmartCanvasSave(){
     canvasSyncInFlight = true;
     try {
@@ -6897,7 +6907,9 @@ async function performSmartCanvasSave(){
             });
             if(res.ok){
                 const data = await res.json();
-                if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
+                // C6：成功响应只有 updated_at（旧后端会带整张画布，这里只取它的 updated_at）。
+                const savedUpdatedAt = Number(data.updated_at || data.canvas?.updated_at || 0);
+                if(savedUpdatedAt) canvas.updated_at = savedUpdatedAt;
                 // 服务器现在保存的正是这份节点（canvasForStorage 已深拷贝），作为下一次合并的基线。
                 smartSyncBaseNodes = storageCanvas.nodes || [];
                 smartSyncBaseConnections = storageCanvas.connections || [];
@@ -6907,11 +6919,12 @@ async function performSmartCanvasSave(){
             if(res.status !== 409) throw new Error(await smartResponseErrorMessage(res, `HTTP ${res.status}`));
             // 冲突：别人先保存了。按字段三方合并对方的状态（双方各自的改动都保留，图片取并集），
             // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
+            // C6：409 只带 updated_at，不再带整张画布，这里自己取服务器上的最新版本来合并；
+            // 取不到时报错重试，绝不只换个基线就重存（那会覆盖对方的修改）。
             const data = await res.json().catch(() => ({}));
-            const serverCanvas = data.detail?.canvas;
-            if(serverCanvas) applyMergedServerCanvas(serverCanvas);
-            else if(data.detail?.updated_at) canvas.updated_at = data.detail.updated_at;
-            else throw new Error('HTTP 409');
+            const serverCanvas = data.detail?.canvas || await fetchSmartServerCanvasForMerge(canvasId);
+            if(!serverCanvas) throw new Error('HTTP 409');
+            applyMergedServerCanvas(serverCanvas);
         }
         throw new Error(smartUiIsEnglish() ? 'Repeated save conflicts' : '连续保存冲突');
     } finally {

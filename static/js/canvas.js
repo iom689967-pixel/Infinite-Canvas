@@ -1490,6 +1490,16 @@ function serializableCanvasNode(node){
 function serializableCanvasNodes(list=nodes){
     return (list || []).map(serializableCanvasNode);
 }
+async function fetchServerCanvasForMerge(id){
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}`, {cache:'no-store'});
+        if(!res.ok) return null;
+        const data = await res.json();
+        return data?.canvas?.id === id ? data.canvas : null;
+    } catch(e) {
+        return null;
+    }
+}
 async function saveCanvas(){
     if(!canvas || applyingRemoteCanvas) return;
     if(savingCanvasNow){
@@ -1513,12 +1523,13 @@ async function saveCanvas(){
         if(res.status === 409){
             // 冲突：别人先保存了。三方合并对方的版本（双方的改动都保留），再以对方的 updated_at 为基底重存。
             // 以前这里直接拿对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）。
+            // C6：409 只带 updated_at，不再带整张画布，这里自己取服务器上的最新版本来合并。
             const data = await res.json().catch(() => ({}));
-            const remote = data.detail?.canvas || data.canvas;
             canvasConflictStreak += 1;
             if(canvasConflictStreak > 5) throw new Error('连续保存冲突');
-            if(remote) mergeRemoteCanvasIntoLocal(remote);
-            else lastCanvasUpdatedAt = Number(data.detail?.updated_at || data.updated_at || lastCanvasUpdatedAt || 0);
+            const remote = data.detail?.canvas || await fetchServerCanvasForMerge(canvas.id);
+            if(!remote) throw new Error('保存冲突后无法读取服务器上的画布');
+            mergeRemoteCanvasIntoLocal(remote);
             localCanvasDirty = true;
             saveCanvasAgain = true;
             setStatus('Merging...');
@@ -1528,11 +1539,9 @@ async function saveCanvas(){
         const data = await res.json().catch(() => ({}));
         canvasConflictStreak = 0;
         canvasSyncBaseJson = body; // 服务器现在保存的正是这份内容，作为下一次合并的基线
-        const localViewport = {...viewport};
-        // logs/title/icon 以本地为准：保存在途时可能已经合并过远端版本，不能被这次响应里的旧内容盖回去。
-        if(data.canvas) canvas = {...canvas, ...data.canvas, logs:canvas.logs, title:canvas.title, icon:canvas.icon, viewport:localViewport};
-        viewport = localViewport;
-        canvas.updated_at = Number(canvas.updated_at || Date.now());
+        // C6：成功响应只有 updated_at（旧后端会带整张画布，这里只取它的 updated_at）。
+        const savedUpdatedAt = Number(data.updated_at || data.canvas?.updated_at || 0);
+        canvas.updated_at = savedUpdatedAt || Number(canvas.updated_at || Date.now());
         lastCanvasUpdatedAt = canvas.updated_at;
         localCanvasDirty = Boolean(saveCanvasAgain);
         if(currentCanvasTime) currentCanvasTime.textContent = formatCanvasTime(canvas.updated_at);

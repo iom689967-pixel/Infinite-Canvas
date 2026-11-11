@@ -58,11 +58,12 @@ class CanvasSaveSemanticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["settings"], {})
         self.assertEqual(after["nodes"], [{"id": "n", "x": 1}])
 
-    async def test_conflict_contract_unchanged(self):
+    async def test_conflict_contract(self):
         cur = await self.current()
         res = await self.client.put(f"/api/canvases/{self.cid}", json={"nodes": [], "base_updated_at": cur["updated_at"] - 1})
         self.assertEqual(res.status_code, 409)
-        self.assertEqual(sorted(res.json()["detail"].keys()), ["canvas", "message", "updated_at"])
+        # C6：409 不再带回整张画布（编辑器自己 GET 最新版本再合并）
+        self.assertEqual(sorted(res.json()["detail"].keys()), ["message", "updated_at"])
         res = await self.client.put(f"/api/canvases/{self.cid}", json={"nodes": [{"id": "n", "x": 2}], "base_updated_at": 0})
         self.assertEqual(res.status_code, 200)
 

@@ -18599,9 +18599,9 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
         canvas = load_canvas(canvas_id)
         current_updated_at = int(canvas.get("updated_at") or 0)
         if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
+            # C6：不再带回整张画布（真实画布最大约 19MB）；编辑器收到 409 后自己 GET 最新版本再合并。
             raise HTTPException(status_code=409, detail={
                 "message": "画布已被其他页面更新，已拒绝旧版本覆盖。",
-                "canvas": canvas,
                 "updated_at": current_updated_at,
             })
         # C7：请求的基线早于最近一次 /meta 改名或改图标时，它带来的标题/图标是旧的，不再覆盖；
@@ -18626,8 +18626,10 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
         if "settings" in provided:
             canvas["settings"] = payload.settings or {}
         save_canvas(canvas)
-    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
-    return {"canvas": canvas}
+        updated_at = int(canvas.get("updated_at") or now_ms())
+    await manager.broadcast_canvas_updated(canvas_id, updated_at, payload.client_id)
+    # C6：保存成功只返回新的 updated_at，不再把刚收到的整张画布原样回传。
+    return {"updated_at": updated_at}
 
 @app.post("/api/canvases/{canvas_id}/logs/delete")
 async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):

@@ -348,15 +348,19 @@ class Checks:
         self.record(g, "omitted_fields_preserved", ok,
                     f"status={st} title={'kept' if after['title'] == title else after['title']!r} icon={after['icon']!r} logs={len(after['logs'])} settings={after['settings']} nodes={len(after['nodes'])}")
 
-        st, _, _, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"logs": [], "settings": {}, "base_updated_at": after["updated_at"]})
+        st, _, data, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"logs": [], "settings": {}, "base_updated_at": after["updated_at"]})
         after2 = self.get_canvas(cid)
+        put_keys = sorted(data.keys()) if isinstance(data, dict) else []
+        self.record(g, "put_success_returns_only_updated_at", st == 200 and put_keys == ["updated_at"] and data.get("updated_at") == after2["updated_at"],
+                    f"status={st} keys={put_keys}")
         nodes_kept = bool(after2["nodes"]) and after2["nodes"][0].get("x") == 999
         self.record(g, "explicit_fields_still_update", st == 200 and after2["logs"] == [] and after2["settings"] == {} and nodes_kept,
                     f"status={st} logs={len(after2['logs'])} settings={after2['settings']} nodes_kept={nodes_kept}")
 
         st, _, data, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"nodes": moved, "base_updated_at": after2["updated_at"] - 1})
         keys = sorted((data or {}).get("detail", {}).keys()) if isinstance((data or {}).get("detail"), dict) else []
-        self.record(g, "stale_base_409_contract_unchanged", st == 409 and keys == ["canvas", "message", "updated_at"], f"status={st} detail keys={keys}")
+        # C6：409 不再带回整张画布，只有提示和服务器的 updated_at
+        self.record(g, "stale_base_409_returns_only_updated_at", st == 409 and keys == ["message", "updated_at"], f"status={st} detail keys={keys}")
         st, _, _, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"nodes": moved, "base_updated_at": 0})
         self.record(g, "base_zero_still_accepted(unchanged)", st == 200, f"status={st}")
 
