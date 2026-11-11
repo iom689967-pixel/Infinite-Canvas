@@ -643,6 +643,36 @@ async function c8ClassicSameOutputBothImages(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- RunningHub：打开画布时只预取保存过参数的工作流，不再对没有参数的条目产生 404 ----------------
+async function rhPrefetchSkipsUnsavedWorkflows(browser) {
+  const cfg = (await api('GET', '/api/config')).json;
+  const rh = (cfg.api_providers || []).find(p => p.id === 'runninghub' && p.enabled !== false);
+  const nonEmpty = v => Array.isArray(v) ? v.length > 0 : Boolean(v && typeof v === 'object' && Object.keys(v).length);
+  const entries = rh?.rh_workflows || [];
+  const saved = entries.filter(e => nonEmpty(e.fields) || nonEmpty(e.workflowJson) || nonEmpty(e.raw)).map(e => String(e.workflowId || e.id));
+  const unsaved = entries.map(e => String(e.workflowId || e.id)).filter(id => !saved.includes(id));
+  const views = {};
+  for (const kind of ['classic', 'smart']) {
+    const id = await createTestCanvas(kind, kind === 'smart' ? smartNodes() : classicNodes());
+    const page = await browser.newPage();
+    const seen = [];
+    page.on('response', r => {
+      const m = new URL(r.url()).pathname.match(/^\/api\/runninghub\/workflows\/([^/]+)$/);
+      if (m && r.request().method() === 'GET') seen.push({ id: decodeURIComponent(m[1]), status: r.status() });
+    });
+    await page.goto(`${B}/static/${kind === 'smart' ? 'smart-canvas' : 'canvas'}.html?id=${id}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(`typeof canvas!=='undefined' && canvas && Array.isArray(nodes) && nodes.length > 0`, { timeout: 20000 });
+    await sleep(4000);
+    views[kind] = { requested: seen.map(s => s.id), notFound: seen.filter(s => s.status === 404).map(s => s.id) };
+    await page.close();
+  }
+  const pass = unsaved.length > 0 && saved.length > 0
+    && ['classic', 'smart'].every(k => views[k].notFound.length === 0
+      && unsaved.every(u => !views[k].requested.includes(u))
+      && saved.every(sv => views[k].requested.includes(sv)));
+  record('RH_prefetch_skips_workflows_without_saved_params', pass, { saved, unsaved, views });
+}
+
 // ---------------- A4 + A6：设置页增删改平台/模型后，已打开的画布不刷新就能看到一致的下拉 ----------------
 // 用真实的外壳页（index.html）嵌入设置页、普通画布、智能画布三个 iframe，和实际使用时的结构一致；
 // 修复前外壳页会把设置页的通知再转发给每个 iframe，一次保存会让画布重复加载配置（A6）。
@@ -806,6 +836,7 @@ async function apiSemantics() {
     ['GEN', () => genSmartWhileSaving(browser)], ['GEN', () => genSmartDuring409(browser)], ['GEN', () => genSmartTwoTabsHistory(browser)],
     ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
     ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
+    ['RH', () => rhPrefetchSkipsUnsavedWorkflows(browser)],
     ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C6', () => apiSemantics()],

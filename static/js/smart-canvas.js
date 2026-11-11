@@ -4834,6 +4834,12 @@ function loadConfig(){
     configLoadInFlight = loadConfigOnce().finally(() => { configLoadInFlight = null; });
     return configLoadInFlight;
 }
+// 与后端 runninghub_workflow_config_has_payload 同一判断：保存过参数（fields / workflowJson / raw 任一非空）。
+// 只有标题和缩略图、从没拉取过参数的条目，后端必然返回 404，预取时跳过；真正用到时仍会按需获取。
+function runningHubEntryHasSavedParams(entry){
+    const nonEmpty = value => Array.isArray(value) ? value.length > 0 : Boolean(value && typeof value === 'object' && Object.keys(value).length);
+    return nonEmpty(entry?.fields) || nonEmpty(entry?.workflowJson) || nonEmpty(entry?.raw);
+}
 async function loadConfigOnce(){
     configLoadCount += 1;
     try {
@@ -4861,7 +4867,7 @@ async function loadConfigOnce(){
         if(configChanged){
             runningHubWorkflowCache = {};
             const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-            const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+            const rhWorkflowIds = (rhProvider?.rh_workflows || []).filter(runningHubEntryHasSavedParams).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
             await Promise.all(rhWorkflowIds.map(async workflowId => {
                 try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
             }));
