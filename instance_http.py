@@ -1,5 +1,6 @@
 """Default-deny HTTP/WebSocket session boundary for explicit single-person instances."""
 import asyncio
+import hashlib
 from http.cookies import SimpleCookie
 import hmac
 import json
@@ -282,7 +283,12 @@ class InstanceAuthMiddleware:
         try:
             if method == "GET" and path in {"/api/config", "/api/providers", "/api/models"}:
                 result = self.catalog()
-                if path == "/api/providers":
+                if path == "/api/config":
+                    # A6：与本地模式的 canvas_config_version 相同的算法（实例模式没有 ComfyUI 地址）
+                    payload = json.dumps({"api_providers": result.get("api_providers") or [], "comfy_instances": []},
+                                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+                    result = {**result, "config_version": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]}
+                elif path == "/api/providers":
                     result = {"providers": result["api_providers"]}
                 elif path == "/api/models":
                     result = {key: result[key] for key in ("chat_models", "image_models", "video_models")}

@@ -14312,12 +14312,20 @@ async def jimeng_query_media(payload: JimengQueryMediaRequest):
     except HTTPException as exc:
         return {"status": "failed", "submit_id": submit_id, "kind": kind, "error": str(getattr(exc, "detail", "") or exc)}
 
+def canvas_config_version(api_providers, comfy_instances=()):
+    """A6：画布用来判断配置是否真的变了。只由平台列表和 ComfyUI 地址决定，内容不变版本号就不变。"""
+    payload = json.dumps({"api_providers": api_providers, "comfy_instances": list(comfy_instances or [])},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
 @app.get("/api/config")
 async def ai_config():
     preferred_chat_model = next((m for m in CHAT_MODELS if m == "gpt-5.5"), CHAT_MODELS[0] if CHAT_MODELS else CHAT_MODEL)
     providers = public_api_providers()
+    # A4：不再返回旧的 base_url（没有页面读取它，而且指向的是旧的默认平台地址）。
+    # chat_models / image_models 等全局列表仍保留给 online.html、gpt-chat.html 作兜底；画布已不再读取。
     return {
-        "base_url": AI_BASE_URL,
+        "config_version": canvas_config_version(providers, COMFYUI_INSTANCES),
         "chat_model": preferred_chat_model,
         "image_model": IMAGE_MODEL,
         "chat_models": CHAT_MODELS,

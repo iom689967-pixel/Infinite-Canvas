@@ -310,11 +310,11 @@ function trf(key, vars={}){
     return text;
 }
 function setStatus(text){ statusEl.textContent = text || ''; }
+// A6：配置变更只走 BroadcastChannel('studio-api') 一个通道。同源的标签页和 iframe 都能直接收到，
+// 以前再额外 postMessage 给 parent/top、外壳页又转发给每个 iframe，一次保存会让画布重复加载 2–3 次。
 function broadcastStudioApiChange(type='providers-changed'){
     const message = { type, updated_at:Date.now() };
     try { new BroadcastChannel('studio-api').postMessage(message); } catch(e) {}
-    try { window.parent?.postMessage(message, '*'); } catch(e) {}
-    try { window.top?.postMessage(message, '*'); } catch(e) {}
 }
 function rhEditorSideScrollEl(){
     return rhWorkflowEditorNodeList?.closest?.('.rh-workflow-editor-side') || rhWorkflowEditorNodeList;

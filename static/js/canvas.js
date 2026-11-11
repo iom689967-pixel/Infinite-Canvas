@@ -230,6 +230,8 @@ function applyLanguage(lang){
 async function refreshCanvasConfigFromSettings(){
     const loaded = await loadConfig();
     // 拉取失败时不清理、不改写任何节点：失败不等于“配置为空”（A2）。
+    // 配置和工作流都没变化时（例如切回画布的兜底刷新）不重新渲染（A6）。
+    if(loaded && !lastConfigLoadChanged) return;
     if(loaded){
         pruneMissingComfyWorkflows();
         (nodes || []).forEach(node => {
@@ -243,9 +245,6 @@ window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-lang') applyLanguage(event.data.lang);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed'){
-        refreshCanvasConfigFromSettings();
-    }
     if(event.data?.type === 'canvas-focus'){
         // 从其他标签页切换回画布时，重新拉取工作流列表并刷新节点
         refreshCanvasConfigFromSettings();
@@ -413,27 +412,21 @@ let remoteSyncTimer = null;
 let remoteSyncInterval = null;
 let remoteSyncBusy = false;
 let lastCanvasUpdatedAt = 0;
+// 旧节点里的 'gpt' / 'nano' 别名解析成已配置平台里的具体模型（见 loadConfig）。
+// A4：平台和模型只来自 /api/config 的 api_providers，不再读取旧的全局模型列表字段。
 let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
-let imageModels = ['gpt-image-2', 'nano-banana-pro'];
-let chatModels = ['gpt-4o-mini'];
-let videoModels = [];
-let msChatModels = [];
 let apiProviders = [];
 let comfyBackendCount = 1;
 let comfyWorkflows = [];
 let comfyWorkflowCache = {};
 let runningHubWorkflowCache = {};
 let managedProviderId = '';
-let localImageModels = [];
-let localChatModels = [];
 const MS_GEN_MODELS = {
     zimage:    { label: 'ZImage',     modelId: 'Tongyi-MAI/Z-Image-Turbo',            supportsImage: false, endpoint: '/generate'            },
     qwen_edit: { label: 'Qwen Edit',  modelId: 'Qwen/Qwen-Image-Edit-2511',            supportsImage: true,  endpoint: '/api/angle/generate'  },
     klein_edit:{ label: 'Klein',      modelId: 'black-forest-labs/FLUX.2-klein-9B',   supportsImage: true,  endpoint: '/api/ms/generate'     },
     custom:    { label: '自定义', labelKey: 'canvas.custom', modelId: '',                acceptsImage: true,   endpoint: '/api/ms/generate'     }
 };
-let hasManagedImageModels = false;
-let hasManagedChatModels = false;
 let outputCompareDrag = false;
 let outputPreviewZoom = 1;
 let outputPreviewPan = {x: 0, y: 0};
@@ -556,35 +549,11 @@ const API_RATIO_VALUES = {
 };
 const RES_LONG_SIDE = { '1k':1536, '2k':2048, '4k':3840 };
 const RES_PIXEL_LIMIT = { '1k':1572864, '2k':4194304, '4k':8294400 };
-const CUSTOM_IMAGE_MODELS_KEY = 'canvas_custom_image_models';
-const MANAGED_IMAGE_MODELS_KEY = 'canvas_image_models_ordered';
-const MANAGED_CHAT_MODELS_KEY = 'canvas_chat_models_ordered';
 const CANVAS_THEME_KEY = 'canvas_theme';
 const QUICK_TOOLBAR_COLLAPSED_KEY = 'canvas_quick_toolbar_collapsed';
 const CANVAS_SESSION_VIEWPORTS_KEY = 'canvas_session_viewports_v1';
 let canvasSessionViewportFallback = {};
 let quickToolbarExpanded = false;
-const DEFAULT_VIDEO_MODELS = [
-    // Veo
-    'veo2', 'veo2-fast', 'veo2-pro',
-    'veo3', 'veo3-fast', 'veo3-pro',
-    'veo3.1', 'veo3.1-fast', 'veo3.1-quality', 'veo3.1-lite',
-    // Sora
-    'sora-2', 'sora-2-pro',
-    // 通义万相
-    'wan2.6-t2v', 'wan2.6-i2v',
-    'wan2.5-t2v-preview', 'wan2.5-i2v-preview',
-    'wan2.2-t2v-plus', 'wan2.2-i2v-plus', 'wan2.2-i2v-flash',
-    // Seedance
-    'doubao-seedance-2-0-260128',
-    'doubao-seedance-2-0-fast-260128',
-    'doubao-seedance-1-5-pro-251215',
-    'doubao-seedance-1-0-pro-250528',
-    'doubao-seedance-1-0-lite-t2v-250428',
-    'doubao-seedance-1-0-lite-i2v-250428',
-    // Agnes
-    'agnes-video-v2.0'
-];
 
 function uid(prefix='n'){ return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`; }
 function loadLocalViewportMap(){
@@ -645,26 +614,6 @@ function toggleQuickToolbar(){
     const toolbar = document.getElementById('quickToolbar');
     quickToolbarExpanded = Boolean(toolbar?.classList.contains('collapsed'));
     applyQuickToolbarState();
-}
-function loadLocalModelLists(){
-    try {
-        const managedRaw = localStorage.getItem(MANAGED_IMAGE_MODELS_KEY);
-        const raw = JSON.parse(managedRaw || localStorage.getItem(CUSTOM_IMAGE_MODELS_KEY) || '[]');
-        localImageModels = Array.isArray(raw) ? raw.filter(Boolean) : [];
-        hasManagedImageModels = Boolean(managedRaw);
-    } catch(e) {
-        localImageModels = [];
-        hasManagedImageModels = false;
-    }
-    try {
-        const managedRaw = localStorage.getItem(MANAGED_CHAT_MODELS_KEY);
-        const raw = JSON.parse(managedRaw || '[]');
-        localChatModels = Array.isArray(raw) ? raw.filter(Boolean) : [];
-        hasManagedChatModels = Boolean(managedRaw);
-    } catch(e) {
-        localChatModels = [];
-        hasManagedChatModels = false;
-    }
 }
 function uniqueModels(list){
     const seen = new Set();
@@ -839,8 +788,7 @@ function modelscopeLoraOptions(loras, selectedId){
     }).join('');
 }
 function allChatModels(){
-    const providerModels = chatApiProviders().flatMap(p => p.chat_models || []);
-    return uniqueModels(hasManagedChatModels ? localChatModels : [...providerModels, ...chatModels, ...localChatModels]);
+    return uniqueModels(chatApiProviders().flatMap(p => p.chat_models || []));
 }
 function resolveImageModel(value){
     if(value === 'gpt') return models.gpt;
@@ -868,7 +816,8 @@ function normalizedImageQuality(value){
 }
 function resolveChatModel(value, providerId=''){
     const providerModels = providerId ? providerChatModels(providerId) : [];
-    return value || providerModels[0] || allChatModels()[0] || chatModels[0] || 'gpt-4o-mini';
+    // A4：没有任何已配置的对话模型时返回空，由调用方提示，不再凭空用旧环境变量里的模型。
+    return value || providerModels[0] || allChatModels()[0] || '';
 }
 function showErrorModal(message, title=tr('canvas.generationFailed')){
     if(!errorModal || !errorMessage){
@@ -1615,43 +1564,80 @@ async function fetchJsonOrThrow(url){
     return res.json();
 }
 // 返回 true 表示 /api/config 加载成功。失败时保留上一次的配置，不再用假的默认平台顶替。
-async function loadConfig(){
-    loadLocalModelLists();
+// A6：同一时间只跑一个请求；进行中又被触发时，只在它结束后再补跑一次（保证拿到最新配置）。
+// 每次加载记录服务端的 config_version 和工作流列表，lastConfigLoadChanged 表示这次是否真有变化。
+let configLoadInFlight = null;
+let configLoadQueued = null;
+let appliedConfigVersion = '';
+let appliedWorkflowsJson = '';
+let lastConfigLoadChanged = false;
+let configLoadCount = 0;
+function loadConfig(){
+    if(configLoadInFlight){
+        if(!configLoadQueued){
+            configLoadQueued = configLoadInFlight.catch(() => false).then(() => {
+                configLoadQueued = null;
+                return loadConfig();
+            });
+        }
+        return configLoadQueued;
+    }
+    configLoadInFlight = loadConfigOnce().finally(() => { configLoadInFlight = null; });
+    return configLoadInFlight;
+}
+function imageModelAliasesFromProviders(){
+    const list = uniqueModels(imageApiProviders().flatMap(p => p.image_models || []));
+    models.nano = list.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
+    models.gpt = list.find(m => !m.toLowerCase().includes('nano')) || 'gpt-image-2';
+}
+async function loadConfigOnce(){
+    configLoadCount += 1;
     let cfg;
     try {
         cfg = await fetchJsonOrThrow('/api/config');
     } catch(e) {
         console.warn('API 配置加载失败，保留当前配置', e);
         setStatus(tr('canvas.apiConfigLoadFailed'));
+        lastConfigLoadChanged = false;
         return false;
     }
-    imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
-    chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
-    videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
-    msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
-    comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
-    apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-    models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
-    models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
+    // 没有版本号（旧后端）时视为有变化
+    const version = String(cfg.config_version || '');
+    const configChanged = !version || version !== appliedConfigVersion || !apiConfigLoaded;
+    if(configChanged){
+        comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
+        apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
+        imageModelAliasesFromProviders();
+        appliedConfigVersion = version;
+    }
     apiConfigLoaded = true;
+    let workflowsChanged = false;
     try {
         const wf = await fetchJsonOrThrow('/api/workflows');
-        comfyWorkflows = wf.workflows || [];
+        const nextWorkflows = wf.workflows || [];
+        const nextJson = JSON.stringify(nextWorkflows);
+        workflowsChanged = nextJson !== appliedWorkflowsJson || !comfyWorkflowsLoaded;
+        comfyWorkflows = nextWorkflows;
+        appliedWorkflowsJson = nextJson;
         comfyWorkflowsLoaded = true;
     } catch(_) {
         // 工作流列表拉取失败：保留上一次的列表；从未成功过时 pruneMissingComfyWorkflows 不会清空节点。
         console.warn('ComfyUI 工作流列表加载失败，保留当前列表');
     }
-    runningHubWorkflowCache = {};
-    const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-    const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
-    await Promise.all(rhWorkflowIds.map(async workflowId => {
-        try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
-    }));
+    lastConfigLoadChanged = configChanged || workflowsChanged;
+    if(configChanged){
+        runningHubWorkflowCache = {};
+        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+        await Promise.all(rhWorkflowIds.map(async workflowId => {
+            try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
+        }));
+    }
     return true;
 }
 
-// 监听 API 设置页面的变更广播，实时刷新画布的模型/平台下拉
+// A6：配置变更只走一个通知通道——设置页发出的 BroadcastChannel('studio-api')。
+// 同源的标签页和 iframe 都能直接收到（实例模式下按账号隔离），外壳页不再转发 postMessage。
 try {
     const apiChannel = new BroadcastChannel('studio-api');
     apiChannel.onmessage = async (e) => {
@@ -2753,7 +2739,7 @@ function addVideoNode(point){
         x:p.x,
         y:p.y,
         apiProvider:providerId,
-        model:models[0] || videoModels[0] || DEFAULT_VIDEO_MODELS[0],
+        model:models[0] || '',
         duration:5,
         aspectRatio:'16:9',
         resolution:'',
@@ -13626,6 +13612,7 @@ async function callCanvasLLM(node, message, messages=[], options={}){
     if(providerProblem) throw new Error(providerProblem);
     const llmProv = resolveChatProviderId(node.llmProvider || '');
     const model = resolveChatModel(node.model || node.llmMsModel, llmProv);
+    if(!model) throw new Error(tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加');
     const images = llmInputImages(node);
     const videos = llmInputVideos(node);
     const result = await cascadeFetch('/api/canvas-llm', {

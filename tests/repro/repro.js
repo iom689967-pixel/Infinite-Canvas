@@ -643,6 +643,108 @@ async function c8ClassicSameOutputBothImages(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- A4 + A6：设置页增删改平台/模型后，已打开的画布不刷新就能看到一致的下拉 ----------------
+// 用真实的外壳页（index.html）嵌入设置页、普通画布、智能画布三个 iframe，和实际使用时的结构一致；
+// 修复前外壳页会把设置页的通知再转发给每个 iframe，一次保存会让画布重复加载配置（A6）。
+async function a4a6SettingsChangesReachOpenCanvases(browser) {
+  const PID = 'audit-a4-provider';
+  const classicId = await createTestCanvas('classic', [{ id: 'audit-g1', type: 'generator', x: 100, y: 100, apiProvider: '', model: '' }]);
+  const smartId = await createTestCanvas('smart', smartNodes());
+  const shell = await browser.newPage();
+  shell.on('pageerror', e => log('pageerror(shell)', e.message));
+  await shell.goto(`${B}/`, { waitUntil: 'domcontentloaded' });
+  // 浏览器里残留的旧 key：以前普通画布会用它完全替代服务端的对话模型列表（A4）
+  await shell.evaluate(`localStorage.setItem('canvas_chat_models_ordered', JSON.stringify(['audit-legacy-chat-model']))`);
+  await shell.evaluate(`(() => {
+    for (const [name, src] of [['audit-settings', '/static/api-settings.html'], ['audit-classic', '/static/canvas.html?id=${classicId}'], ['audit-smart', '/static/smart-canvas.html?id=${smartId}']]) {
+      const f = document.createElement('iframe'); f.name = name; f.src = src; f.style.cssText = 'position:fixed;left:0;top:0;width:1400px;height:900px;z-index:99999;background:#fff';
+      document.body.appendChild(f);
+    }
+  })()`);
+  const frameOf = name => shell.frames().find(f => f.name() === name);
+  let settingsFrame, classic, smart;
+  for (let i = 0; i < 100 && !(settingsFrame && classic && smart); i++) { await sleep(200); settingsFrame = frameOf('audit-settings'); classic = frameOf('audit-classic'); smart = frameOf('audit-smart'); }
+  await settingsFrame.waitForFunction(`typeof providers !== 'undefined' && Array.isArray(providers) && providers.length > 0 && typeof saveProviders === 'function'`, { timeout: 20000 });
+  await classic.waitForFunction(`typeof canvas!=='undefined' && canvas && canvas.id===${JSON.stringify(classicId)} && nodes.length===1`, { timeout: 20000 });
+  await smart.waitForFunction(`typeof canvas!=='undefined' && canvas && Array.isArray(nodes) && nodes.length===2`, { timeout: 20000 });
+  await sleep(3000);
+  // 按浏览器实际发出的 /api/config 请求计数（A6），修复前后的代码都能比较
+  const configRequests = { classic: 0, smart: 0 };
+  shell.on('request', r => {
+    if (new URL(r.url()).pathname !== '/api/config') return;
+    if (r.frame() === classic) configRequests.classic += 1;
+    if (r.frame() === smart) configRequests.smart += 1;
+  });
+  const saveFromSettings = async mutate => {
+    const ok = await settingsFrame.evaluate(`(async () => { ${mutate}; renderEditor(); return await saveProviders(); })()`);
+    await sleep(3000);
+    return ok;
+  };
+  const observe = async () => {
+    const cfg = (await api('GET', '/api/config')).json;
+    const providers = (cfg.api_providers || []).filter(p => p.enabled !== false && (p.image_models || []).length);
+    const chatModels = [...new Set((cfg.api_providers || []).filter(p => p.enabled !== false).flatMap(p => p.chat_models || []).map(m => String(m).trim()).filter(Boolean))];
+    const target = (cfg.api_providers || []).find(p => p.id === PID);
+    const classicView = await classic.evaluate(`(() => {
+      const el = document.querySelector('[data-id="audit-g1"]');
+      const opts = sel => [...(el?.querySelectorAll(sel + ' option') || [])];
+      return {
+        providers: opts('.provider-select').filter(o => !o.textContent.startsWith('⚠') && o.value).map(o => o.value),
+        stale: opts('.provider-select').filter(o => o.textContent.startsWith('⚠')).map(o => o.value),
+        models: opts('.model-select').filter(o => !o.disabled).map(o => o.value),
+        chatModels: allChatModels(),
+      };
+    })()`);
+    const smartView = await smart.evaluate(`(() => ({
+      providers: [...document.querySelectorAll('#dynamicParams [data-smart-param="provider_id"]')].map(b => b.dataset.smartValue),
+      models: [...document.querySelectorAll('#dynamicParams [data-smart-param="model"]')].map(b => b.dataset.smartValue),
+      selected: settings.provider_id,
+    }))()`);
+    return {
+      expected: {
+        classicProviders: providers.filter(p => p.id !== 'modelscope').map(p => p.id),
+        smartProviders: providers.filter(p => p.id !== 'modelscope' && p.id !== 'volcengine').map(p => p.id),
+        targetModels: target ? target.image_models : null,
+        chatModels,
+      },
+      classic: classicView, smart: smartView,
+    };
+  };
+  const steps = {};
+  const loadsBefore = { ...configRequests };
+  // 1) 新增平台（一个图片模型）
+  steps.add = { saved: await saveFromSettings(`providers.push({id:${JSON.stringify(PID)}, name:'Audit A4', enabled:true, protocol:'openai', base_url:'http://127.0.0.1:9/v1', image_models:['audit-img-1'], chat_models:[], video_models:[]}); selectedId = ${JSON.stringify(PID)}`) };
+  // 两个画布里都选中这个新平台（普通画布：节点上的平台下拉；智能画布：参数面板的平台选项）
+  await classic.evaluate(`(() => { const s = document.querySelector('[data-id="audit-g1"] .provider-select'); s.value = ${JSON.stringify(PID)}; s.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  await smart.evaluate(`document.querySelector('#dynamicParams [data-smart-param="provider_id"][data-smart-value=${JSON.stringify(PID)}]')?.click()`);
+  await sleep(800);
+  steps.add.view = await observe();
+  // 2) 修改：给这个平台加一个模型
+  steps.modify = { saved: await saveFromSettings(`providers.find(p => p.id === ${JSON.stringify(PID)}).image_models.push('audit-img-2'); selectedId = ${JSON.stringify(PID)}`) };
+  steps.modify.view = await observe();
+  // 3) 删除这个平台
+  steps.remove = { saved: await saveFromSettings(`providers = providers.filter(p => p.id !== ${JSON.stringify(PID)}); selectedId = providers[0]?.id || ''`) };
+  steps.remove.view = await observe();
+  const loadsAfter = { ...configRequests };
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const checks = {
+    saved: steps.add.saved && steps.modify.saved && steps.remove.saved,
+    add: same(steps.add.view.classic.providers, steps.add.view.expected.classicProviders) && same(steps.add.view.smart.providers, steps.add.view.expected.smartProviders)
+      && same(steps.add.view.classic.models, ['audit-img-1']) && same(steps.add.view.smart.models, ['audit-img-1']),
+    modify: same(steps.modify.view.classic.providers, steps.modify.view.expected.classicProviders) && same(steps.modify.view.smart.providers, steps.modify.view.expected.smartProviders)
+      && same(steps.modify.view.classic.models, ['audit-img-1', 'audit-img-2']) && same(steps.modify.view.smart.models, ['audit-img-1', 'audit-img-2']),
+    remove: same(steps.remove.view.classic.providers, steps.remove.view.expected.classicProviders) && same(steps.remove.view.smart.providers, steps.remove.view.expected.smartProviders)
+      && !steps.remove.view.smart.providers.includes(PID) && steps.remove.view.expected.targetModels === null,
+    // A4：普通画布的对话模型只来自已配置的平台，不受 localStorage 旧 key 和旧全局列表影响
+    chatModelsFromProviders: [steps.add, steps.modify, steps.remove].every(step => same(step.view.classic.chatModels, step.view.expected.chatModels)),
+    // A6：三次保存，每个画布各请求 /api/config 3 次（每次保存一次），不再重复加载
+    oneLoadPerSave: loadsAfter.classic - loadsBefore.classic === 3 && loadsAfter.smart - loadsBefore.smart === 3,
+  };
+  record('A4_A6_settings_changes_reach_open_canvases', Object.values(checks).every(Boolean), { checks, loadsBefore, loadsAfter, steps });
+  await shell.evaluate(`localStorage.removeItem('canvas_chat_models_ordered')`).catch(() => {});
+  await shell.close();
+}
+
 // ---------------- C7：编辑器打开时在列表里改名，编辑器之后的保存不能把名字改回去 ----------------
 async function c7EditorKeepsListRename(browser, kind) {
   const smart = kind === 'smart';
@@ -704,6 +806,7 @@ async function apiSemantics() {
     ['GEN', () => genSmartWhileSaving(browser)], ['GEN', () => genSmartDuring409(browser)], ['GEN', () => genSmartTwoTabsHistory(browser)],
     ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
     ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
+    ['A4', () => a4a6SettingsChangesReachOpenCanvases(browser)],
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C6', () => apiSemantics()],
   ];

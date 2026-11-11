@@ -251,8 +251,6 @@
         }
         window.addEventListener('message', event => {
             if(event.data?.type === 'studio-lang') applyLanguage(event.data.lang);
-            // API 设置页通过 postMessage 通知平台/模型变更（iframe 内嵌场景）
-            if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed') scheduleProviderRefresh();
         });
         window.addEventListener('studio-lang-change', () => {
             document.title = tr('online.title');

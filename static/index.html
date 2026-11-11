@@ -1705,24 +1705,8 @@
             resetStudioRootScroll();
         }
 
-        function forwardStudioApiChange(data) {
-            if(!data || !['providers-changed','workflows-changed','comfy-instances-changed'].includes(data.type)) return;
-            document.querySelectorAll('iframe').forEach(iframe => {
-                try {
-                    if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage(data, '*');
-                } catch(e) {}
-            });
-        }
-
-        window.addEventListener('message', event => {
-            if (event.origin && event.origin !== location.origin) return;
-            forwardStudioApiChange(event.data);
-        });
-
-        try {
-            const studioApiChannel = new BroadcastChannel('studio-api');
-            studioApiChannel.onmessage = event => forwardStudioApiChange(event.data);
-        } catch(e) {}
+        // A6：平台/工作流/ComfyUI 地址变更只走 BroadcastChannel('studio-api')，各 iframe 直接收到，
+        // 外壳页不再把它转发成 postMessage（以前会让画布对同一次保存重复加载配置）。
 
         function restoreActivePage() {
             restoreSidebarPinned();

@@ -248,8 +248,8 @@ async function saveComfyInstances(){
         const data = await res.json();
         comfyInstances = data.instances || cleaned;
         renderComfyInstances();
+        // A6：只走 BroadcastChannel 一个通道
         try { new BroadcastChannel('studio-api').postMessage({ type: 'comfy-instances-changed' }); } catch(e) {}
-        try { window.parent?.postMessage({ type: 'comfy-instances-changed' }, '*'); } catch(e) {}
         setStatus('ComfyUI 后端地址已保存');
     } catch(e){
         alert(e.message || '保存失败');

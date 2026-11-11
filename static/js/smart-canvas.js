@@ -2573,7 +2573,7 @@ function volcengineProvider(){
         id:'volcengine',
         name:'火山引擎',
         image_models:[],
-        video_models:DEFAULT_VIDEO_MODELS,
+        video_models:[],
         enabled:true
     };
 }
@@ -3018,7 +3018,6 @@ function modelscopeProvider(){
 function modelscopeImageModels(){
     return modelscopeProvider()?.image_models || ['Tongyi-MAI/Z-Image-Turbo'];
 }
-const DEFAULT_VIDEO_MODELS = ['veo3-fast','veo3','sora','runway','kling','pika','minimax-video','wan-v2','seedance-1.0-pro','jimeng-vide-3.0','jimeng-video-3.0-pro'];
 function videoApiProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
 }
@@ -3032,8 +3031,9 @@ function providerVideoModels(providerId){
     return [...new Set(provider?.video_models || [])];
 }
 function volcengineVideoModels(){
+    // A4：只用 API 设置里火山引擎平台的视频模型；没配置时为空，不再给一份写死的其他厂商模型列表。
     const provider = (apiProviders || []).find(p => p.id === 'volcengine');
-    return [...new Set(provider?.video_models || DEFAULT_VIDEO_MODELS)];
+    return [...new Set(provider?.video_models || [])];
 }
 function renderVideoProviderControl(providers){
     const label = smartProviderPillLabel(settings.videoProvider, providers || [], tr('smart.platform'));
@@ -3373,7 +3373,7 @@ function renderVolcengineVideoParams(){
     const providers = [provider];
     const models = volcengineVideoModels();
     settings.videoProvider = 'volcengine';
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'seedance-1.0-pro';
+    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || '';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -4813,30 +4813,70 @@ function bindDynamicParams(){
 }
 // 返回 true 表示 /api/config 加载成功。失败时（含非 2xx）保留上一次的平台和工作流列表，
 // 不再把错误响应当成“没有平台 / 没有工作流”（A2）。
-async function loadConfig(){
+// A6：同一时间只跑一个请求；进行中又被触发时，只在它结束后再补跑一次（保证拿到最新配置）。
+// 每次加载记录服务端的 config_version 和工作流列表，lastConfigLoadChanged 表示这次是否真有变化。
+let configLoadInFlight = null;
+let configLoadQueued = null;
+let appliedConfigVersion = '';
+let appliedWorkflowsJson = '';
+let lastConfigLoadChanged = false;
+let configLoadCount = 0;
+function loadConfig(){
+    if(configLoadInFlight){
+        if(!configLoadQueued){
+            configLoadQueued = configLoadInFlight.catch(() => false).then(() => {
+                configLoadQueued = null;
+                return loadConfig();
+            });
+        }
+        return configLoadQueued;
+    }
+    configLoadInFlight = loadConfigOnce().finally(() => { configLoadInFlight = null; });
+    return configLoadInFlight;
+}
+async function loadConfigOnce(){
+    configLoadCount += 1;
     try {
         const cfgRes = await fetch('/api/config');
         if(!cfgRes.ok) throw new Error(`/api/config HTTP ${cfgRes.status}`);
         const cfg = await cfgRes.json();
-        apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-        comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
-        // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
-        sanitizeSmartApiSelection(settings);
-        updateProviderModels();
+        // 没有版本号（旧后端）时视为有变化
+        const version = String(cfg.config_version || '');
+        const configChanged = !version || version !== appliedConfigVersion || !smartApiConfigLoaded;
+        if(configChanged){
+            apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
+            comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
+            // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
+            sanitizeSmartApiSelection(settings);
+            updateProviderModels();
+        }
+        let workflowsChanged = false;
         const wf = await fetch('/api/workflows').then(r => r.ok ? r.json() : null).catch(() => null);
-        if(wf && Array.isArray(wf.workflows)) comfyWorkflows = wf.workflows;
-        runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
-        await Promise.all(rhWorkflowIds.map(async workflowId => {
-            try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
-        }));
+        if(wf && Array.isArray(wf.workflows)){
+            const nextJson = JSON.stringify(wf.workflows);
+            workflowsChanged = nextJson !== appliedWorkflowsJson;
+            comfyWorkflows = wf.workflows;
+            appliedWorkflowsJson = nextJson;
+        }
+        if(configChanged){
+            runningHubWorkflowCache = {};
+            const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+            const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+            await Promise.all(rhWorkflowIds.map(async workflowId => {
+                try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
+            }));
+        }
         lastConfigRefreshAt = Date.now();
         smartApiConfigLoaded = true;
-        sanitizeSmartApiSelection(settings);
-        updateProviderModels();
+        appliedConfigVersion = version;
+        lastConfigLoadChanged = configChanged || workflowsChanged;
+        if(lastConfigLoadChanged){
+            sanitizeSmartApiSelection(settings);
+            updateProviderModels();
+        }
         return true;
     } catch(e) {
+        lastConfigLoadChanged = false;
         toast(tr('smart.toastApiSettingsFail'));
         return false;
     }
@@ -4844,6 +4884,7 @@ async function loadConfig(){
 async function refreshSmartConfigFromSettings(){
     const loaded = await loadConfig();
     if(!loaded) return; // 拉取失败：不重渲染参数面板，也不把设置写回节点
+    if(!lastConfigLoadChanged) return; // 配置和工作流都没变化（例如窗口重新获得焦点的兜底刷新）：不重渲染（A6）
     renderDynamicParams();
     warnAboutMissingProviders();
     const node = selectedNode();
@@ -23506,6 +23547,7 @@ window.addEventListener('resize', () => {
     if(panoramaState.enabled) resizePanoramaViewer();
 });
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
+// A6：配置变更只走一个通知通道——设置页发出的 BroadcastChannel('studio-api')；外壳页不再转发 postMessage。
 try {
     const apiChannel = new BroadcastChannel('studio-api');
     apiChannel.onmessage = async event => {
@@ -23522,7 +23564,6 @@ window.addEventListener('focus', () => {
 window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-theme') applyTheme(event.data.theme || 'light');
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed') refreshSmartConfigFromSettings();
     if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
     if(event.data?.type === 'studio-lang' && window.StudioI18n) {
