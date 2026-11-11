@@ -881,40 +881,11 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
     refreshIcons();
 }
 function apiErrorMessage(data, fallback='请求失败'){
-    if(!data) return fallback;
-    if(typeof data === 'string') return data || fallback;
-    const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
-    if(Array.isArray(detail)){
-        const messages = detail.map(item => {
-            if(typeof item === 'string') return item;
-            const loc = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
-            const msg = item?.msg || item?.message || JSON.stringify(item);
-            return loc ? `${loc}: ${msg}` : msg;
-        }).filter(Boolean);
-        return messages.join('\n') || fallback;
-    }
-    if(detail && typeof detail === 'object'){
-        return detail.message || detail.msg || JSON.stringify(detail);
-    }
-    try {
-        return JSON.stringify(data);
-    } catch(e) {
-        return fallback;
-    }
+    return ApiErrors.message(data, fallback);
 }
 async function responseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        return apiErrorMessage(data, fallback);
-    } catch(e) {
-        try {
-            const text = await response.text();
-            return text || fallback;
-        } catch(_) {
-            return fallback;
-        }
-    }
+    // 只取 detail；不是 JSON 时截断，不把整段响应文本放进提示和日志
+    return ApiErrors.fromResponse(response, fallback);
 }
 function closeErrorModal(){
     if(errorModal) errorModal.classList.remove('open');
@@ -12766,7 +12737,7 @@ async function runMiniMaxRunningHub(node, media, options={}){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)
     }, {cascadeTargetId}).then(async r => {
-        const data = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+        const data = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
         if(!r.ok || data.success === false) throw miniMaxRunningHubPayloadError('提交', data, 'RunningHub 工作流提交失败', {
             endpoint:'/api/runninghub/workflow-submit',
             workflowId,
@@ -12781,7 +12752,7 @@ async function runMiniMaxRunningHub(node, media, options={}){
         if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
         await sleep(2500);
         const data = await cascadeFetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${rhUseWallet(rhNode) ? '1' : '0'}`, {}, {cascadeTargetId}).then(async r => {
-            const json = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+            const json = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
             if(!r.ok || json.success === false) throw miniMaxRunningHubPayloadError('查询', json, 'RunningHub 查询失败', {taskId, workflowId});
             return json.data || json;
         });
@@ -14419,7 +14390,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:(outputs || []).filter(Boolean),
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
-        error:error ? String(error) : '',
+        error:ApiErrors.forLog(error),
     };
     ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);

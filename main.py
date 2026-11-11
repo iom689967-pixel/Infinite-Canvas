@@ -893,23 +893,69 @@ FIELD_LABELS = {
     "system_prompt": "系统提示词",
 }
 
+def _validation_error_field(err):
+    loc = [str(item) for item in err.get("loc", []) if item != "body"]
+    return loc[-1] if loc else ""
+
 def friendly_validation_error(errors):
     parts = []
     for err in errors or []:
-        loc = [str(item) for item in err.get("loc", []) if item != "body"]
-        field = loc[-1] if loc else ""
-        label = FIELD_LABELS.get(field, field or "请求参数")
-        ctx = err.get("ctx") or {}
-        limit = ctx.get("limit_value") or ctx.get("max_length") or ctx.get("min_length")
         err_type = str(err.get("type") or "")
         msg = str(err.get("msg") or "")
+        ctx = err.get("ctx") or {}
+        if err_type == "json_invalid":
+            # loc 里的数字是出错位置，不是字段名
+            position = next((item for item in err.get("loc", []) if isinstance(item, int)), None)
+            where = f"（第 {position} 个字符附近）" if position is not None else ""
+            parts.append(f"请求体不是有效的 JSON{where}。")
+            continue
+        if tuple(err.get("loc") or ()) == ("body",) and err_type in {"model_attributes_type", "dict_type", "model_type"}:
+            parts.append("请求体必须是 JSON 对象，并使用 Content-Type: application/json。")
+            continue
+        field = _validation_error_field(err)
+        label = FIELD_LABELS.get(field, field or "请求参数")
+        limit = ctx.get("limit_value") or ctx.get("max_length") or ctx.get("min_length")
         if "max_length" in err_type or "at most" in msg:
             parts.append(f"{label}过长：当前内容超过后端上限 {limit} 个字符。请拆分为多个提示词节点，或先用 LLM 节点压缩后再生成。")
         elif "min_length" in err_type:
             parts.append(f"{label}不能为空。")
+        elif err_type == "value_error" and ctx.get("error") is not None:
+            parts.append(f"{label}格式不正确：{ctx.get('error')}")
         else:
             parts.append(f"{label}格式不正确：{msg}")
     return "\n".join(parts) or "请求参数不正确。"
+
+_VALIDATION_SCALAR_TYPES = (bool, int, float, type(None))
+
+def sanitize_validation_errors(errors):
+    """把 pydantic 的校验错误整理成可以安全返回给客户端的结构。
+
+    - 去掉 input 里的字符串、字节和对象：它们可能是整段提示词、画布内容或密钥，
+      原样返回会让 422 响应和前端日志变得很大，也可能把敏感内容写进日志；只保留类型和长度。
+      数字、布尔值和 null 原样保留，便于排查类型错误。
+    - ctx 里的异常对象（例如自定义校验器抛出的 ValueError）转成字符串，避免 JSON 序列化失败返回 500。
+    """
+    cleaned = []
+    for err in errors or []:
+        item = {
+            "type": str(err.get("type") or ""),
+            "loc": [part if isinstance(part, (str, int)) else str(part) for part in err.get("loc", ())],
+            "msg": str(err.get("msg") or ""),
+        }
+        ctx = err.get("ctx")
+        if isinstance(ctx, dict) and ctx:
+            item["ctx"] = {str(key): (value if isinstance(value, (str, *_VALIDATION_SCALAR_TYPES)) else str(value))
+                           for key, value in ctx.items()}
+        if "input" in err:
+            value = err["input"]
+            if isinstance(value, _VALIDATION_SCALAR_TYPES):
+                item["input"] = value
+            else:
+                item["input_omitted"] = {"type": type(value).__name__}
+                if isinstance(value, (str, bytes, bytearray, list, tuple, dict)):
+                    item["input_omitted"]["length"] = len(value)
+        cleaned.append(item)
+    return cleaned
 
 def validate_llm_text_length(value, field_path):
     if isinstance(value, str) and len(value) > MAX_LLM_TEXT_CHARS:
@@ -943,9 +989,10 @@ async def model_prompt_limit_exception_handler(request: Request, exc: ModelPromp
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = sanitize_validation_errors(exc.errors())
     return JSONResponse(
         status_code=422,
-        content={"detail": friendly_validation_error(exc.errors()), "errors": exc.errors()},
+        content={"detail": friendly_validation_error(errors), "errors": errors},
     )
 
 def model_list(env_name, primary, defaults):

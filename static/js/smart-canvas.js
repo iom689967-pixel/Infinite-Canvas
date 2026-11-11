@@ -869,38 +869,11 @@ function canvasForStorage(){
     return clean;
 }
 function apiErrorMessage(data, fallback='请求失败'){
-    if(!data) return fallback;
-    if(typeof data === 'string') return data || fallback;
-    const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
-    if(Array.isArray(detail)){
-        const messages = detail.map(item => {
-            if(typeof item === 'string') return item;
-            const loc = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
-            const msg = item?.msg || item?.message || JSON.stringify(item);
-            return loc ? `${loc}: ${msg}` : msg;
-        }).filter(Boolean);
-        return messages.join('\n') || fallback;
-    }
-    if(detail && typeof detail === 'object') return detail.message || detail.msg || JSON.stringify(detail);
-    try {
-        return JSON.stringify(data);
-    } catch(e) {
-        return fallback;
-    }
+    return ApiErrors.message(data, fallback);
 }
 async function responseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        return apiErrorMessage(data, fallback);
-    } catch(e) {
-        try {
-            const text = await response.text();
-            return text || fallback;
-        } catch(_) {
-            return fallback;
-        }
-    }
+    // 只取 detail；不是 JSON 时截断，不把整段响应文本放进提示和日志
+    return ApiErrors.fromResponse(response, fallback);
 }
 function downloadBlob(blob, filename){
     const url = URL.createObjectURL(blob);
@@ -8049,7 +8022,7 @@ async function zipDownloadImageItems(title, items){
                 items:list.map((item, index) => ({url:item.url, name:downloadNameForMediaItem(item, `image-${String(index + 1).padStart(2, '0')}`)}))
             })
         });
-        if(!response.ok) throw new Error((await response.text()) || '批量下载失败');
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '批量下载失败'));
         const blob = await response.blob();
         const href = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -8137,7 +8110,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:outputItems,
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
-        error:error ? String(error) : ''
+        error:ApiErrors.forLog(error)
     };
     ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
@@ -9774,7 +9747,7 @@ async function recognizeFocusEditCandidates(context){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({message:payload.message, messages:[], images:payload.images, videos:[], model, provider, ms_model:provider === 'modelscope' ? model : '', system_prompt:'只输出严格 JSON。'})
     }).then(async response => {
-        if(!response.ok) throw new Error(await response.text());
+        if(!response.ok) throw new Error(await responseErrorMessage(response));
         return response.json();
     });
     return parseFocusEditCandidates(result?.text || result);
@@ -10417,7 +10390,7 @@ async function runJimengUpscale(node, index){
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({prompt:`upscale ${resolution}`, provider_id:providerId, model:'', operation:'upscale', resolution_type:resolution, n:1, reference_images:[{url:item.url, name:item.name || 'upscale-input.png'}]})
         }).then(async response => {
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             return response.json();
         });
         if(!task.task_id) throw new Error(tr('smart.errRunFailed'));
@@ -16243,17 +16216,7 @@ function smartImageFilesFromDataTransfer(dataTransfer){
     return [...(dataTransfer?.files || [])].filter(isSupportedUploadFile);
 }
 async function smartResponseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        const detail = data.detail ?? data.error ?? data.message;
-        if(typeof detail === 'string') return detail || fallback;
-        if(Array.isArray(detail)) return detail.map(item => item?.msg || item?.message || String(item)).join('\n') || fallback;
-    } catch(_) {}
-    try {
-        const text = await response.text();
-        if(text) return text;
-    } catch(_) {}
-    return fallback;
+    return ApiErrors.fromResponse(response, fallback);
 }
 function smartDropDataTypes(dataTransfer){
     return [...(dataTransfer?.types || [])].map(type => String(type || ''));
@@ -16376,7 +16339,7 @@ async function uploadFiles(files){
     const form = new FormData();
     supported.forEach(file => form.append('files', file, file.name || 'media'));
     const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async r => {
-        if(!r.ok) throw new Error((await r.text()) || tr('smart.toastUploadFail'));
+        if(!r.ok) throw new Error(await responseErrorMessage(r, tr('smart.toastUploadFail')));
         return r.json();
     });
     return (data.files || []).map((file, index) => ({
@@ -19154,7 +19117,7 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
     const workflowName = runSettings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
     const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const fields = wf.config?.fields || [];
@@ -20097,7 +20060,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
             payload.generation_id = bindingNode.activeGenerationId || '';
         }
         const response = await fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        if(!response.ok) throw new Error(await response.text());
+        if(!response.ok) throw new Error(await responseErrorMessage(response));
         const task = await response.json();
         return {taskIds:[task.task_id], count, controlled:true, providerId:payload.provider_id, model:payload.model};
     }
@@ -20157,7 +20120,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)
     }).then(async r => {
-        const data = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+        const data = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
         if(!r.ok || data.success === false) throw runningHubPayloadError('提交', data, tr('smart.rhFailed'), {
             endpoint,
             workflowId:body.workflowId || '',
@@ -20174,7 +20137,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     for(let i = 0; i < 720; i++){
         await sleep(2500);
         const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${useWallet ? '1' : '0'}`).then(async r => {
-            const json = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+            const json = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
             if(!r.ok || json.success === false) throw runningHubPayloadError('查询', json, tr('smart.rhFailed'), {taskId});
             return json.data || json;
         });
@@ -20274,7 +20237,7 @@ async function runModelscopeGeneration(prompt, refs, runSettings=settings){
         else if(modelKey === 'qwen_edit') body = {prompt, image_urls:imageUrls, resolution:`${width}x${height}`};
         else body = {prompt, model:modelKey === 'custom' ? (runSettings.msCustomModel || modelscopeImageModels()[0]) : msModel.modelId, image_urls:imageUrls, width, height, size:`${width}x${height}`};
         const data = await fetch(msModel.endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
+            if(!r.ok) throw new Error(await responseErrorMessage(r));
             return r.json();
         });
         return data.url || data.images?.[0] || '';
@@ -20304,7 +20267,7 @@ async function runComfyGeneration(node, prompt, refs, pendingNode, meta){
     const workflowName = settings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
     const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const fields = wf.config?.fields || [];
@@ -20400,7 +20363,7 @@ async function comfyNameForRef(ref){
     const form = new FormData();
     form.append('files', blob, ref.name || 'smart-ref.png');
     const data = await fetch('/api/upload', {method:'POST', body:form}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const name = String(data.files?.[0]?.comfy_name || '').trim();
@@ -20942,7 +20905,7 @@ async function fetchJimengQuery(submitId, kind){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({submit_id:submitId, kind:kind || 'image'})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r)); return r.json(); });
 }
 async function queryJimengNow(nodeId){
     const node = nodes.find(n => n.id === nodeId);
@@ -20971,7 +20934,7 @@ async function fetchImageTaskQuery(providerId, taskId){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({provider_id:providerId || '', task_id:taskId})
     }).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
 }
@@ -20992,7 +20955,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         let data;
         if(task.controlled){
             const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh`, {method:'POST'});
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             const owned = await response.json();
             assertSmartTaskBinding(owned, node, task);
             data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId, node, task)};
@@ -21094,7 +21057,7 @@ async function pollSmartCanvasTask(taskId, bindingNode=null, bindingTask=null){
                 }
                 throw error;
             }
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             const task = await response.json();
             if(bindingNode && bindingTask) assertSmartTaskBinding(task, bindingNode, bindingTask);
             updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status, task.upstream_task_id || '');
