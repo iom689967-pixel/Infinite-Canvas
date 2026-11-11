@@ -14640,6 +14640,13 @@ async function queryRecoverPendingOutput(pendingId){
     }
 }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+// C9：服务重启后，上游已成功但本地结果未保存的任务是 result_recovery_required。
+// 复用实例模式的恢复接口：只查询原任务、不重新提交；仍未完成时交给“查询结果”按钮。
+async function recoverCanvasImageTask(taskId, cascadeTargetId=''){
+    const res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}/refresh`, {method:'POST'}, {cascadeTargetId});
+    if(!res.ok) return {status:'failed', error:await responseErrorMessage(res, tr('canvas.generationFailed'))};
+    return res.json();
+}
 async function pollCanvasImageTask(taskId, options={}){
     if(!taskId) return 'failed';
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
@@ -14656,6 +14663,15 @@ async function pollCanvasImageTask(taskId, options={}){
                 throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
             }
             const data = await res.json();
+            if(data.status === 'result_recovery_required'){
+                const recovered = await recoverCanvasImageTask(taskId, cascadeTargetId);
+                if(recovered.status === 'succeeded'){
+                    completeCanvasImageTask(taskId, recovered.result || {});
+                    return 'succeeded';
+                }
+                failCanvasImageTask(taskId, recovered.error || data.error || tr('canvas.generationFailed'), {...data, ...recovered});
+                return 'failed';
+            }
             if(data.status === 'succeeded'){
                 completeCanvasImageTask(taskId, data.result || {});
                 return 'succeeded';
@@ -14687,6 +14703,11 @@ async function waitCanvasImageTaskResult(taskId, options={}){
             throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
         }
         const data = await res.json();
+        if(data.status === 'result_recovery_required'){
+            const recovered = await recoverCanvasImageTask(taskId, cascadeTargetId);
+            if(recovered.status === 'succeeded') return recovered.result || {};
+            throw new Error(recovered.error || data.error || tr('canvas.generationFailed'));
+        }
         if(data.status === 'succeeded') return data.result || {};
         if(data.status === 'failed') throw ModelPromptLimits.fromData(data);
         await sleep(1800);

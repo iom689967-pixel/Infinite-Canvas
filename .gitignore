@@ -41,6 +41,8 @@ __pycache__/
 /data/update_backups/
 /data/asset_classification_prompt.txt
 /data/kie_reference_cache.json
+/data/canvas_tasks.sqlite3
+/data/canvas_tasks.sqlite3-journal
 
 # Historical local source backups
 *.broken-before-*

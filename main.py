@@ -7,6 +7,7 @@ import json
 import uuid
 import base64
 import hashlib
+import sqlite3
 import hmac
 import datetime
 import urllib.request
@@ -32,7 +33,7 @@ import shlex
 import functools
 import html
 import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import List, Dict, Any, Optional, Tuple
 from threading import Lock, RLock
 import httpx
@@ -244,6 +245,13 @@ async def startup_event():
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
+    # C9：恢复上次进程里的画布生成任务（本地模式），不会自动重新提交；放在迁移之后，仍在开始接收请求之前
+    try:
+        restored = await asyncio.to_thread(restore_canvas_tasks)
+        if restored:
+            print(f"已恢复 {restored} 个画布生成任务记录")
+    except Exception as exc:
+        print(f"恢复画布生成任务失败: {exc}")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -3379,6 +3387,131 @@ CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
 CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
 CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
+
+# ===== C9：本地模式的画布生成任务持久化 =====
+# 以前任务只在内存里：从不清理，服务重启后查询一律 404，Kie 等上游已经生成（已计费）的结果找不回来。
+# 现在本地模式把任务写进 data/canvas_tasks.sqlite3（与实例模式 27982b4 的私有账本同样是一行一个任务的 SQLite），
+# 重启后按同一套状态约定恢复（instance_model_tasks.py / docs/kie-result-recovery.md）：
+#   - 上游已确认成功、本地结果未保存      → result_recovery_required，可 POST /refresh 只查询原任务取回结果；
+#   - 有上游任务 ID 但未确认完成          → failed + upstream_task_id + recovery=query-existing（编辑器的“查询结果”）；
+#   - 没有上游任务 ID（尚未提交或同步接口） → failed，明确提示需重新生成；
+# 任何情况下都不会自动重新提交。已结束的任务保留 CANVAS_TASK_TTL_SECONDS 后清理，内存和数据库同步清理。
+# 实例模式不使用这里（受控任务有自己的账本，其余任务仍按原逻辑只在内存中）。
+CANVAS_TASK_DB_PATH = os.path.join(DATA_DIR, "canvas_tasks.sqlite3")
+CANVAS_TASK_TTL_SECONDS = 7 * 24 * 3600
+CANVAS_TASK_MAX_ROWS = 2000
+CANVAS_TASK_TERMINAL = {"succeeded", "failed", "canceled", "result_recovery_required", "jimeng_pending"}
+CANVAS_TASK_PERSISTED_KEYS = ("id", "type", "status", "created_at", "updated_at", "result", "error", "provider_id", "model",
+                              "workflow_json", "upstream_task_id", "upstream_status", "status_code", "recovery",
+                              "local_result_status", "submit_id", "kind", "queue_info", "message", "jimeng_pending",
+                              "canceled_at", "restored_after_restart", "recovery_attempts", "validation")
+CANVAS_TASK_DB_LOCK = Lock()
+CANVAS_TASK_REFRESHING: set = set()
+
+
+def canvas_task_persistence_enabled():
+    return not PATHS.explicit
+
+
+@contextmanager
+def canvas_task_db():
+    os.makedirs(os.path.dirname(CANVAS_TASK_DB_PATH), exist_ok=True)
+    db = sqlite3.connect(CANVAS_TASK_DB_PATH, timeout=5)
+    try:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, data TEXT, updated REAL)")
+            yield db
+    finally:
+        db.close()
+
+
+def persist_canvas_task(task_id: str):
+    """把一个任务的当前状态写入本地账本（只在本地模式）。写失败只记日志，不影响生成本身。"""
+    if not canvas_task_persistence_enabled():
+        return
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        snapshot = {key: task[key] for key in CANVAS_TASK_PERSISTED_KEYS if task and key in task}
+    if not snapshot:
+        return
+    if isinstance(snapshot.get("result"), dict):
+        snapshot["result"] = {k: v for k, v in snapshot["result"].items() if k != "raw"}
+    try:
+        data = json.dumps(snapshot, ensure_ascii=False, default=str)
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            db.execute("INSERT OR REPLACE INTO jobs (id, status, data, updated) VALUES (?, ?, ?, ?)",
+                       (task_id, str(snapshot.get("status") or ""), data, float(snapshot.get("updated_at") or time.time())))
+    except Exception as exc:
+        print(f"画布任务持久化失败 task={task_id}: {exc}")
+
+
+def prune_canvas_tasks(now: Optional[float] = None):
+    """清理过期的已结束任务（内存和账本），并把账本行数限制在 CANVAS_TASK_MAX_ROWS 以内。"""
+    now = time.time() if now is None else now
+    cutoff = now - CANVAS_TASK_TTL_SECONDS
+    with CANVAS_TASK_LOCK:
+        expired = [task_id for task_id, task in CANVAS_TASKS.items()
+                   if task.get("status") in CANVAS_TASK_TERMINAL and float(task.get("updated_at") or 0) < cutoff
+                   and task_id not in CANVAS_TASK_RUNNERS]
+        for task_id in expired:
+            CANVAS_TASKS.pop(task_id, None)
+    if not canvas_task_persistence_enabled():
+        return len(expired)
+    try:
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            placeholders = ",".join("?" for _ in CANVAS_TASK_TERMINAL)
+            db.execute(f"DELETE FROM jobs WHERE updated < ? AND status IN ({placeholders})", (cutoff, *CANVAS_TASK_TERMINAL))
+            db.execute("DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY updated DESC LIMIT ?)", (CANVAS_TASK_MAX_ROWS,))
+    except Exception as exc:
+        print(f"画布任务清理失败: {exc}")
+    return len(expired)
+
+
+def restored_canvas_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """服务重启后，把上次进程里没有结束的任务换成明确的恢复状态；绝不自动重新提交。"""
+    task = dict(task)
+    if task.get("status") in CANVAS_TASK_TERMINAL:
+        return task
+    upstream = str(task.get("upstream_task_id") or "").strip()
+    task["restored_after_restart"] = True
+    task["updated_at"] = time.time()
+    if upstream and task.get("upstream_status") == "success":
+        task.update(status="result_recovery_required", recovery="query-existing", local_result_status="pending",
+                    error="图片已在上游生成成功，本地结果尚未保存（服务曾重启）；可恢复结果，不会重新生成")
+    elif upstream:
+        task.update(status="failed", recovery="query-existing",
+                    error=f"服务重启时任务仍在进行；任务未丢失，可查询原任务找回结果，不会重新提交（task_id: {upstream}）")
+    else:
+        task.update(status="failed", recovery="",
+                    error="服务重启，任务在提交给服务商之前或同步等待中被中断，没有可查询的任务 ID；请重新生成")
+    return task
+
+
+def restore_canvas_tasks():
+    """启动时从账本恢复任务（本地模式）。返回恢复的任务数。"""
+    if not canvas_task_persistence_enabled() or not os.path.exists(CANVAS_TASK_DB_PATH):
+        return 0
+    prune_canvas_tasks()
+    restored = []
+    try:
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            rows = db.execute("SELECT id, data FROM jobs").fetchall()
+    except Exception as exc:
+        print(f"读取画布任务账本失败: {exc}")
+        return 0
+    for task_id, data in rows:
+        try:
+            task = restored_canvas_task(json.loads(data))
+        except Exception:
+            continue
+        with CANVAS_TASK_LOCK:
+            if task_id not in CANVAS_TASKS:
+                CANVAS_TASKS[task_id] = task
+                restored.append(task_id)
+    for task_id in restored:
+        if CANVAS_TASKS[task_id].get("restored_after_restart"):
+            persist_canvas_task(task_id)
+    return len(restored)
 CANVAS_LLM_ACTIVE_REQUESTS: Dict[str, asyncio.Task] = {}
 CANVAS_LLM_CANCEL_MARKERS: Dict[str, float] = {}
 CANVAS_LLM_CANCEL_MARKER_TTL = 30.0
@@ -15454,12 +15587,17 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 task = CANVAS_TASKS.get(task_id)
                 if not task:
                     return
+                before = (task.get("upstream_task_id"), task.get("upstream_status"))
                 if upstream_task_id:
                     task["upstream_task_id"] = upstream_task_id
                 if task.get("status") != "canceled":
                     task["status"] = normalized or "running"
                     task["upstream_status"] = status
                 task["updated_at"] = time.time()
+                changed = before != (task.get("upstream_task_id"), task.get("upstream_status"))
+            # C9：拿到上游任务 ID、上游状态变化（尤其是 success）时立即落盘，重启后才能只查询不重交
+            if changed:
+                persist_canvas_task(task_id)
 
         result = await build_online_image_result(
             payload,
@@ -15516,6 +15654,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     finally:
         CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
         CANVAS_TASK_RUNNERS.pop(task_id, None)
+        persist_canvas_task(task_id)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
@@ -15556,6 +15695,8 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "model": payload.model,
         }
     CANVAS_TASK_CANCEL_EVENTS[task_id] = cancel_event
+    persist_canvas_task(task_id)
+    prune_canvas_tasks()
     runner = asyncio.create_task(run_canvas_image_task(task_id, payload))
     CANVAS_TASK_RUNNERS[task_id] = runner
     return {"task_id": task_id, "status": "queued"}
@@ -15595,6 +15736,7 @@ async def cancel_canvas_image_task(task_id: str):
         task["canceled_at"] = time.time()
         task["updated_at"] = time.time()
         upstream_task_id = task.get("upstream_task_id") or ""
+    persist_canvas_task(task_id)
     cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
     if cancel_event:
         cancel_event.set()
@@ -15630,8 +15772,63 @@ async def refresh_controlled_image_task(task_id: str, request: Request):
     except ValueError:
         raise HTTPException(400, '恢复请求不接受 Provider、任务或节点覆盖参数') from None
     if not PATHS.explicit:
-        raise model_access_failure('not_configured', 503)
+        return await refresh_local_canvas_task(task_id)
     return INSTANCE_MODELS.refresh(task_id)
+
+
+def local_canvas_task_view(task: Dict[str, Any]) -> Dict[str, Any]:
+    view = dict(task)
+    view.pop("owner", None)
+    return view
+
+
+async def refresh_local_canvas_task(task_id: str):
+    """C9：本地模式复用实例模式的恢复接口——只用记录里的原平台和原上游任务 ID 查询，不重新提交、不换平台。"""
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        task = dict(task) if task else None
+    if not task:
+        raise HTTPException(status_code=404, detail="画布任务不存在或已过期")
+    if task.get("status") == "succeeded":
+        return local_canvas_task_view(task)
+    runner = CANVAS_TASK_RUNNERS.get(task_id)
+    if runner and not runner.done():
+        return local_canvas_task_view(task)  # 本进程仍在等待这个任务，不需要恢复
+    upstream = str(task.get("upstream_task_id") or "").strip()
+    if not upstream:
+        raise HTTPException(status_code=409, detail="这个任务没有上游任务 ID，无法恢复；不会重新提交，请重新生成")
+    provider_id = str(task.get("provider_id") or "").strip()
+    provider = next((p for p in load_api_providers() if p.get("id") == provider_id), None)
+    if not provider or provider.get("enabled") is False:
+        raise HTTPException(status_code=409, detail="原平台已删除或已停用；恢复不可用，不会使用其他平台或重新生成")
+    if task_id in CANVAS_TASK_REFRESHING:
+        return local_canvas_task_view(task)
+    CANVAS_TASK_REFRESHING.add(task_id)
+    try:
+        result = await query_image_task(ImageTaskQueryRequest(provider_id=provider_id, task_id=upstream))
+    finally:
+        CANVAS_TASK_REFRESHING.discard(task_id)
+    status = str((result or {}).get("status") or "")
+    with CANVAS_TASK_LOCK:
+        live = CANVAS_TASKS.get(task_id)
+        if live is None:
+            raise HTTPException(status_code=404, detail="画布任务不存在或已过期")
+        live["recovery_attempts"] = int(live.get("recovery_attempts") or 0) + 1
+        live["updated_at"] = time.time()
+        if status == "succeeded" and (result.get("images") or result.get("image_items")):
+            stored = {k: v for k, v in result.items() if k not in {"raw", "status"}}
+            stored["task_id"] = task_id
+            live.update(status="succeeded", result=stored, error="", recovery="", upstream_status="success",
+                        local_result_status="completed")
+        elif status == "failed":
+            live.update(status="failed", error=str(result.get("error") or "上游任务失败"), recovery="",
+                        upstream_status="fail")
+        else:
+            live["upstream_status"] = str(result.get("upstream_status") or result.get("status") or live.get("upstream_status") or "")
+            live["error"] = str(result.get("message") or result.get("error") or "上游任务仍在生成，请稍后再恢复")
+        view = local_canvas_task_view(live)
+    persist_canvas_task(task_id)
+    return view
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
@@ -15659,6 +15856,8 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
                 "status_code": status_code,
                 "updated_at": time.time(),
             })
+    finally:
+        persist_canvas_task(task_id)
 
 @app.post("/api/canvas-comfy-tasks")
 async def create_canvas_comfy_task(payload: GenerateRequest):
@@ -15674,6 +15873,7 @@ async def create_canvas_comfy_task(payload: GenerateRequest):
             "error": "",
             "workflow_json": payload.workflow_json,
         }
+    persist_canvas_task(task_id)
     asyncio.create_task(run_canvas_comfy_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
 
