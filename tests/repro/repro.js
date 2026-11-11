@@ -980,6 +980,52 @@ async function wsShellReconnects(browser) {
   record('WS_shell_socket_reconnects_and_keeps_receiving_updates', reconnected && gotUpdate, { firstCount, sockets, reconnected, gotUpdate });
 }
 
+// ---------------- C10：列表页改名、移动项目、拖动卡片保存失败时，界面恢复成修改前的样子 ----------------
+// 修复前保存失败只提示"保存失败"，界面上留着没保存成功的标题/项目/位置，刷新后才变回去。
+async function listMetaFailureRollsBack(browser) {
+  const id = await createTestCanvas('classic', [{ id: 'audit-meta', type: 'text', x: 1, y: 1, text: 'm' }]);
+  const original = (await getCanvas(id));
+  const p = await browser.newPage();
+  const errors = [];
+  p.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
+  await p.setRequestInterception(true);
+  p.on('request', async r => {
+    const url = new URL(r.url());
+    if (r.method() === 'POST' && url.pathname === `/api/canvases/${id}/meta`) {
+      const body = JSON.parse(r.postData() || '{}');
+      if (body.title === 'AUDIT-meta-fail' || body.project === 'audit-fail-project' || body.board_x === 4321) {
+        await sleep(body.title === 'AUDIT-meta-fail' ? 800 : 50);  // 让"先发出、后失败"的请求晚于下一次成功的修改返回
+        return r.respond({ status: 500, contentType: 'application/json', body: '{"detail":"audit forced failure"}' });
+      }
+    }
+    r.continue();
+  });
+  await p.goto(`${B}/static/canvas-list.html?project=${encodeURIComponent(original.project || 'default')}`, { waitUntil: 'domcontentloaded' });
+  await p.waitForFunction(`typeof canvases!=='undefined' && canvases.some(c => c.id === ${JSON.stringify(id)})`, { timeout: 20000 });
+  await sleep(800);
+  const local = k => p.evaluate(`canvases.find(c => c.id === ${JSON.stringify(id)})[${JSON.stringify(k)}]`);
+  // 1) 改名失败 -> 恢复
+  await p.evaluate(`setCanvasTitle(${JSON.stringify(id)}, 'AUDIT-meta-fail')`);
+  const titleAfterFail = await local('title');
+  // 2) 先发一个会失败的改名，紧接着再改一次（成功）；旧请求晚到的失败不能覆盖新标题
+  await p.evaluate(`setCanvasTitle(${JSON.stringify(id)}, 'AUDIT-meta-fail'); setCanvasTitle(${JSON.stringify(id)}, 'AUDIT-meta-ok')`);
+  await sleep(1500);
+  const titleAfterRace = await local('title');
+  // 3) 移动到项目失败 -> 恢复
+  await p.evaluate(`moveCanvasToProject(${JSON.stringify(id)}, 'audit-fail-project')`);
+  const projectAfterFail = await local('project');
+  // 4) 拖动卡片保存失败 -> 恢复位置
+  const x0 = await local('board_x');
+  await p.evaluate(`(() => { const c = canvases.find(c => c.id === ${JSON.stringify(id)}); const before = {board_x: c.board_x, board_y: c.board_y}; c.board_x = 4321; return persistMeta(c.id, {board_x: 4321, board_y: c.board_y}, before); })()`);
+  const xAfterFail = await local('board_x');
+  const server = await getCanvas(id);
+  await p.close();
+  const detail = { titleAfterFail, titleAfterRace, projectAfterFail, x0, xAfterFail, serverTitle: server.title, serverProject: server.project, errors };
+  const pass = titleAfterFail === original.title && titleAfterRace === 'AUDIT-meta-ok' && server.title === 'AUDIT-meta-ok'
+    && projectAfterFail === (original.project || 'default') && server.project === original.project && xAfterFail === x0 && !errors.length;
+  record('C10_list_meta_failure_rolls_back', pass, detail);
+}
+
 (async () => {
   const only = (process.env.REPRO_ONLY || '').split(',').map(s => s.trim()).filter(Boolean);
   const want = name => !only.length || only.some(o => name.startsWith(o));
@@ -1001,6 +1047,7 @@ async function wsShellReconnects(browser) {
     ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C10', () => c10ClassicEditorWithoutGateCode(browser)],
     ['WS', () => wsShellReconnects(browser)],
+    ['C10', () => listMetaFailureRollsBack(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
