@@ -1,8 +1,7 @@
 """C7：在列表里改的名字（POST /meta）不能被编辑器的保存改回去。
 
-- /meta 改标题或图标时不推进 updated_at（列表排序不变），但记下 meta_updated_at；
-- PUT 的基线早于 meta_updated_at 时，请求里的标题/图标是旧值，不再覆盖，其他字段照常保存；
-- 不带基线的 PUT（显式改名）照常生效；
+- /meta 改标题或图标时不推进 updated_at（列表排序不变）；
+- 第六批起 PUT 完全忽略标题和图标（只能走 /meta），并且 base_updated_at 必填且大于 0；
 - 两个编辑器的自动保存不再发送标题/图标，侧栏改名/改图标改走 /meta。
 """
 import json
@@ -53,59 +52,59 @@ class CanvasTitleMetaApiTests(unittest.TestCase):
     def put(self, **body):
         return self.client.put(f"/api/canvases/{self.canvas_id}", json=body)
 
-    def test_meta_rename_keeps_updated_at_and_records_meta_time(self):
-        before = self.get()
-        self.meta(title="列表里改的名字")
-        after = self.get()
-        self.assertEqual(after["title"], "列表里改的名字")
-        self.assertEqual(after["updated_at"], before["updated_at"])
-        self.assertGreater(after["meta_updated_at"], before["updated_at"])
-
-    def test_other_meta_fields_do_not_mark_title_icon(self):
-        self.meta(pinned=True, color="", owner="me")
-        self.assertNotIn("meta_updated_at", self.get())
-        self.meta(title="原名")  # 标题没变也不记
-        self.assertNotIn("meta_updated_at", self.get())
-
-    def test_stale_editor_put_keeps_renamed_title_and_icon_but_saves_nodes(self):
+    def test_meta_rename_keeps_updated_at(self):
         before = self.get()
         self.meta(title="列表里改的名字", icon="star")
-        response = self.put(title=before["title"], icon=before["icon"], nodes=[{"id": "n1"}, {"id": "n2"}],
+        after = self.get()
+        self.assertEqual((after["title"], after["icon"]), ("列表里改的名字", "star"))
+        self.assertEqual(after["updated_at"], before["updated_at"])
+        self.assertNotIn("meta_updated_at", after)  # C7 的时间比较已删除，不再记录
+
+    def test_put_ignores_title_and_icon_but_saves_everything_else(self):
+        before = self.get()
+        response = self.put(title="编辑器里的旧名字", icon="old", nodes=[{"id": "n1"}, {"id": "n2"}],
                             base_updated_at=before["updated_at"])
         self.assertEqual(response.status_code, 200, response.text)
         after = self.get()
-        self.assertEqual(after["title"], "列表里改的名字")
-        self.assertEqual(after["icon"], "star")
+        self.assertEqual((after["title"], after["icon"]), ("原名", "sparkles"))
         self.assertEqual([node["id"] for node in after["nodes"]], ["n1", "n2"])
-        self.assertGreater(after["updated_at"], before["updated_at"])
 
-    def test_put_based_on_post_rename_state_can_still_set_title(self):
+    def test_stale_editor_put_cannot_revert_list_rename(self):
         before = self.get()
         self.meta(title="列表里改的名字")
-        self.assertEqual(self.put(nodes=[{"id": "n1"}], base_updated_at=before["updated_at"]).status_code, 200)
+        # 编辑器打开时的基线、改名前的标题：照常保存节点，标题不受影响
+        self.assertEqual(self.put(title=before["title"], nodes=[{"id": "n9"}], base_updated_at=before["updated_at"]).status_code, 200)
         current = self.get()
-        self.assertGreaterEqual(current["updated_at"], current["meta_updated_at"])
-        response = self.put(title="编辑器里明确改的名字", base_updated_at=current["updated_at"])
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.get()["title"], "编辑器里明确改的名字")
-
-    def test_put_without_base_is_an_explicit_rename(self):
-        self.meta(title="列表里改的名字")
-        response = self.put(title="旧客户端的显式改名", nodes=[{"id": "n1"}])
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.get()["title"], "旧客户端的显式改名")
-
-    def test_put_without_title_keeps_title(self):
-        self.meta(title="列表里改的名字")
-        current = self.get()
-        self.assertEqual(self.put(nodes=[{"id": "n1"}], base_updated_at=current["updated_at"]).status_code, 200)
+        # 基线晚于改名也一样：PUT 根本不改标题
+        self.assertEqual(self.put(title="又一个旧名字", nodes=[{"id": "n9"}], base_updated_at=current["updated_at"]).status_code, 200)
         self.assertEqual(self.get()["title"], "列表里改的名字")
 
-    def test_canvas_without_meta_time_behaves_as_before(self):
-        before = self.get()
-        response = self.put(title="新名字", nodes=[{"id": "n1"}], base_updated_at=before["updated_at"])
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.get()["title"], "新名字")
+    def test_base_is_required_and_positive(self):
+        for body in ({"title": "x", "nodes": []}, {"nodes": [], "base_updated_at": 0}, {"nodes": [], "base_updated_at": -5}):
+            response = self.put(**body)
+            self.assertEqual(response.status_code, 422, body)
+            self.assertIn("基线", response.json()["detail"])
+        self.assertEqual(self.get()["title"], "原名")
+        self.assertEqual(self.get()["nodes"], [{"id": "n1"}])
+
+    def test_leftover_meta_time_is_removed_on_save(self):
+        path = self.dir / f"{self.canvas_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["meta_updated_at"] = data["updated_at"] + 999
+        path.write_text(json.dumps(data), encoding="utf-8")
+        current = self.get()
+        self.assertEqual(self.put(nodes=[{"id": "n1"}], base_updated_at=current["updated_at"]).status_code, 200)
+        self.assertNotIn("meta_updated_at", json.loads(path.read_text(encoding="utf-8")))
+
+    def test_legacy_canvas_without_updated_at_can_still_be_saved(self):
+        path = self.dir / f"{self.canvas_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("updated_at")
+        path.write_text(json.dumps(data), encoding="utf-8")
+        current = self.get()
+        self.assertGreater(current["updated_at"], 0)
+        self.assertEqual(self.put(nodes=[{"id": "n5"}], base_updated_at=current["updated_at"]).status_code, 200)
+        self.assertEqual(self.get()["nodes"], [{"id": "n5"}])
 
 
 def function_body(source, name):

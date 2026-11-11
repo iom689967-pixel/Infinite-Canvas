@@ -10,7 +10,7 @@ try:
     fixture.setUp();fixture.mock.result_mode='dns'
     ref=fixture.upload()
     canvas=fixture.ok('A','POST','/api/canvases',json={'title':'Kie 原任务恢复验收','kind':'smart'})['canvas']
-    fixture.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'original-node','type':'smart-image','x':100,'y':100,'title':'原参考图','images':[{'url':ref,'name':'mock-reference.png','kind':'image','width':48,'height':64}]}]})
+    fixture.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'original-node','type':'smart-image','x':100,'y':100,'title':'原参考图','images':[{'url':ref,'name':'mock-reference.png','kind':'image','width':48,'height':64}]}],'base_updated_at':canvas['updated_at']})
     for n in ['A','B']:
         p=fixture.root/(n+'-login.txt');p.write_text(fixture.passwords[n]);p.chmod(0o600)
     state={'root':str(fixture.root),'A':fixture.ports['A'],'B':fixture.ports['B'],'canvas_id':canvas['id']}

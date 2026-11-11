@@ -935,6 +935,9 @@ def friendly_validation_error(errors):
             parts.append("请求体必须是 JSON 对象，并使用 Content-Type: application/json。")
             continue
         field = _validation_error_field(err)
+        if field == "base_updated_at":
+            parts.append("保存请求缺少画布版本基线（base_updated_at 必须是大于 0 的 updated_at），请刷新页面后重试。")
+            continue
         label = FIELD_LABELS.get(field, field or "请求参数")
         limit = ctx.get("limit_value") or ctx.get("max_length") or ctx.get("min_length")
         if "max_length" in err_type or "at most" in msg:
@@ -3685,15 +3688,15 @@ class ProjectUpdateRequest(BaseModel):
     order: Optional[int] = None
 
 class CanvasSaveRequest(BaseModel):
-    title: str = "未命名画布"
-    icon: str = "🧩"
+    # 标题和图标只能通过 POST /api/canvases/{id}/meta 修改；PUT 里即使带了也会被忽略（多余字段不报错）。
     nodes: List[Dict[str, Any]] = []
     connections: List[Dict[str, Any]] = []
     viewport: Dict[str, Any] = {}
     logs: List[Dict[str, Any]] = []
     settings: Dict[str, Any] = {}
     client_id: str = ""
-    base_updated_at: int = 0
+    # 必填且大于 0：保存必须说明是基于哪个版本改的，否则无法做冲突检查（以前 0 或不传会直接覆盖）。
+    base_updated_at: int = Field(gt=0)
 
 class DeleteCanvasLogRequest(BaseModel):
     log_id: str
@@ -4357,6 +4360,9 @@ def load_canvas(canvas_id):
         canvas = json.load(f)
     if canvas.get("deleted_at"):
         raise HTTPException(status_code=404, detail="画布已在回收站")
+    if not int(canvas.get("updated_at") or 0) > 0:
+        # 极旧的画布文件可能没有 updated_at；用文件修改时间补上，保证编辑器总能拿到 > 0 的保存基线。
+        canvas["updated_at"] = int(os.path.getmtime(path) * 1000)
     return canvas
 
 def load_canvas_any(canvas_id):
@@ -17640,15 +17646,10 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
 
 def _update_canvas_meta_locked(canvas_id: str, payload: CanvasMetaUpdate):
     canvas = load_canvas(canvas_id)
-    old_title_icon = (canvas.get("title"), canvas.get("icon"))
     if payload.title is not None:
         canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
     if payload.icon is not None:
         canvas["icon"] = (payload.icon or "layers")[:32]
-    if (canvas.get("title"), canvas.get("icon")) != old_title_icon:
-        # C7：这里刻意不推进 updated_at（不改变列表排序），但要记下标题/图标的修改时间，
-        # 让基线早于这次改名的编辑器保存不能再把旧标题/图标写回去（见 update_canvas）。
-        canvas["meta_updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
     if payload.owner is not None:
         canvas["owner"] = str(payload.owner).strip()[:40]
     if payload.color is not None:
@@ -18798,19 +18799,15 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
     with CANVAS_LOCK:
         canvas = load_canvas(canvas_id)
         current_updated_at = int(canvas.get("updated_at") or 0)
-        if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
+        if current_updated_at and int(payload.base_updated_at) < current_updated_at:
             # C6：不再带回整张画布（真实画布最大约 19MB）；编辑器收到 409 后自己 GET 最新版本再合并。
             raise HTTPException(status_code=409, detail={
                 "message": "画布已被其他页面更新，已拒绝旧版本覆盖。",
                 "updated_at": current_updated_at,
             })
-        # C7：请求的基线早于最近一次 /meta 改名或改图标时，它带来的标题/图标是旧的，不再覆盖；
-        # 其他字段照常保存。不带基线的请求（显式改名）不受影响。
-        stale_title_icon = bool(payload.base_updated_at) and int(payload.base_updated_at) < int(canvas.get("meta_updated_at") or 0)
-        if "title" in provided and not stale_title_icon:
-            canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
-        if "icon" in provided and not stale_title_icon:
-            canvas["icon"] = (payload.icon or canvas.get("icon") or "layers")[:32]
+        # C7：PUT 不再修改标题和图标（只能走 /meta），编辑器的保存不可能把别处改的名字写回去。
+        # 旧版本 C7 修复留下的 meta_updated_at 已经不再使用，顺手清掉。
+        canvas.pop("meta_updated_at", None)
         canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
         if "nodes" in provided:
             canvas["nodes"] = payload.nodes

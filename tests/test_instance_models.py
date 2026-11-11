@@ -237,7 +237,7 @@ class ControlledModelTests(unittest.TestCase):
         self.assertEqual(self.request('A','GET',url).content,self.request('A','GET','/api/download-output',params={'url':url}).content)
         self.assertEqual(self.request('A','GET','/api/media-preview',params={'url':url}).status_code,200)
         canvas=self.canvas('A','model workflow')
-        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'result','type':'image','images':[{'url':url}]}]})
+        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'result','type':'image','images':[{'url':url}]}],'base_updated_at':canvas['updated_at']})
         self.assertTrue(list((self.roots['A']/'.auth/reference-cache').glob('*.json')))
         self.assertTrue(list((self.roots['A']/'data/media_previews').glob('*')))
         self.assertFalse(list((self.roots['B']/'.auth/reference-cache').glob('*')))

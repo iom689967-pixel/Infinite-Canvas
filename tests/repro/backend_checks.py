@@ -190,7 +190,7 @@ class Checks:
         if target:
             self.created.append(target)
         null_cases = (
-            ("put_canvas", "PUT", f"/api/canvases/{target}", {"nodes": []}, {"Origin": "null"}),
+            ("put_canvas", "PUT", f"/api/canvases/{target}", {"nodes": [], "base_updated_at": 1}, {"Origin": "null"}),
             ("canvas_meta", "POST", f"/api/canvases/{target}/meta", {"title": "x"}, {"Origin": "null"}),
             ("delete_canvas", "DELETE", f"/api/canvases/{target}", None, {"Origin": "null"}),
             ("storage_settings", "PATCH", "/api/storage-settings", {}, {"Origin": "null"}),
@@ -361,8 +361,11 @@ class Checks:
         keys = sorted((data or {}).get("detail", {}).keys()) if isinstance((data or {}).get("detail"), dict) else []
         # C6：409 不再带回整张画布，只有提示和服务器的 updated_at
         self.record(g, "stale_base_409_returns_only_updated_at", st == 409 and keys == ["message", "updated_at"], f"status={st} detail keys={keys}")
-        st, _, _, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"nodes": moved, "base_updated_at": 0})
-        self.record(g, "base_zero_still_accepted(unchanged)", st == 200, f"status={st}")
+        # 第六批：base_updated_at 必填且大于 0；0 或不传都直接拒绝（以前会跳过冲突检查直接覆盖）
+        st0, _, data0, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"nodes": moved, "base_updated_at": 0})
+        st_missing, _, _, _ = self.c.request("PUT", f"/api/canvases/{cid}", {"nodes": moved})
+        self.record(g, "base_missing_or_zero_rejected", st0 == 422 and st_missing == 422 and "基线" in detail_text(data0),
+                    f"base=0 -> {st0}, missing -> {st_missing}")
 
 
     # ---------- RACE（C5 + C6）----------

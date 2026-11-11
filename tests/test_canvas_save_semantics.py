@@ -64,8 +64,12 @@ class CanvasSaveSemanticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.status_code, 409)
         # C6：409 不再带回整张画布（编辑器自己 GET 最新版本再合并）
         self.assertEqual(sorted(res.json()["detail"].keys()), ["message", "updated_at"])
-        res = await self.client.put(f"/api/canvases/{self.cid}", json={"nodes": [{"id": "n", "x": 2}], "base_updated_at": 0})
-        self.assertEqual(res.status_code, 200)
+        # 第六批：base_updated_at 必填且大于 0，0 和不传都拒绝（以前 0 会跳过冲突检查直接覆盖）
+        for body in ({"nodes": [{"id": "n", "x": 2}], "base_updated_at": 0}, {"nodes": [{"id": "n", "x": 2}]}):
+            res = await self.client.put(f"/api/canvases/{self.cid}", json=body)
+            self.assertEqual(res.status_code, 422)
+            self.assertIn("基线", res.json()["detail"])
+        self.assertEqual((await self.current())["nodes"], cur["nodes"])
 
     async def test_conflict_check_waits_for_lock_holder(self):
         """另一线程持锁写入期间到达的 PUT，必须在锁内看到新版本并返回 409。"""
