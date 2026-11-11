@@ -660,10 +660,10 @@
         let conversations = [];
         let currentConversation = null;
         let mode = 'agent';
-        let provider = savedChatSettings.provider || 'comfly';
+        let provider = savedChatSettings.provider || '';
         let msModel = savedChatSettings.msModel || '';
         let activeChatModel = savedChatSettings.activeChatModel || '';
-        let activeImageProvider = savedChatSettings.activeImageProvider || 'comfly';
+        let activeImageProvider = savedChatSettings.activeImageProvider || '';
         let activeImageModel = savedChatSettings.activeImageModel || '';
         let systemPrompt = String(savedChatSettings.systemPrompt || '').trim();
         let apiProviders = [];
@@ -777,15 +777,16 @@
         function chatProviders(){
             const list = (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
             if(config.ms_chat_models?.length && !list.some(p => p.id === 'modelscope')) list.push({id:'modelscope', name:'ModelScope', chat_models:config.ms_chat_models, image_models:[]});
-            return list.length ? list : [{id:'comfly', name:'API', chat_models:[config.chat_model || 'gpt-4o-mini'], image_models:[config.image_model || 'gpt-image-2']}];
+            // 没有可用平台时返回空列表，不再造一个并不存在的 “comfly” 平台（A1）
+            return list;
         }
         function imageProviders(){
             const list = (apiProviders || []).filter(p => p.enabled !== false && (p.image_models || []).length);
-            return list.length ? list : [{id:'comfly', name:'API', image_models:[config.image_model || 'gpt-image-2'], chat_models:[config.chat_model || 'gpt-4o-mini']}];
+            return list;
         }
         function providerById(id, kind='chat'){
             const list = kind === 'image' ? imageProviders() : chatProviders();
-            return list.find(p => p.id === id) || list[0];
+            return list.find(p => p.id === id) || list[0] || null;
         }
         function activePickerKind(){
             return mode === 'image' ? 'image' : (mode === 'agent' ? modelPickerScope : 'chat');
@@ -795,7 +796,7 @@
         }
         function modelListForCurrent(kind=activePickerKind()){
             const item = providerById(currentProviderId(kind), kind);
-            return uniqueModels(kind === 'image' ? item.image_models : item.chat_models);
+            return uniqueModels(kind === 'image' ? item?.image_models : item?.chat_models);
         }
         function currentModel(kind=activePickerKind()){
             return kind === 'image' ? activeImageModel : (provider === 'modelscope' ? (msModel || activeChatModel) : activeChatModel);
@@ -812,8 +813,8 @@
             const providers = kind === 'image' ? imageProviders() : chatProviders();
             const pid = currentProviderId(kind);
             if(!providers.some(p => p.id === pid)) {
-                if(kind === 'image') activeImageProvider = providers[0]?.id || 'comfly';
-                else provider = providers[0]?.id || 'comfly';
+                if(kind === 'image') activeImageProvider = providers[0]?.id || '';
+                else provider = providers[0]?.id || '';
             }
             const models = modelListForCurrent(kind);
             if(kind === 'image' && !models.includes(activeImageModel)) activeImageModel = models[0] || config.image_model;
@@ -824,7 +825,7 @@
 
         function validateSavedProviderState(){
             const chatProviderList = chatProviders();
-            provider = chatProviderList.some(p => p.id === provider) ? provider : (chatProviderList[0]?.id || 'comfly');
+            provider = chatProviderList.some(p => p.id === provider) ? provider : (chatProviderList[0]?.id || '');
             const chatModels = uniqueModels(providerById(provider, 'chat')?.chat_models || []);
             const rememberedChatModel = chatProviderModels[provider];
             activeChatModel = chatModels.includes(activeChatModel)
@@ -836,7 +837,7 @@
             if(config.ms_chat_models?.length && provider === 'modelscope') activeChatModel = msModel || config.ms_chat_models[0];
 
             const imageProviderList = imageProviders();
-            activeImageProvider = imageProviderList.some(p => p.id === activeImageProvider) ? activeImageProvider : (imageProviderList[0]?.id || 'comfly');
+            activeImageProvider = imageProviderList.some(p => p.id === activeImageProvider) ? activeImageProvider : (imageProviderList[0]?.id || '');
             const imageModels = uniqueModels(providerById(activeImageProvider, 'image')?.image_models || []);
             activeImageModel = imageModels.includes(activeImageModel) ? activeImageModel : (imageModels[0] || config.image_model);
             if(mode !== 'agent' && mode !== 'chat' && mode !== 'image') mode = 'chat';
@@ -1512,6 +1513,11 @@
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if(!message) return;
+            // 没有可用平台时直接提示，不发送请求（以前会发送不存在的 “comfly”）
+            if(mode === 'image' ? !activeImageProvider : !provider){
+                alert(tr(mode === 'image' ? 'chat.noImageProvider' : 'chat.noChatProvider'));
+                return;
+            }
             const btn = document.getElementById('sendBtn');
             btn.disabled = true;
             const requestedSize = chatSizeFromPrompt(message);

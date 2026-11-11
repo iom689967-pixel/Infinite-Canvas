@@ -1847,10 +1847,6 @@ def get_primary_provider_id(providers=None):
         return non_ms["id"]
     return providers[0]["id"] if providers else "modelscope"
 
-# 前端在平台列表为空时会发送 "comfly"（旧版默认平台 id）。没有配置同名平台时，
-# 它与空值一样表示“使用默认平台”，以保持旧页面可用。
-LEGACY_DEFAULT_PROVIDER_ALIASES = {"comfly"}
-
 def unknown_provider_error(provider_id):
     return HTTPException(
         status_code=400,
@@ -1858,16 +1854,15 @@ def unknown_provider_error(provider_id):
     )
 
 def is_unknown_provider_id(provider_id, providers=None):
-    """非空、非旧版默认别名、且不在当前配置中的平台 id。"""
+    """非空、且不在当前配置中的平台 id。空值表示“未指定”，由调用方回退到默认平台。
+    旧版的 "comfly" 别名已删除：前端不再发送它；配置了 id 为 comfly 的平台时它就是普通平台 id。"""
     target = str(provider_id or "").strip().lower()
     if not target:
         return False
     providers = providers if providers is not None else load_api_providers()
-    if any(p["id"] == target for p in providers):
-        return False
-    return target not in LEGACY_DEFAULT_PROVIDER_ALIASES
+    return not any(p["id"] == target for p in providers)
 
-def get_api_provider(provider_id="comfly"):
+def get_api_provider(provider_id=""):
     if PATHS.explicit and INSTANCE_MODELS and INSTANCE_MODELS.policy.providers:
         configured = INSTANCE_MODELS.policy.providers.get(provider_id)
         if not configured:
@@ -1880,7 +1875,7 @@ def get_api_provider(provider_id="comfly"):
     if PATHS.explicit and not any(p['id'] == target for p in providers):
         raise model_access_failure('not_configured', 503)
     # 找不到明确指定的平台时直接报错，不再悄悄改用首选平台（否则任务会被发到别的服务商）。
-    # 只有“未指定”（空值或旧版默认别名 comfly）才回退到首选平台。
+    # 只有“未指定”（空值）才回退到首选平台。
     if is_unknown_provider_id(target, providers):
         raise unknown_provider_error(target)
     if not target or not any(p["id"] == target for p in providers):
@@ -3333,7 +3328,7 @@ class AIReference(BaseModel):
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
-    provider_id: str = "comfly"
+    provider_id: str = ""
     model: str = ""
     size: str = "1024x1024"
     aspect_ratio: str = ""
@@ -3377,7 +3372,7 @@ class MidjourneyModalRequest(BaseModel):
     mask_image: Optional[AIReference] = None
 
 class ImageTaskQueryRequest(BaseModel):
-    provider_id: str = "comfly"
+    provider_id: str = ""
     task_id: str = Field(min_length=1, max_length=240)
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
@@ -3390,7 +3385,7 @@ CANVAS_LLM_CANCEL_MARKER_TTL = 30.0
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
-    provider_id: str = "comfly"
+    provider_id: str = ""
     model: str = "veo3-fast"
     duration: int = 5
     aspect_ratio: str = "16:9"
@@ -3488,7 +3483,7 @@ class ChatRequest(BaseModel):
     resolution: str = ""
     quality: str = "auto"
     reference_images: List[AIReference] = []
-    provider: str = "comfly"
+    provider: str = ""
     ms_model: str = ""
 
 def chat_system_prompt(payload):
@@ -3511,7 +3506,7 @@ class CanvasLLMRequest(BaseModel):
     system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     messages: List[Dict[str, Any]] = []
-    provider: str = "comfly"
+    provider: str = ""
     ms_model: str = ""
     request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
@@ -3618,7 +3613,7 @@ class LocalImageImportRequest(BaseModel):
 
 class LocalAssetCaptionRequest(BaseModel):
     names: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
     prompt: str = Field(default="描述图片", max_length=PROMPT_TEXT_MAX_LENGTH)
@@ -3629,7 +3624,7 @@ class LocalAssetCaptionSaveRequest(BaseModel):
 
 class LocalAssetClassifyRequest(BaseModel):
     names: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
     prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
@@ -3644,7 +3639,7 @@ class LocalAssetUrlImportRequest(BaseModel):
     items: List[LocalAssetUrlImportItem] = []
     folder: str = ""
     classify: bool = False
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
     prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
@@ -3717,7 +3712,7 @@ class AssetAvatarRegisterRequest(BaseModel):
 class AssetLibraryClassifyRequest(BaseModel):
     library_id: str = ""
     ids: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
     prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
@@ -12284,7 +12279,7 @@ async def generate_kie_provider_image(
         raise HTTPException(status_code=502, detail="Kie 请求发生内部错误") from exc
 
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
+async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
     provider = get_api_provider(provider_id)
     if is_kie_provider(provider):
         return await generate_kie_provider_image(
@@ -12643,7 +12638,7 @@ def pick_chat_image_provider(provider_id="", fallback_id=""):
     if providers:
         primary = next((p for p in providers if p.get("primary")), None)
         return primary or providers[0]
-    return get_api_provider(provider_id or fallback_id or "comfly")
+    return get_api_provider(provider_id or fallback_id or "")
 
 def heuristic_agent_decision(message, refs, has_previous_image):
     text = str(message or "").strip().lower()
@@ -18752,7 +18747,8 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
     save_conversation(user_id, conversation)
 
     if payload.mode == "image":
-        image_provider_id = payload.provider if payload.provider not in {"modelscope"} else "comfly"
+        # ModelScope 只提供聊天模型：图片模式改用默认图片平台（空值 = 默认平台）
+        image_provider_id = payload.provider if payload.provider not in {"modelscope"} else ""
         provider = get_api_provider(image_provider_id)
         default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
         model = selected_model(payload.image_model or payload.model, default_model)

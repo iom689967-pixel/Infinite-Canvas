@@ -298,10 +298,13 @@ class Checks:
             if st == 200 and isinstance(data, dict) and data.get("task_id"):
                 text = f"task_id={data['task_id']} 已创建并在后台回退到其他平台"
             self.record(g, f"unknown_provider_rejected[{name}]", st == 400 and UNKNOWN_PROVIDER in text, f"status={st} {text[:90]}")
-        for alias in ("comfly", ""):
-            st, _, data, _ = self.c.request("POST", "/api/canvas-llm", {"message": "audit", "provider": alias}, timeout=60)
-            text = detail_text(data)
-            self.record(g, f"legacy_default_alias_still_resolves[{alias or 'empty'}]", "未找到 API 平台" not in text, f"status={st} {text[:90]}")
+        st, _, data, _ = self.c.request("POST", "/api/canvas-llm", {"message": "audit", "provider": ""}, timeout=60)
+        text = detail_text(data)
+        self.record(g, "unspecified_provider_uses_default[empty]", "未找到 API 平台" not in text, f"status={st} {text[:90]}")
+        # 旧版 “comfly” 别名已删除（A1 收尾）：隔离实例里没有 id 为 comfly 的平台，应按未知平台拒绝
+        st, _, data, _ = self.c.request("POST", "/api/canvas-llm", {"message": "audit", "provider": "comfly"}, timeout=60)
+        text = detail_text(data)
+        self.record(g, "legacy_comfly_alias_removed", st == 400 and "未找到 API 平台：comfly" in text, f"status={st} {text[:90]}")
 
     # ---------- C5 ----------
     def check_C5(self):

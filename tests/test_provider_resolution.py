@@ -31,11 +31,19 @@ class ProviderResolutionTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("custom-api-5", ctx.exception.detail)
 
-    def test_unspecified_or_legacy_alias_uses_default(self):
+    def test_unspecified_uses_default(self):
         default_id = main.get_primary_provider_id(PROVIDERS)
         self.assertEqual(main.get_api_provider("")["id"], default_id)
-        self.assertEqual(main.get_api_provider("comfly")["id"], default_id)
         self.assertEqual(main.get_api_provider(None)["id"], default_id)
+        self.assertEqual(main.get_api_provider()["id"], default_id)
+
+    def test_legacy_comfly_alias_removed(self):
+        # 旧版前端在没有平台时发送的 “comfly” 不再被当成“默认平台”：没有配置同名平台时按未知平台拒绝
+        with self.assertRaises(HTTPException) as raised:
+            main.get_api_provider("comfly")
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("未找到 API 平台：comfly", raised.exception.detail)
+        self.assertFalse(hasattr(main, "LEGACY_DEFAULT_PROVIDER_ALIASES"))
 
     def test_disabled_provider_still_rejected(self):
         with self.assertRaises(HTTPException):

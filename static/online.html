@@ -260,7 +260,7 @@
         });
         let refs = {1:null,2:null,3:null};
         let refDims = {1:null,2:null,3:null};
-        let provider = 'comfly';
+        let provider = '';
         let selectedModel = 'gpt-image-2';
         let apiProviders = [];
         let ratio = 'square';
@@ -325,10 +325,11 @@
             const list = (apiProviders || []).filter(p => p.enabled !== false && (
                 (p.image_models || []).length || (p.rh_apps || []).length || (p.rh_workflows || []).length
             ));
-            return list.length ? list : [{id:'comfly', name:'Comfly', image_models:[models.gpt, models.nano]}];
+            // 没有可用的图片平台时返回空列表，不再造一个并不存在的 “comfly” 平台（A1）
+            return list;
         }
         function providerById(id){
-            return imageProviders().find(p => p.id === id) || imageProviders()[0];
+            return imageProviders().find(p => p.id === id) || imageProviders()[0] || null;
         }
         function providerModels(id){
             return uniqueModels(providerById(id)?.image_models || [models.gpt]);
@@ -356,8 +357,8 @@
             const providerSelect = document.getElementById('providerSelect');
             const modelSelect = document.getElementById('modelSelect');
             const providers = imageProviders();
-            if(!providers.some(p => p.id === provider)) provider = providers[0]?.id || 'comfly';
-            providerSelect.innerHTML = providers.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === provider ? 'selected' : ''}>${escapeHtml(p.name || p.id)}</option>`).join('');
+            if(!providers.some(p => p.id === provider)) provider = providers[0]?.id || '';
+            providerSelect.innerHTML = !providers.length ? `<option value="" disabled selected>${escapeHtml(tr('online.noImageProvider'))}</option>` : providers.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === provider ? 'selected' : ''}>${escapeHtml(p.name || p.id)}</option>`).join('');
             if(isRunningHubProvider(provider)){
                 const entries = runningHubEntries(provider);
                 const keys = entries.map(e => e.kind === 'model' ? e.id : `${e.kind}:${e.id}`);
@@ -689,6 +690,7 @@
         async function submitImage(){
             const prompt = document.getElementById('promptInput').value.trim();
             if(!prompt){ alert(tr('online.promptRequired')); return; }
+            if(!provider){ alert(tr('online.noImageProvider')); return; }
             const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'), placeholder = document.getElementById('placeholder'), out = document.getElementById('outputImg'), dl = document.getElementById('downloadBtn');
             btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); loader.classList.remove('hidden');
             try {
