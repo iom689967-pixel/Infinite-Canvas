@@ -6083,6 +6083,16 @@ function handleCanvasUpdatedMessage(data={}){
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(canvas?.updated_at || 0)) return;
     scheduleCanvasMergeReload(200);
 }
+// C7：在列表页改名或改图标不会推进 updated_at，轮询 meta 时顺带把它们同步到本页。
+function applyRemoteSmartTitleIcon(meta){
+    if(!canvas || !meta || (meta.id && meta.id !== canvasId)) return;
+    if(meta.icon) canvas.icon = meta.icon;
+    if(!meta.title || meta.title === canvas.title) return;
+    canvas.title = meta.title;
+    document.title = canvas.title;
+    const titleEl = document.getElementById('smartTitle');
+    if(titleEl) titleEl.textContent = canvas.title;
+}
 function startCanvasMetaPoll(){
     // WS / iframe 转发不可靠时的兜底：定期看服务器 updated_at 是否变新，变新就合并拉取
     if(canvasMetaPollTimer) return;
@@ -6093,6 +6103,7 @@ function startCanvasMetaPoll(){
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/meta`);
             if(!res.ok) return;
             const meta = await res.json();
+            applyRemoteSmartTitleIcon(meta);
             if(Number(meta.updated_at || 0) > Number(canvas.updated_at || 0)) mergeReloadCanvasNow();
         } catch(e) {}
     }, 8000);
@@ -6800,9 +6811,9 @@ function buildSmartSavePayload(){
     canvas.viewport = {...viewport};
     const builtVersion = smartEditVersion;
     const storageCanvas = canvasForStorage();
+    // C7：标题和图标只通过 /meta 修改，自动保存不再带上它们（后端对漏传的字段保持原值），
+    // 以免把列表页刚改的名字用本页内存里的旧值写回去。
     const body = JSON.stringify({
-        title:storageCanvas.title || tr('smart.title'),
-        icon:storageCanvas.icon || 'sparkles',
         nodes:storageCanvas.nodes || [],
         connections:storageCanvas.connections || [],
         viewport:storageCanvas.viewport || {x:0,y:0,scale:1},

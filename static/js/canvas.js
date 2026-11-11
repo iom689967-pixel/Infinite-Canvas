@@ -1444,9 +1444,9 @@ function canvasHasUnsavedChanges(){
     return Boolean(canvas) && (localCanvasDirty || savingCanvasNow || saveCanvasAgain || Boolean(saveTimer));
 }
 function buildCanvasSaveBody(){
+    // C7：标题和图标只通过 /meta 修改（列表页、侧栏改名都走那里），自动保存不再带上它们，
+    // 以免把别处刚改的名字用本页内存里的旧值写回去。后端对漏传的字段保持原值。
     return JSON.stringify({
-        title:canvas.title,
-        icon:canvas.icon || '🧩',
         nodes:serializableCanvasNodes(),
         connections,
         viewport,
@@ -2071,35 +2071,9 @@ function toggleEmojiPicker(id, event){
 async function setCanvasIcon(id, icon, event){
     event?.preventDefault();
     event?.stopPropagation();
-    const item = canvases.find(c => c.id === id);
-    if(item) item.icon = icon || 'layers';
     closeCanvasMetaPopover();
-    renderCanvasList();
-    try {
-        let target = canvas?.id === id ? canvas : null;
-        if(!target) {
-            const data = await fetch(`/api/canvases/${id}`).then(r => r.json());
-            target = data.canvas;
-        }
-        target.icon = icon || 'layers';
-        const res = await fetch(`/api/canvases/${id}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:target.title,
-                icon:target.icon,
-                nodes:target.nodes || [],
-                connections:target.connections || [],
-                viewport:target.viewport || {x:0, y:0, scale:1}
-            })
-        });
-        if(!res.ok) throw new Error('图标保存失败');
-        if(canvas?.id === id) canvas.icon = target.icon;
-        await loadCanvasList(false);
-    } catch(e) {
-        setStatus('图标保存失败');
-        console.error(e);
-    }
+    // C7：改图标走 /meta，不再整张画布 PUT（那样不带基线，会绕过冲突检查覆盖其他页面的修改）。
+    await patchCanvasMeta(id, {icon: icon || 'layers'});
 }
 function startTitleEdit(id, titleEl){
     if(!titleEl || titleEl.querySelector('input')) return;
@@ -2135,35 +2109,9 @@ function startTitleEdit(id, titleEl){
     };
 }
 async function setCanvasTitle(id, title){
-    const item = canvases.find(c => c.id === id);
-    if(item) item.title = title;
-    if(canvas?.id === id) canvas.title = title;
-    renderCanvasList();
-    try {
-        let target = canvas?.id === id ? canvas : null;
-        if(!target){
-            const data = await fetch(`/api/canvases/${id}`).then(r => r.json());
-            target = data.canvas;
-        }
-        target.title = title;
-        const res = await fetch(`/api/canvases/${id}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:target.title,
-                icon:target.icon,
-                nodes:target.nodes || [],
-                connections:target.connections || [],
-                viewport:target.viewport || {x:0, y:0, scale:1}
-            })
-        });
-        if(!res.ok) throw new Error('重命名失败');
-        if(currentCanvasTitle && canvas?.id === id) currentCanvasTitle.textContent = title;
-        await loadCanvasList(false);
-    } catch(e){
-        setStatus('重命名失败');
-        console.error(e);
-    }
+    // C7：改名走 /meta，和列表页一致；不再整张画布 PUT。
+    if(currentCanvasTitle && canvas?.id === id) currentCanvasTitle.textContent = title;
+    await patchCanvasMeta(id, {title});
 }
 async function openCanvas(id){
     if(canvasReferencePicker) cancelCanvasReferencePicker();
@@ -2254,9 +2202,8 @@ function mergeRemoteCanvasIntoLocal(remote){
     });
     connections = merged.connections;
     canvas.logs = merged.logs;
-    canvas.title = merged.title;
-    canvas.icon = merged.icon;
-    ['owner', 'color', 'pinned', 'project', 'board_x', 'board_y'].forEach(key => {
+    // C7：标题、图标和其他元数据一样以服务器为准（本页只通过 /meta 修改它们，改完本地也已同步）。
+    ['title', 'icon', 'owner', 'color', 'pinned', 'project', 'board_x', 'board_y'].forEach(key => {
         if(Object.prototype.hasOwnProperty.call(remote, key)) canvas[key] = remote[key];
     });
     canvas.updated_at = Number(remote.updated_at || canvas.updated_at || 0);
@@ -2370,6 +2317,17 @@ async function syncRemoteCanvasNow(){
         setStatus('Sync failed');
     }
 }
+// C7：在列表页改名或改图标不会推进 updated_at，轮询 meta 时顺带把它们同步到本页。
+function applyRemoteCanvasTitleIcon(meta){
+    if(!canvas || !meta || meta.id !== canvas.id) return;
+    let changed = false;
+    if(meta.title && meta.title !== canvas.title){ canvas.title = meta.title; changed = true; }
+    if(meta.icon && meta.icon !== canvas.icon){ canvas.icon = meta.icon; changed = true; }
+    if(!changed) return;
+    if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
+    const item = canvases.find(c => c.id === canvas.id);
+    if(item){ item.title = canvas.title; item.icon = canvas.icon; renderCanvasList(); }
+}
 async function checkRemoteCanvasVersion(){
     if(!canvas || applyingRemoteCanvas || remoteSyncBusy) return;
     if(document.hidden) return;
@@ -2378,6 +2336,7 @@ async function checkRemoteCanvasVersion(){
         const res = await fetch(`/api/canvases/${canvas.id}/meta`);
         if(!res.ok) throw new Error('meta failed');
         const meta = await res.json();
+        applyRemoteCanvasTitleIcon(meta);
         const remoteUpdatedAt = Number(meta.updated_at || 0);
         if(remoteUpdatedAt > Number(lastCanvasUpdatedAt || 0)){
             await syncRemoteCanvasNow();

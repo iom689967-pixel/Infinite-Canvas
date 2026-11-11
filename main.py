@@ -17432,10 +17432,15 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
 
 def _update_canvas_meta_locked(canvas_id: str, payload: CanvasMetaUpdate):
     canvas = load_canvas(canvas_id)
+    old_title_icon = (canvas.get("title"), canvas.get("icon"))
     if payload.title is not None:
         canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
     if payload.icon is not None:
         canvas["icon"] = (payload.icon or "layers")[:32]
+    if (canvas.get("title"), canvas.get("icon")) != old_title_icon:
+        # C7：这里刻意不推进 updated_at（不改变列表排序），但要记下标题/图标的修改时间，
+        # 让基线早于这次改名的编辑器保存不能再把旧标题/图标写回去（见 update_canvas）。
+        canvas["meta_updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
     if payload.owner is not None:
         canvas["owner"] = str(payload.owner).strip()[:40]
     if payload.color is not None:
@@ -18591,9 +18596,12 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
                 "canvas": canvas,
                 "updated_at": current_updated_at,
             })
-        if "title" in provided:
+        # C7：请求的基线早于最近一次 /meta 改名或改图标时，它带来的标题/图标是旧的，不再覆盖；
+        # 其他字段照常保存。不带基线的请求（显式改名）不受影响。
+        stale_title_icon = bool(payload.base_updated_at) and int(payload.base_updated_at) < int(canvas.get("meta_updated_at") or 0)
+        if "title" in provided and not stale_title_icon:
             canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
-        if "icon" in provided:
+        if "icon" in provided and not stale_title_icon:
             canvas["icon"] = (payload.icon or canvas.get("icon") or "layers")[:32]
         canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
         if "nodes" in provided:

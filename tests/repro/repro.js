@@ -643,6 +643,32 @@ async function c8ClassicSameOutputBothImages(browser) {
   await p1.close(); await p2.close();
 }
 
+// ---------------- C7：编辑器打开时在列表里改名，编辑器之后的保存不能把名字改回去 ----------------
+async function c7EditorKeepsListRename(browser, kind) {
+  const smart = kind === 'smart';
+  const id = await createTestCanvas(kind, smart ? smartNodes() : classicNodes());
+  const page = smart ? await openSmart(browser, id, 2) : await openClassic(browser, id, 3);
+  const puts = []; trackPuts(page, id, puts);
+  const nodeId = smart ? 'audit-s1' : 'audit-n1';
+  const c0 = await getCanvas(id);
+  const renamed = `AUDIT-C7-${kind}-renamed-in-list`;
+  // 列表页的改名方式（canvas-list.js → POST /meta），不推进 updated_at
+  const meta = await api('POST', `/api/canvases/${id}/meta`, { title: renamed });
+  // 编辑器随后连续两次编辑并保存：第一次的基线早于改名，第二次的基线晚于改名
+  for (const step of [1, 2]) {
+    await page.evaluate(`nodes.find(n => n.id === ${JSON.stringify(nodeId)}).x += 7; saveCanvas();`);
+    await sleep(3000);
+  }
+  await sleep(smart ? 7000 : 2000); // 等编辑器轮询 meta（普通画布 2.5 秒、智能画布 8 秒）
+  const c1 = await getCanvas(id);
+  const shown = await page.evaluate(smart ? `document.getElementById('smartTitle')?.textContent || ''` : `document.getElementById('currentCanvasTitle')?.textContent || ''`);
+  const pass = meta.status === 200 && c1.title === renamed && nodeX(c1, nodeId) === nodeX(c0, nodeId) + 14 && shown === renamed;
+  record(`C7_${kind}_editor_save_keeps_list_rename`, pass, {
+    serverTitle: c1.title, shownTitle: shown, nodeMoved: nodeX(c1, nodeId) - nodeX(c0, nodeId), puts: puts.map(p => p.status),
+  });
+  await page.close();
+}
+
 // ---------------- 画布 PUT 语义（接口级） ----------------
 async function apiSemantics() {
   const id = await createTestCanvas('smart', smartNodes());
@@ -678,6 +704,7 @@ async function apiSemantics() {
     ['GEN', () => genSmartWhileSaving(browser)], ['GEN', () => genSmartDuring409(browser)], ['GEN', () => genSmartTwoTabsHistory(browser)],
     ['GEN', () => genClassicDuring409(browser)], ['GEN', () => genClassicTwoTabsLogs(browser)],
     ['C8', () => c8SmartDeleteStaysDeleted(browser)], ['C8', () => c8ClassicSameOutputBothImages(browser)],
+    ['C7', () => c7EditorKeepsListRename(browser, 'classic')], ['C7', () => c7EditorKeepsListRename(browser, 'smart')],
     ['C6', () => apiSemantics()],
   ];
   try {
