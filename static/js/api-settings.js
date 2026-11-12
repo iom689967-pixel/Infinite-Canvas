@@ -14,6 +14,7 @@ const idInput = document.getElementById('idInput');
 const baseInput = document.getElementById('baseInput');
 const protocolInput = document.getElementById('protocolInput');
 const imageRequestModeInput = document.getElementById('imageRequestModeInput');
+const imageRequestModeAutoBtn = document.getElementById('imageRequestModeAutoBtn');
 const providerEnabledInput = document.getElementById('providerEnabledInput');
 const providerPrimaryInput = document.getElementById('providerPrimaryInput');
 const imageGenerationEndpointInput = document.getElementById('imageGenerationEndpointInput');
@@ -2514,6 +2515,7 @@ function renderEditor(){
             ? '推荐平台使用固定图片协议'
             : item.image_request_mode_manual === true ? '已手动选择：自动识别和检测不会再改动这里' : '';
     }
+    syncImageRequestModeAutoBtn(item);
     if(personalSettings){
         let hint=document.getElementById('personalModelSupport');
         if(!hint){hint=document.createElement('p');hint.id='personalModelSupport';hint.className='hint';settingsContent.append(hint);}
@@ -2958,6 +2960,37 @@ function isRunningHubContext(item, baseUrl=''){
         || url.includes('runninghub.cn')
         || url.includes('runninghub.ai');
 }
+// 与后端 detect_image_request_mode 和"验证协议"里的土豆规则一致：命中规则时返回应使用的图片接口，否则返回空
+function autoImageRequestMode(item){
+    const base = String(baseInput?.value || item?.base_url || '').trim().toLowerCase();
+    if(base.includes('apihub.agnes-ai.com')) return 'openai-json';
+    if((item?.image_models || []).some(model => String(model || '').trim().toLowerCase().startsWith('agnes-image-'))) return 'openai-json';
+    try {
+        const host = new URL(base).hostname;
+        if(host === 'api.ai-tudou.net' || host.endsWith('.ai-tudou.net')) return 'tudou-async';
+    } catch(e) {}
+    return '';
+}
+function syncImageRequestModeAutoBtn(item = provider()){
+    if(!imageRequestModeAutoBtn) return;
+    imageRequestModeAutoBtn.hidden = !(item && item.image_request_mode_manual === true && imageRequestModeInput && !imageRequestModeInput.disabled);
+}
+function restoreImageRequestModeAuto(){
+    const item = provider();
+    if(!item || item.image_request_mode_manual !== true || !imageRequestModeInput || imageRequestModeInput.disabled) return;
+    item.image_request_mode_manual = false;
+    const detected = autoImageRequestMode(item);
+    if(detected){
+        item.image_request_mode = detected;
+        imageRequestModeInput.value = detected;
+    }
+    imageRequestModeInput.title = '';
+    syncImageRequestModeAutoBtn(item);
+    setStatus(detected
+        ? `已恢复自动识别：图片接口设为 ${imageRequestModeLabel(detected)}，点“保存”后生效`
+        : `已恢复自动识别：这个平台目前没有匹配的识别规则，图片接口保持 ${imageRequestModeLabel(imageRequestModeInput.value)}；点“保存”后生效`);
+}
+window.restoreImageRequestModeAuto = restoreImageRequestModeAuto;
 function applyDetectedImageRequestMode(mode){
     const item = provider();
     if(!item || !imageRequestModeInput) return false;
@@ -4067,6 +4100,7 @@ window.onload = () => {
             item.image_request_mode_manual = true;
             imageRequestModeInput.title = '已手动选择：自动识别和检测不会再改动这里';
         }
+        syncImageRequestModeAutoBtn(item);
     });
     [keyInput, rhFreeKeyInput, rhWalletKeyInput].forEach(input => {
         if(input) input.addEventListener('input', () => {

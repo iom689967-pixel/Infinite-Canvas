@@ -982,6 +982,67 @@ async function c10ClassicAssetManagerEntry(browser) {
   record('C10_classic_asset_manager_opens_from_panel', pass, { ...res, errors, badApi });
 }
 
+// ---------------- A5 后续：设置页"恢复自动识别"按钮清除手动选择的图片接口 ----------------
+// 修复前一旦手动选过图片接口就没有办法退回自动识别，只能删掉平台重建。
+async function a5RestoreImageModeAuto(browser) {
+  const AG = 'audit-auto-agnes', PL = 'audit-auto-plain', OFF = 'audit-auto-off';
+  const seed = [
+    { id: AG, name: 'AUDIT Agnes', base_url: 'https://apihub.agnes-ai.com/v1', protocol: 'openai', image_models: ['agnes-image-2.1-flash'], image_request_mode: 'openai', image_request_mode_manual: true },
+    { id: PL, name: 'AUDIT Plain', base_url: 'https://audit-plain.example.test/v1', protocol: 'openai', image_models: ['audit-image-1'], image_request_mode: 'openai-responses', image_request_mode_manual: true },
+    { id: OFF, name: 'AUDIT Off', base_url: 'https://audit-off.example.test/v1', protocol: 'openai', image_models: ['audit-image-1'], image_request_mode: 'openai', image_request_mode_manual: false },
+  ];
+  const p = await browser.newPage();
+  await p.setViewport({ width: 1400, height: 900 });
+  const errors = [];
+  p.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
+  const ready = `typeof providers !== 'undefined' && Array.isArray(providers) && providers.length > 0 && typeof saveProviders === 'function'`;
+  await p.goto(`${B}/static/api-settings.html`, { waitUntil: 'domcontentloaded' });
+  await p.waitForFunction(ready, { timeout: 20000 });
+  // 先存入三个测试平台（两个曾手动选择过，一个没有），再重新打开页面，模拟"以前选过、现在回来改"
+  const seeded = await p.evaluate(`(async () => { providers.push(...${JSON.stringify(seed)}); renderProviderList(); return await saveProviders(); })()`);
+  await p.goto(`${B}/static/api-settings.html`, { waitUntil: 'domcontentloaded' });
+  await p.waitForFunction(ready, { timeout: 20000 });
+  await sleep(500);
+  const hasButton = await p.evaluate(`Boolean(document.getElementById('imageRequestModeAutoBtn'))`);
+  const view = async id => {
+    await p.evaluate(`selectProvider(${JSON.stringify(id)})`); await sleep(200);
+    return p.evaluate(`(() => { const b = document.getElementById('imageRequestModeAutoBtn'); const item = providers.find(x => x.id === ${JSON.stringify(id)});
+      return { value: document.getElementById('imageRequestModeInput').value, visible: Boolean(b && !b.hidden && b.offsetWidth > 0), manual: item.image_request_mode_manual === true }; })()`);
+  };
+  const res = { seeded, hasButton, before: {}, after: {}, status: {}, saved: {} };
+  res.before.off = await view(OFF);
+  for (const [key, id] of [['agnes', AG], ['plain', PL]]) {
+    res.before[key] = await view(id);
+    if (hasButton && res.before[key].visible) await p.click('#imageRequestModeAutoBtn');
+    await sleep(200);
+    res.after[key] = await view(id);
+    res.status[key] = await p.evaluate(`document.getElementById('status')?.textContent || ''`);
+  }
+  // 用页面上的"保存"按钮保存，再从服务端读回
+  const putDone = p.waitForResponse(r => new URL(r.url()).pathname === '/api/providers' && r.request().method() === 'PUT', { timeout: 10000 }).catch(() => null);
+  await p.click('.api-page-save-btn');
+  const put = await putDone;
+  const list = ((await api('GET', '/api/providers')).json || {}).providers || [];
+  for (const [key, id] of [['agnes', AG], ['plain', PL], ['off', OFF]]) {
+    const s = list.find(x => x.id === id) || {};
+    res.saved[key] = { mode: s.image_request_mode, manual: s.image_request_mode_manual };
+  }
+  res.putStatus = put ? put.status() : null;
+  // 清理：删掉测试平台
+  await p.evaluate(`(async () => { providers = providers.filter(x => !String(x.id).startsWith('audit-auto-')); selectedId = providers[0]?.id || ''; renderProviderList(); return await saveProviders(); })()`);
+  await p.close();
+  const pass = res.seeded === true && hasButton
+    && !res.before.off.visible
+    && res.before.agnes.visible && res.before.agnes.value === 'openai'
+    && !res.after.agnes.visible && !res.after.agnes.manual && res.after.agnes.value === 'openai-json'
+    && res.before.plain.visible && !res.after.plain.visible && !res.after.plain.manual && res.after.plain.value === 'openai-responses'
+    && res.putStatus === 200
+    && res.saved.agnes.mode === 'openai-json' && res.saved.agnes.manual === false
+    && res.saved.plain.mode === 'openai-responses' && res.saved.plain.manual === false
+    && res.saved.off.manual === false && !errors.length;
+  record('A5_settings_restore_image_mode_auto', pass, { ...res, errors });
+}
+
 // ---------------- C10：外壳页（index.html）的 WebSocket 断线后自动重连，重连后照常收到画布更新通知 ----------------
 // 修复前断开一次就再也不连，之后打开的画布只能靠轮询发现别处的修改。
 async function wsShellReconnects(browser) {
@@ -1085,6 +1146,7 @@ async function listMetaFailureRollsBack(browser) {
     ['WS', () => wsShellReconnects(browser)],
     ['C10', () => listMetaFailureRollsBack(browser)],
     ['C10', () => c10ClassicAssetManagerEntry(browser)],
+    ['A5', () => a5RestoreImageModeAuto(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {

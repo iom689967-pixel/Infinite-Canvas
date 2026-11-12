@@ -635,6 +635,10 @@ html.studio-theme-dark body .image-edit-route-wrap { background:var(--soft); bor
 .image-request-mode-wrap select:disabled,
 .image-edit-route-wrap select:disabled { cursor:not-allowed; opacity:.72; }
 .image-request-mode-wrap select { min-width:150px; }
+.image-request-mode-wrap { gap:4px; }
+.image-mode-auto-btn { display:inline-flex; align-items:center; gap:4px; height:26px; padding:0 8px; border:1px solid var(--line); border-radius:7px; background:var(--soft); color:var(--muted); font-size:11px; font-weight:800; white-space:nowrap; cursor:pointer; }
+.image-mode-auto-btn:hover { color:var(--text); border-color:var(--text); }
+.image-mode-auto-btn[hidden] { display:none; }
 .image-edit-route-wrap select { min-width:128px; }
 .protocol-selector-wrap select:hover,
 .image-request-mode-wrap select:hover,
