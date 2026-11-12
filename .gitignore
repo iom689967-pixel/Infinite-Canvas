@@ -41,6 +41,8 @@ __pycache__/
 /data/update_backups/
 /data/asset_classification_prompt.txt
 /data/kie_reference_cache.json
+/data/canvas_tasks.sqlite3
+/data/canvas_tasks.sqlite3-journal
 
 # Historical local source backups
 *.broken-before-*
@@ -54,3 +56,6 @@ __pycache__/
 /Infinite-Canvas-启动.command
 /Infinite-Canvas-停止.command
 /Infinite-Canvas-重启.command
+
+# Audit repro outputs
+/tests/repro/results*.json

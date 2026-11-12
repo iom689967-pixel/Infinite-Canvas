@@ -298,12 +298,9 @@
                                         <option value="openai-responses">图片：OpenAI RS</option>
                                         <option value="tudou-async">图片：土豆 GPT-Image-2 异步</option>
                                     </select>
+                                    <button id="imageRequestModeAutoBtn" class="image-mode-auto-btn" type="button" onclick="restoreImageRequestModeAuto()" title="清除手动选择，交给自动识别" hidden><i data-lucide="rotate-ccw" class="w-3 h-3"></i><span>恢复自动识别</span></button>
                                 </div>
                             </div>
-                            <label class="field">
-                                <span class="label">图片编辑路由</span>
-                                <div class="field-frame image-request-mode-wrap"><select id="imageEditRouteInput" aria-label="图片编辑路由"><option value="general">编辑：标准接口</option><option value="auto">编辑：自动选择</option><option value="chat">编辑：聊天接口</option></select></div>
-                            </label>
                             <div class="field">
                                 <span class="label">平台状态</span>
                                 <label class="hint"><input id="providerEnabledInput" type="checkbox"> 启用平台</label>
@@ -598,6 +595,6 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.08.28.1"></script>
+    <script src="/static/js/api-settings.js?v=2026.09.15.kie25.1"></script>
 </body>
 </html>

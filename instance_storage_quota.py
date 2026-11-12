@@ -147,8 +147,10 @@ class StorageQuota:
             value.extend(chunk)
             if len(value)>limit: raise HTTPException(413,'单文件超过上传大小限制')
 
-    def replace_json(self, path, value):
-        content=json.dumps(value,ensure_ascii=False,indent=2).encode()
+    def replace_json(self, path, value, separators=None):
+        # separators 给定时写紧凑格式（画布文件）；默认保持缩进格式（历史记录等）
+        content=(json.dumps(value,ensure_ascii=False,separators=separators) if separators
+                 else json.dumps(value,ensure_ascii=False,indent=2)).encode()
         if len(content)>self.max_upload: raise HTTPException(413,'文件超过存储大小限制')
         old=os.path.getsize(path) if os.path.isfile(path) else 0
         temporary=None

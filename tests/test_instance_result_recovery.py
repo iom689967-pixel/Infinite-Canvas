@@ -58,7 +58,7 @@ class RecoveryTests(unittest.TestCase):
     def begin(self, mode='dns', provider_id='atelier-images'):
         self.mock.result_mode=mode
         canvas=self.canvas('A','recovery')
-        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'original-node','type':'smart-image','generationHistory':[{'id':'original-attempt','status':'running'}]}]})
+        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'original-node','type':'smart-image','generationHistory':[{'id':'original-attempt','status':'running'}]}],'base_updated_at':canvas['updated_at']})
         self.binding={'canvas_id':canvas['id'],'node_id':'original-node','generation_id':'original-attempt'}
         task=self.ok('A','POST','/api/canvas-image-tasks',json=self.image_payload(provider_id=provider_id, **self.binding))['task_id']
         return task,self.wait_job(task)
@@ -140,7 +140,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.mock.calls),before)
 
     def test_deleted_node_cannot_take_over_result(self):
-        t,_=self.begin();self.ok('A','PUT','/api/canvases/'+self.binding['canvas_id'],json={'nodes':[]})
+        t,_=self.begin()
+        current=self.ok('A','GET','/api/canvases/'+self.binding['canvas_id'])['canvas']
+        self.ok('A','PUT','/api/canvases/'+self.binding['canvas_id'],json={'nodes':[],'base_updated_at':current['updated_at']})
         before=len(self.mock.calls);self.assertEqual(self.request('A','POST','/api/canvas-image-tasks/'+t+'/refresh').status_code,409);self.assertEqual(len(self.mock.calls),before)
 
     def test_invalid_initial_binding_rejected_before_create(self):

@@ -2,11 +2,17 @@
     if(!window.StudioI18n) return;
     window.StudioI18n.register({
         "canvas.noApiProviders": { zh: "暂无 API 平台", en: "No API providers" },
+        "canvas.providerUnavailable": { zh: "已删除或不可用", en: "deleted or unavailable" },
+        "canvas.providerMissingRun": { zh: "节点使用的 API 平台「{id}」已被删除或不可用，请在节点里重新选择平台。", en: "The API provider \"{id}\" used by this node was deleted or is unavailable. Choose another provider on the node." },
+        "canvas.providerNoneRun": { zh: "没有可用的 API 平台，请先到 API 设置添加。", en: "No API provider is available. Add one in API Settings first." },
+        "canvas.providerProblemTitle": { zh: "无法运行", en: "Cannot run" },
+        "canvas.apiConfigLoadFailed": { zh: "API 配置加载失败，节点设置未做改动", en: "Failed to load API settings; node settings were left unchanged" },
         "canvas.noApiProvidersHint": { zh: "暂无 API 平台，请到 API 设置添加", en: "No API providers. Add one in API Settings." },
         "canvas.noImageModelsHint": { zh: "暂无生图模型，请到 API 设置添加", en: "No image models. Add some in API Settings." },
         "canvas.noModelsHint": { zh: "暂无模型，请到 API 设置添加", en: "No models. Add some in API Settings." },
         "canvas.title": { zh: "无限画布", en: "Infinite Canvas" },
         "canvas.backToManager": { zh: "返回画布管理", en: "Back to canvas manager" },
+        "canvas.assetManager": { zh: "资产库管理", en: "Manage asset library" },
         "canvas.untitled": { zh: "未命名画布", en: "Untitled Canvas" },
         "canvas.chooseFirst": { zh: "请选择或新建画布", en: "Choose or create a canvas" },
         "canvas.image": { zh: "上传", en: "Upload" },

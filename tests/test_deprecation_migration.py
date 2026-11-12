@@ -29,6 +29,7 @@ class DeprecationMigrationTests(unittest.IsolatedAsyncioTestCase):
                 main.migrate_asset_library_into_dirs,
                 main.migrate_double_extension_uploads,
                 main.migrate_mislabeled_image_extensions,
+                main.restore_canvas_tasks,  # C9：迁移之后恢复画布生成任务
             ])
         finally:
             main.GLOBAL_LOOP = previous_loop

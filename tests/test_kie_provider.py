@@ -11,6 +11,8 @@ from providers.kie.client import KieAPIError, KieClient
 from providers.kie.models import (
     GPT_IMAGE_2,
     KIE_UI_MODELS,
+    GPT_IMAGE_25_FLARE,
+    GPT_IMAGE_25_SUNBURST,
     NANO_BANANA_PRO,
     KieValidationError,
     build_capability_schema,
@@ -57,8 +59,8 @@ class FakeTaskClient:
 
 
 class KieModelTests(unittest.TestCase):
-    def test_whitelist_contains_only_two_ui_models(self):
-        self.assertEqual(KIE_UI_MODELS, (GPT_IMAGE_2, NANO_BANANA_PRO))
+    def test_whitelist_contains_four_ui_models(self):
+        self.assertEqual(KIE_UI_MODELS, (GPT_IMAGE_2, NANO_BANANA_PRO, GPT_IMAGE_25_FLARE, GPT_IMAGE_25_SUNBURST))
 
     def test_gpt_text_and_image_routes(self):
         text_payload, _ = build_create_payload(GPT_IMAGE_2, "lookbook", [], "1:1", "1K")
@@ -294,10 +296,12 @@ class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["protocol"], "kie")
         self.assertEqual(result["image_request_mode"], "kie")
-        self.assertEqual(result["model_count"], 2)
+        self.assertEqual(result["model_count"], 4)
         self.assertEqual(result["model_names"], {
             "gpt-image-2": "GPT Image 2",
             "nano-banana-pro": "Nano Banana Pro",
+            "gpt-image-2.5-flare": "GPT Image 2.5 Flare",
+            "gpt-image-2.5-sunburst": "GPT Image 2.5 Sunburst",
         })
         self.assertNotIn("Ark", result["message"])
         self.assertNotIn("OpenAI", result["message"])
@@ -332,7 +336,7 @@ class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["protocol"], "kie")
-        self.assertEqual(result["model_count"], 2)
+        self.assertEqual(result["model_count"], 4)
         self.assertEqual(calls, [("https://api.kie.ai", {"headers": {"Accept": "text/html,application/json"}})])
         self.assertNotIn("Authorization", calls[0][1]["headers"])
 
@@ -432,6 +436,7 @@ class KieServerWhitelistTests(unittest.IsolatedAsyncioTestCase):
         save_image.assert_awaited_once_with(
             {"type": "url", "value": "https://example.test/result.png"},
             prefix="online_",
+            require_local=True,
         )
 
     async def test_recovery_query_parses_kie_fail_code_and_message(self):

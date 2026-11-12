@@ -452,7 +452,8 @@ function attachCardDrag(card, c){
             document.removeEventListener('mouseup', onUp);
             card.classList.remove('dragging');
             if(moved){
-                persistMeta(c.id, { board_x: Math.round(c.board_x), board_y: Math.round(c.board_y) });
+                c.board_x = Math.round(c.board_x); c.board_y = Math.round(c.board_y);
+                persistMeta(c.id, { board_x: c.board_x, board_y: c.board_y }, { board_x: origX, board_y: origY });
             } else {
                 openCanvas(c);
             }
@@ -835,22 +836,34 @@ function startCardRename(canvasId){
 
 async function setCanvasTitle(id, title){
     const c = canvases.find(x => x.id === id);
+    const previous = c ? { title: c.title } : null;
     if(c) c.title = title;
     renderBoard();
-    await persistMeta(id, { title });
+    await persistMeta(id, { title }, previous);
 }
 
 async function moveCanvasToProject(id, projectId){
     const c = canvases.find(x => x.id === id);
+    const previous = c ? { project: c.project } : null;
     if(c) c.project = projectId;
     renderBoard();
     renderProjects();
     setStatus(L('已移动','Moved'));
-    await persistMeta(id, { project: projectId });
+    await persistMeta(id, { project: projectId }, previous);
 }
 
 /* ===== Card meta persist (POST /meta) ===== */
-async function persistMeta(id, patch){
+// previous：修改前的值。保存失败时把界面恢复成这些值；不传则只提示失败（例如自动排版的位置，回滚后会被立刻重新排版并重试）。
+// 同一张卡片的同一个字段之后又有新的修改时，旧请求失败不回滚，以免覆盖新的修改。
+const metaWriteSeq = new Map();
+async function persistMeta(id, patch, previous = null){
+    const seqs = {};
+    Object.keys(patch).forEach(k => {
+        const key = `${id}:${k}`;
+        const n = (metaWriteSeq.get(key) || 0) + 1;
+        metaWriteSeq.set(key, n);
+        seqs[k] = n;
+    });
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(id)}/meta`, {
             method: 'POST',
@@ -863,7 +876,28 @@ async function persistMeta(id, patch){
             const idx = canvases.findIndex(x => x.id === id);
             if(idx >= 0) canvases[idx] = { ...canvases[idx], ...data.canvas };
         }
-    } catch(e){ console.error(e); setStatus(L('保存失败','Save failed')); }
+        return true;
+    } catch(e){
+        console.error(e);
+        let reverted = false;
+        const c = previous ? canvases.find(x => x.id === id) : null;
+        if(c){
+            Object.keys(previous).forEach(k => {
+                if(metaWriteSeq.get(`${id}:${k}`) !== seqs[k]) return;   // 之后又改过，不回滚
+                if(c[k] !== patch[k]) return;                             // 本地已被别的操作改掉
+                c[k] = previous[k];
+                reverted = true;
+            });
+        }
+        if(reverted){
+            renderBoard();
+            renderProjects();
+            setStatus(L('保存失败，已恢复修改前的内容','Save failed; the change was reverted'));
+        } else {
+            setStatus(L('保存失败','Save failed'));
+        }
+        return false;
+    }
 }
 
 /* ===== Delete canvas (soft -> trash, with confirm) ===== */

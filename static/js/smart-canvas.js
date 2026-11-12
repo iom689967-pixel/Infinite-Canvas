@@ -226,7 +226,7 @@ const activeSmartGenerationRuns = new Map();
 const cancellingSmartGenerationIds = new Set();
 const activePromptLLMRuns = new Map();
 const kieCapabilityCache = new Map();
-const kieCapabilityLoading = new Set();
+const kieCapabilityLoading = new Map();
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -869,38 +869,11 @@ function canvasForStorage(){
     return clean;
 }
 function apiErrorMessage(data, fallback='请求失败'){
-    if(!data) return fallback;
-    if(typeof data === 'string') return data || fallback;
-    const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
-    if(Array.isArray(detail)){
-        const messages = detail.map(item => {
-            if(typeof item === 'string') return item;
-            const loc = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
-            const msg = item?.msg || item?.message || JSON.stringify(item);
-            return loc ? `${loc}: ${msg}` : msg;
-        }).filter(Boolean);
-        return messages.join('\n') || fallback;
-    }
-    if(detail && typeof detail === 'object') return detail.message || detail.msg || JSON.stringify(detail);
-    try {
-        return JSON.stringify(data);
-    } catch(e) {
-        return fallback;
-    }
+    return ApiErrors.message(data, fallback);
 }
 async function responseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        return apiErrorMessage(data, fallback);
-    } catch(e) {
-        try {
-            const text = await response.text();
-            return text || fallback;
-        } catch(_) {
-            return fallback;
-        }
-    }
+    // 只取 detail；不是 JSON 时截断，不把整段响应文本放进提示和日志
+    return ApiErrors.fromResponse(response, fallback);
 }
 function downloadBlob(blob, filename){
     const url = URL.createObjectURL(blob);
@@ -1375,12 +1348,12 @@ function applyTheme(theme){
     document.body?.classList.toggle('theme-dark', dark);
     document.body?.classList.toggle('studio-theme-dark', dark);
 }
-function toast(text){
+function toast(text, duration=1800){
     const el = document.getElementById('toast');
     el.textContent = text;
     el.classList.add('show');
     clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => el.classList.remove('show'), 1800);
+    toast._timer = setTimeout(() => el.classList.remove('show'), duration);
 }
 let generationCompleteSoundAt = 0;
 function playGenerationCompleteSound(){
@@ -2581,29 +2554,26 @@ async function ensureKieCapability(providerId=settings.provider_id, model=settin
     if(!isKieProviderId(providerId) || !model) return null;
     const key = kieCapabilityKey(providerId, model);
     if(kieCapabilityCache.has(key)) return kieCapabilityCache.get(key);
-    if(kieCapabilityLoading.has(key)) return null;
-    kieCapabilityLoading.add(key);
-    try {
-        const response = await fetch(`/api/image-params?provider_id=${encodeURIComponent(providerId)}&model=${encodeURIComponent(model)}`);
-        if(!response.ok) throw new Error(await response.text());
-        const schema = await response.json();
+    if(kieCapabilityLoading.has(key)) return kieCapabilityLoading.get(key);
+    const pending = KieImageParams.load(providerId, model).then(schema => {
         kieCapabilityCache.set(key, schema);
         if(settings.provider_id === providerId && settings.model === model) normalizeKieSettings(schema, settings);
         scheduleDynamicParamsRefresh(0);
         return schema;
-    } catch(error){
-        toast((error?.message || 'Kie 参数加载失败').slice(0, 160));
+    }).catch(() => {
+        toast('Kie 参数加载失败，请重试');
         return null;
-    } finally {
-        kieCapabilityLoading.delete(key);
-    }
+    }).finally(() => kieCapabilityLoading.delete(key));
+    kieCapabilityLoading.set(key, pending);
+    return pending;
 }
+
 function volcengineProvider(){
     return (apiProviders || []).find(p => p.id === 'volcengine' && p.enabled !== false) || {
         id:'volcengine',
         name:'火山引擎',
         image_models:[],
-        video_models:DEFAULT_VIDEO_MODELS,
+        video_models:[],
         enabled:true
     };
 }
@@ -2807,13 +2777,100 @@ function sortRunningHubFields(fields){
         return String(a.nodeId || '').localeCompare(String(b.nodeId || ''), undefined, {numeric:true}) || String(a.fieldName || '').localeCompare(String(b.fieldName || ''));
     });
 }
+// ---- 平台解析（A1 前端）----
+// 以前：没有视频平台时凭空造出 “comfly”；节点上的平台被删除后，渲染参数面板时会悄悄换成列表第一个平台，
+// 并通过 persistActiveSmartSettings 写回节点。现在：未选择时才默认取第一个；明确选过的平台原样保留，
+// 面板上标出“已删除或不可用”，运行前给出明确错误。“comfly” 是旧版默认 id，未配置同名平台时视为“未选择”。
+const LEGACY_DEFAULT_PROVIDER_IDS = new Set(['comfly']);
+function isUnsetProviderId(id){
+    const value = String(id || '').trim();
+    if(!value) return true;
+    return LEGACY_DEFAULT_PROVIDER_IDS.has(value.toLowerCase()) && !(apiProviders || []).some(p => p.id === value);
+}
+function resolveSmartProviderFromList(id, providers){
+    if(isUnsetProviderId(id)) return providers[0]?.id || '';
+    return String(id).trim();
+}
+function smartProviderUnavailable(id, providers){
+    return !isUnsetProviderId(id) && !providers.some(p => p.id === String(id).trim());
+}
+// 运行前检查：返回错误文案；可以运行时返回空字符串。
+function smartProviderProblem(id, providers){
+    const resolved = resolveSmartProviderFromList(id, providers);
+    if(!resolved) return tr('smart.providerNoneRun');
+    if(!providers.some(p => p.id === resolved)) return trf('smart.providerMissingRun', {id:resolved});
+    return '';
+}
+function smartProviderPillLabel(id, providers, fallback){
+    const provider = providers.find(p => p.id === id);
+    if(provider) return provider.name || provider.id;
+    if(id && !isUnsetProviderId(id)) return `⚠ ${id}（${tr('smart.providerUnavailable')}）`;
+    return fallback;
+}
 function chatApiProviders(){
     return (apiProviders || []).filter(p => p.enabled !== false && (p.chat_models || []).length);
 }
+// ---- 失效平台检查（A3）----
+// 节点的 runSettings / LLM 设置里可能保存着已被删除或停用的平台（实际数据中有 8 个节点指向已删除的平台）。
+// 加载画布和配置变更后统一检查：汇总提示一次，并给这些节点加上标记；运行时由 smartProviderProblem 拦截。
+let smartApiConfigLoaded = false;
+let smartMissingProviderWarningKey = '';
+function smartNodeProviderRefs(node){
+    const refs = [];
+    const rs = node?.runSettings;
+    if(rs && typeof rs === 'object' && (rs.engine || 'api') === 'api'){
+        if(rs.apiKind === 'video'){
+            if(rs.videoProvider && rs.videoProvider !== 'volcengine') refs.push({kind:'video', id:rs.videoProvider});
+        } else if(rs.provider_id && rs.provider_id !== 'volcengine'){
+            refs.push({kind:'image', id:rs.provider_id});
+        }
+    }
+    if(node?.type === 'smart-prompt' && node.llmEnabled && node.llmProvider && node.llmProvider !== 'modelscope'){
+        refs.push({kind:'chat', id:node.llmProvider});
+    }
+    return refs;
+}
+function smartNodesWithMissingProviders(){
+    if(!smartApiConfigLoaded) return [];
+    const lists = {image:imageProviders(), video:videoApiProviders(), chat:chatApiProviders()};
+    const missing = [];
+    (nodes || []).forEach(node => {
+        smartNodeProviderRefs(node).forEach(ref => {
+            if(smartProviderUnavailable(ref.id, lists[ref.kind])) missing.push({nodeId:node.id, kind:ref.kind, providerId:ref.id});
+        });
+    });
+    return missing;
+}
+function applySmartMissingProviderMarkers(missing=smartNodesWithMissingProviders()){
+    const byNode = new Map();
+    missing.forEach(item => { if(!byNode.has(item.nodeId)) byNode.set(item.nodeId, item.providerId); });
+    world?.querySelectorAll('.image-node').forEach(el => {
+        const providerId = byNode.get(el.dataset.id);
+        if(providerId){
+            el.dataset.providerMissing = 'true';
+            el.title = trf('smart.providerMissingNodeTitle', {id:providerId});
+        } else if(el.dataset.providerMissing){
+            delete el.dataset.providerMissing;
+            el.removeAttribute('title');
+        }
+    });
+}
+function warnAboutMissingProviders(){
+    const missing = smartNodesWithMissingProviders();
+    applySmartMissingProviderMarkers(missing);
+    const key = missing.map(item => `${item.nodeId}:${item.providerId}`).sort().join('|');
+    if(!missing.length || key === smartMissingProviderWarningKey){
+        smartMissingProviderWarningKey = key;
+        return missing;
+    }
+    smartMissingProviderWarningKey = key;
+    const ids = [...new Set(missing.map(item => item.providerId))];
+    const nodeCount = new Set(missing.map(item => item.nodeId)).size;
+    toast(trf('smart.providerMissingSummary', {n:nodeCount, ids:ids.slice(0, 3).join('、') + (ids.length > 3 ? '…' : '')}), 8000);
+    return missing;
+}
 function resolveChatProviderId(providerId=''){
-    const providers = chatApiProviders();
-    if(providers.some(p => p.id === providerId)) return providerId;
-    return providers[0]?.id || 'comfly';
+    return resolveSmartProviderFromList(providerId, chatApiProviders());
 }
 function providerChatModels(providerId){
     const provider = chatApiProviders().find(p => p.id === providerId);
@@ -2835,7 +2892,7 @@ function chatModelOptions(selectedModel='', providerId=''){
 }
 function apiProviderById(providerId){
     if(providerId === 'volcengine') return volcengineProvider();
-    return (apiProviders || []).find(p => p.id === providerId) || imageProviders()[0] || null;
+    return (apiProviders || []).find(p => p.id === providerId) || null;
 }
 // 认证素材 asset:// 是平台绑定的：返回某 provider 所属的认证平台键（与后端一致）
 function videoProviderPlatform(providerId){
@@ -2961,30 +3018,27 @@ function modelscopeProvider(){
 function modelscopeImageModels(){
     return modelscopeProvider()?.image_models || ['Tongyi-MAI/Z-Image-Turbo'];
 }
-const DEFAULT_VIDEO_MODELS = ['veo3-fast','veo3','sora','runway','kling','pika','minimax-video','wan-v2','seedance-1.0-pro','jimeng-vide-3.0','jimeng-video-3.0-pro'];
 function videoApiProviders(){
-    const fromConfig = (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
-    if(fromConfig.length) return fromConfig;
-    return [{id:'comfly', name:'Comfly', video_models:DEFAULT_VIDEO_MODELS, enabled:true}];
+    return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'volcengine' && (p.video_models || []).length);
 }
 function videoProviderById(providerId){
     if(providerId === 'volcengine') return volcengineProvider();
-    return videoApiProviders().find(p => p.id === providerId) || videoApiProviders()[0] || null;
+    return videoApiProviders().find(p => p.id === providerId) || null;
 }
 function providerVideoModels(providerId){
     if(providerId === 'volcengine') return volcengineVideoModels();
     const provider = videoApiProviders().find(p => p.id === providerId);
-    const models = provider?.video_models || DEFAULT_VIDEO_MODELS;
-    return [...new Set(models)];
+    return [...new Set(provider?.video_models || [])];
 }
 function volcengineVideoModels(){
+    // A4：只用 API 设置里火山引擎平台的视频模型；没配置时为空，不再给一份写死的其他厂商模型列表。
     const provider = (apiProviders || []).find(p => p.id === 'volcengine');
-    return [...new Set(provider?.video_models || DEFAULT_VIDEO_MODELS)];
+    return [...new Set(provider?.video_models || [])];
 }
 function renderVideoProviderControl(providers){
-    const current = (providers || []).find(p => p.id === settings.videoProvider) || videoProviderById(settings.videoProvider);
+    const label = smartProviderPillLabel(settings.videoProvider, providers || [], tr('smart.platform'));
     return `<div class="smart-control provider-control">
-        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.videoProvider || tr('smart.platform'))}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(label)}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.videoPlatform'))}</div>
             <div class="model-list">
@@ -3240,9 +3294,10 @@ function renderDynamicParams(){
 }
 function renderApiParams(){
     const providers = imageProviders();
-    if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
+    settings.provider_id = resolveSmartProviderFromList(settings.provider_id, providers);
     const models = filterJimengImageModels(providerImageModels(settings.provider_id));
-    if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    // 平台已删除/不可用时保留原模型，等用户重新选择平台
+    if(!smartProviderUnavailable(settings.provider_id, providers) && (!settings.model || !models.includes(settings.model))) settings.model = models[0] || '';
     if(isKieProviderId(settings.provider_id)){
         const schema = currentKieCapability();
         if(!schema) ensureKieCapability(settings.provider_id, settings.model);
@@ -3278,9 +3333,9 @@ function renderJimengUpscaleControl(){
 }
 function renderApiVideoParams(){
     const providers = videoApiProviders();
-    if(!settings.videoProvider || !providers.some(p => p.id === settings.videoProvider)) settings.videoProvider = providers[0]?.id || 'comfly';
+    settings.videoProvider = resolveSmartProviderFromList(settings.videoProvider, providers);
     const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
+    if(settings.videoProvider && !smartProviderUnavailable(settings.videoProvider, providers) && (!settings.videoModel || !models.includes(settings.videoModel))) settings.videoModel = models[0] || settings.videoModel || '';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -3318,7 +3373,7 @@ function renderVolcengineVideoParams(){
     const providers = [provider];
     const models = volcengineVideoModels();
     settings.videoProvider = 'volcengine';
-    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'seedance-1.0-pro';
+    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || '';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
@@ -3591,9 +3646,9 @@ function videoAspectIconClass(value){
     return '';
 }
 function renderProviderControl(providers){
-    const current = (providers || []).find(p => p.id === settings.provider_id) || apiProviderById(settings.provider_id);
+    const label = smartProviderPillLabel(settings.provider_id, providers || [], tr('smart.platform'));
     return `<div class="smart-control provider-control">
-        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.provider_id || tr('smart.platform'))}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(label)}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.apiPlatform'))}</div>
             <div class="model-list">
@@ -4756,32 +4811,88 @@ function bindDynamicParams(){
         };
     });
 }
-async function loadConfig(){
+// 返回 true 表示 /api/config 加载成功。失败时（含非 2xx）保留上一次的平台和工作流列表，
+// 不再把错误响应当成“没有平台 / 没有工作流”（A2）。
+// A6：同一时间只跑一个请求；进行中又被触发时，只在它结束后再补跑一次（保证拿到最新配置）。
+// 每次加载记录服务端的 config_version 和工作流列表，lastConfigLoadChanged 表示这次是否真有变化。
+let configLoadInFlight = null;
+let configLoadQueued = null;
+let appliedConfigVersion = '';
+let appliedWorkflowsJson = '';
+let lastConfigLoadChanged = false;
+let configLoadCount = 0;
+function loadConfig(){
+    if(configLoadInFlight){
+        if(!configLoadQueued){
+            configLoadQueued = configLoadInFlight.catch(() => false).then(() => {
+                configLoadQueued = null;
+                return loadConfig();
+            });
+        }
+        return configLoadQueued;
+    }
+    configLoadInFlight = loadConfigOnce().finally(() => { configLoadInFlight = null; });
+    return configLoadInFlight;
+}
+// 与后端 runninghub_workflow_config_has_payload 同一判断：保存过参数（fields / workflowJson / raw 任一非空）。
+// 只有标题和缩略图、从没拉取过参数的条目，后端必然返回 404，预取时跳过；真正用到时仍会按需获取。
+function runningHubEntryHasSavedParams(entry){
+    const nonEmpty = value => Array.isArray(value) ? value.length > 0 : Boolean(value && typeof value === 'object' && Object.keys(value).length);
+    return nonEmpty(entry?.fields) || nonEmpty(entry?.workflowJson) || nonEmpty(entry?.raw);
+}
+async function loadConfigOnce(){
+    configLoadCount += 1;
     try {
-        const cfg = await fetch('/api/config').then(r => r.json());
-        apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-        comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
-        // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
-        sanitizeSmartApiSelection(settings);
-        updateProviderModels();
-        const wf = await fetch('/api/workflows').then(r => r.json()).catch(() => ({workflows:[]}));
-        comfyWorkflows = Array.isArray(wf.workflows) ? wf.workflows : [];
-        runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
-        await Promise.all(rhWorkflowIds.map(async workflowId => {
-            try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
-        }));
+        const cfgRes = await fetch('/api/config');
+        if(!cfgRes.ok) throw new Error(`/api/config HTTP ${cfgRes.status}`);
+        const cfg = await cfgRes.json();
+        // 没有版本号（旧后端）时视为有变化
+        const version = String(cfg.config_version || '');
+        const configChanged = !version || version !== appliedConfigVersion || !smartApiConfigLoaded;
+        if(configChanged){
+            apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
+            comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
+            // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
+            sanitizeSmartApiSelection(settings);
+            updateProviderModels();
+        }
+        let workflowsChanged = false;
+        const wf = await fetch('/api/workflows').then(r => r.ok ? r.json() : null).catch(() => null);
+        if(wf && Array.isArray(wf.workflows)){
+            const nextJson = JSON.stringify(wf.workflows);
+            workflowsChanged = nextJson !== appliedWorkflowsJson;
+            comfyWorkflows = wf.workflows;
+            appliedWorkflowsJson = nextJson;
+        }
+        if(configChanged){
+            runningHubWorkflowCache = {};
+            const rhProvider = apiProviders.find(p => p.id === 'runninghub');
+            const rhWorkflowIds = (rhProvider?.rh_workflows || []).filter(runningHubEntryHasSavedParams).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+            await Promise.all(rhWorkflowIds.map(async workflowId => {
+                try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
+            }));
+        }
         lastConfigRefreshAt = Date.now();
-        sanitizeSmartApiSelection(settings);
-        updateProviderModels();
+        smartApiConfigLoaded = true;
+        appliedConfigVersion = version;
+        lastConfigLoadChanged = configChanged || workflowsChanged;
+        if(lastConfigLoadChanged){
+            sanitizeSmartApiSelection(settings);
+            updateProviderModels();
+        }
+        return true;
     } catch(e) {
+        lastConfigLoadChanged = false;
         toast(tr('smart.toastApiSettingsFail'));
+        return false;
     }
 }
 async function refreshSmartConfigFromSettings(){
-    await loadConfig();
+    const loaded = await loadConfig();
+    if(!loaded) return; // 拉取失败：不重渲染参数面板，也不把设置写回节点
+    if(!lastConfigLoadChanged) return; // 配置和工作流都没变化（例如窗口重新获得焦点的兜底刷新）：不重渲染（A6）
     renderDynamicParams();
+    warnAboutMissingProviders();
     const node = selectedNode();
     if(node?.type === 'smart-prompt') {
         applySettingsToNode(node);
@@ -5604,25 +5715,16 @@ function handleAssetLibraryUpdatedMessage(data={}){
 // 服务器广播 canvas_updated 时带回 client_id，自己发的就忽略，避免自我刷新。
 const smartClientId = `canvas_smart_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
 let canvasSyncInFlight = false;
+// 三方合并的共同基线：最近一次与服务器一致的节点（深拷贝，绝不与 nodes 共享对象）。
+// 加载画布、保存成功、合并服务器版本后更新。合并时据此判断某个字段是“本地改的”还是“对方改的”。
+let smartSyncBaseNodes = null;
+// 连线的同步基线（C8）：与 smartSyncBaseNodes 同时更新，用来判断对方是否删除了某条连线。
+let smartSyncBaseConnections = null;
 let canvasSyncTimer = null;
 let canvasMetaPollTimer = null;
 let connectionLayerRaf = 0;
 function mergeSmartImageLists(localImgs, remoteImgs){
-    const out = [];
-    const seen = new Set();
-    (localImgs || []).forEach(img => {
-        const u = img && img.url;
-        if(u && seen.has(u)) return;
-        if(u) seen.add(u);
-        out.push(img);
-    });
-    (remoteImgs || []).forEach(img => {
-        const u = img && img.url;
-        if(!u || seen.has(u)) return;
-        seen.add(u);
-        out.push(img);
-    });
-    return out;
+    return CanvasMerge.mergeImageLists(localImgs, remoteImgs);
 }
 function smartNodeInFlight(node){
     if(nodeGenerationAttempt(node)?.status === 'running') return true;
@@ -5899,7 +6001,14 @@ function syncRunButtonState(node=selectedNode()){
     runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
     syncSmartRunIntentUi(node);
 }
-function mergeSmartNode(local, remote){
+function cloneSmartJson(value){
+    return JSON.parse(JSON.stringify(value ?? null));
+}
+// 字段级三方合并（规则见 static/js/canvas-merge.js）；images 由调用方按并集处理。
+function threeWayMergeSmartFields(local, remote, base){
+    return CanvasMerge.threeWayMergeFields(local, remote, base, {skipKeys:['images']});
+}
+function mergeSmartNode(local, remote, base=null){
     const images = mergeSmartImageLists(local.images, remote.images);
     const localDone = smartNodeHasCompletedResult(local);
     const remoteDone = smartNodeHasCompletedResult(remote);
@@ -5908,6 +6017,14 @@ function mergeSmartNode(local, remote){
     const localGenerationBusy = nodeGenerationAttempt(local)?.status === 'running' && localBusy;
     const remoteGenerationBusy = nodeGenerationAttempt(remote)?.status === 'running' && remoteBusy;
     let merged = localGenerationBusy ? {...local, images:local.images || []} : remoteGenerationBusy ? {...remote, images:remote.images || []} : null;
+    // 有共同基线且双方都不在生成中：按字段三方合并，双方各自改的字段都保留（位置、文字、参数……）。
+    // 以前这里以对方为准，本地尚未保存或刚被 409 拒绝的编辑会被整体丢掉（C1）。
+    if(!merged && base && !localBusy && !remoteBusy){
+        merged = {...threeWayMergeSmartFields(local, remote, base), images};
+        if(smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)){
+            merged = completeSmartNodeWithImages(merged, images);
+        }
+    }
     if(!merged && localDone && remoteBusy && !remoteDone) merged = completeSmartNodeWithImages(local, images);
     else if(!merged && remoteDone && localBusy && !localDone) merged = completeSmartNodeWithImages(remote, images);
     if(!merged && localDone && remoteDone){
@@ -5919,49 +6036,52 @@ function mergeSmartNode(local, remote){
     if(!merged && smartNodeInFlight(local)){
         merged = {...local, images};
     }
-    // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
+    // 否则以对方（最新保存方）为基底合并本地改过的字段，图片取并集——双方生成结果都不丢
     if(!merged){
-        merged = {...remote, images};
+        merged = {...threeWayMergeSmartFields(local, remote, base), images};
         if(smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)){
             merged = completeSmartNodeWithImages(merged, images);
         }
     }
     return mergeNodeGenerationState(merged, local, remote);
 }
-function mergeSmartNodeLists(localNodes, remoteNodes){
-    const localById = new Map((localNodes || []).map(n => [n.id, n]));
-    const remoteById = new Map((remoteNodes || []).map(n => [n.id, n]));
-    const order = [];
-    const seen = new Set();
-    (localNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
-    (remoteNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
-    return order.map(id => {
-        const local = localById.get(id);
-        const remote = remoteById.get(id);
-        if(local && !remote) return local;     // 仅本地存在：保留（我新建的节点；对方删了也宁可复活也不丢结果）
-        if(remote && !local) return remote;     // 仅对方存在：加入对方新建的节点
-        return mergeSmartNode(local, remote);
-    }).filter(Boolean);
+// 判断节点“相对基线没改过”：两边都按保存时的形式规整后再比较，
+// 页面里的规范化和运行时状态（生成中、DOM 引用等）不算修改。
+// 保存时 buildSmartSavePayload / canvasForStorage 会把缺少的 images 补成 []、把 minimax 的 timelinePlaying 置为 false，
+// 这里同样处理，否则首次加载的基线（服务器原样数据）与保存过一次的本地节点会被误判为“改过”。
+// 规整会改变字段顺序，所以用忽略字段顺序的 stableEqual 比较。
+function smartNodeComparable(node){
+    const copy = serializableSmartNode(node);
+    if(!Array.isArray(copy.images)) copy.images = [];
+    if(copy.type === 'smart-minimax') copy.timelinePlaying = false;
+    return copy;
 }
-function mergeSmartConnections(localConns, remoteConns, nodeIds){
-    const out = [];
-    const seen = new Set();
-    [...(localConns || []), ...(remoteConns || [])].forEach(c => {
-        if(!c || !nodeIds.has(c.from) || !nodeIds.has(c.to)) return;
-        const key = `${c.from}->${c.to}:${c.kind || 'flow'}`;
-        if(seen.has(key)) return;
-        seen.add(key);
-        out.push(c);
+function smartNodeUnchangedSinceBase(node, baseNode){
+    return CanvasMerge.stableEqual(smartNodeComparable(node), smartNodeComparable(baseNode));
+}
+// 节点和连线按基线判断删除（C8）：一方删除、另一方没改过就删除；另一方改过则保留；
+// 正在生成中的节点一律保留，不丢掉进行中的任务。没有基线时退回并集。
+function mergeSmartNodeLists(localNodes, remoteNodes, baseNodes=null){
+    return CanvasMerge.mergeNodeListsWithBase(localNodes, remoteNodes, baseNodes, mergeSmartNode, {
+        unchanged:smartNodeUnchangedSinceBase,
+        keep:node => smartNodeInFlight(node),
     });
-    return out;
+}
+function mergeSmartConnections(localConns, remoteConns, nodeIds, baseConns=null){
+    return CanvasMerge.mergeConnectionsWithBase(localConns, remoteConns, baseConns, nodeIds);
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
+    // 先深拷贝服务器节点作为新的基线：下面的规范化会原地修改对象，且对方新建的节点会直接成为本地对象。
+    const serverBaseNodes = cloneSmartJson(Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []);
+    const serverBaseConnections = cloneSmartJson(Array.isArray(serverCanvas.connections) ? serverCanvas.connections : []);
     const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
-    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
+    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes, smartSyncBaseNodes);
+    smartSyncBaseNodes = serverBaseNodes;
     const nodeIds = new Set(mergedNodes.map(n => n.id));
     nodes = mergedNodes;
-    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
+    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds, smartSyncBaseConnections);
+    smartSyncBaseConnections = serverBaseConnections;
     const cleanedState = clearCompletedNodeBusyStates();
     const reconciledGenerationHistory = nodes.map(reconcileNodeGenerationHistory).some(Boolean);
     const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
@@ -5989,6 +6109,11 @@ async function mergeReloadCanvasNow(){
         const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`);
         if(!res.ok) return;
         const data = await res.json();
+        // 拉取期间本页开始了保存：等保存结束再合并，避免用较旧的服务器版本覆盖刚发出的基线。
+        if(canvasSyncInFlight){
+            scheduleCanvasMergeReload(600);
+            return;
+        }
         if(data && data.canvas) applyMergedServerCanvas(data.canvas);
     } catch(e) {}
 }
@@ -6005,6 +6130,16 @@ function handleCanvasUpdatedMessage(data={}){
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(canvas?.updated_at || 0)) return;
     scheduleCanvasMergeReload(200);
 }
+// C7：在列表页改名或改图标不会推进 updated_at，轮询 meta 时顺带把它们同步到本页。
+function applyRemoteSmartTitleIcon(meta){
+    if(!canvas || !meta || (meta.id && meta.id !== canvasId)) return;
+    if(meta.icon) canvas.icon = meta.icon;
+    if(!meta.title || meta.title === canvas.title) return;
+    canvas.title = meta.title;
+    document.title = canvas.title;
+    const titleEl = document.getElementById('smartTitle');
+    if(titleEl) titleEl.textContent = canvas.title;
+}
 function startCanvasMetaPoll(){
     // WS / iframe 转发不可靠时的兜底：定期看服务器 updated_at 是否变新，变新就合并拉取
     if(canvasMetaPollTimer) return;
@@ -6015,6 +6150,8 @@ function startCanvasMetaPoll(){
             const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/meta`);
             if(!res.ok) return;
             const meta = await res.json();
+            if(StalePage.serverBuildDiffers(meta.client_build)){ enterOutdatedMode(); return; }
+            applyRemoteSmartTitleIcon(meta);
             if(Number(meta.updated_at || 0) > Number(canvas.updated_at || 0)) mergeReloadCanvasNow();
         } catch(e) {}
     }, 8000);
@@ -6553,6 +6690,8 @@ async function loadCanvas(){
         if(!res.ok) return;
         const data = await res.json();
         canvas = data.canvas;
+        smartSyncBaseNodes = cloneSmartJson(Array.isArray(canvas?.nodes) ? canvas.nodes : []);
+        smartSyncBaseConnections = cloneSmartJson(Array.isArray(canvas?.connections) ? canvas.connections : []);
         undoStack.length = 0;
         redoStack.length = 0;
         rememberCanvasListProject(canvas.project || 'default');
@@ -6601,14 +6740,194 @@ async function loadCanvas(){
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
+        warnAboutMissingProviders();
+        offerOutdatedDraftRestore();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
-function scheduleSave(){
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveCanvas, 450);
+// ---- 页面版本过期（后端已更新、页面未刷新）----
+// 过期后不再保存；未保存的修改只记相对上次同步内容的变化，暂存到本机浏览器，刷新后可恢复（见 stale-page.js）。
+let pageOutdated = false;
+const OUTDATED_PAGE_ID = uid('page');
+function buildSmartOutdatedDraft(){
+    const {storageCanvas} = buildSmartSavePayload();
+    const patch = CanvasMerge.buildDraftPatch({
+        localNodes:storageCanvas.nodes || [], baseNodes:smartSyncBaseNodes || [],
+        localConnections:storageCanvas.connections || [], baseConnections:smartSyncBaseConnections || [],
+        connectionKey:CanvasMerge.smartConnectionKey, comparable:smartNodeComparable,
+    });
+    return {version:1, kind:'smart', canvasId, title:canvas?.title || '', savedAt:Date.now(),
+            clientBuild:StalePage.clientBuild(), baseUpdatedAt:Number(canvas?.updated_at || 0), patch};
 }
-async function saveCanvas(){
+function refreshOutdatedDraft(){
     if(!canvasId || !canvas) return;
+    let draft = null;
+    let state = 'none';
+    try {
+        draft = buildSmartOutdatedDraft();
+        if(CanvasMerge.draftPatchCount(draft.patch) > 0){
+            state = StalePage.saveDraft(canvasId, OUTDATED_PAGE_ID, draft) ? 'stored' : 'failed';
+        } else {
+            StalePage.clearDrafts([StalePage.draftKey(canvasId, OUTDATED_PAGE_ID)]);
+        }
+    } catch(e) {
+        console.error(e);
+    }
+    StalePage.showOutdatedBanner({draftState:state, draft});
+}
+function enterOutdatedMode(){
+    if(pageOutdated) return;
+    pageOutdated = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = null;
+    const badge = document.getElementById('smartSaveFailureBadge');
+    if(badge) badge.style.display = 'none';
+    setCanvasSaveState('outdated');
+    refreshOutdatedDraft();
+}
+// 刷新后：这张画布有旧页面留下的草稿时，提示恢复（合并到服务器最新版本后正常保存）或丢弃。
+function offerOutdatedDraftRestore(){
+    if(!canvasId || !canvas || pageOutdated) return;
+    const drafts = StalePage.loadDrafts(canvasId).filter(d => d.kind === 'smart');
+    const count = drafts.reduce((sum, d) => sum + CanvasMerge.draftPatchCount(d.patch), 0);
+    if(!drafts.length || !count) return;
+    StalePage.offerRestore({
+        drafts, count,
+        onDiscard:() => StalePage.clearDrafts(drafts.map(d => d.key)),
+        onRestore:async () => {
+            let mergedNodes = cloneSmartJson(nodes);
+            let mergedConnections = cloneSmartJson(canvas.connections || []);
+            const total = {applied:0, merged:0, skippedDeletedOnServer:0, keptChangedOnServer:0, connections:0};
+            drafts.forEach(draft => {
+                const result = CanvasMerge.applyDraftPatch({
+                    serverNodes:mergedNodes, serverConnections:mergedConnections, patch:draft.patch,
+                    mergeNode:mergeSmartNode, connectionKey:CanvasMerge.smartConnectionKey, comparable:smartNodeComparable,
+                });
+                mergedNodes = result.nodes;
+                mergedConnections = result.connections;
+                Object.keys(total).forEach(key => { total[key] += result.report[key] || 0; });
+            });
+            nodes = mergedNodes.map(normalizeLegacySmartNode).filter(Boolean);
+            canvas.connections = mergedConnections;
+            render();
+            if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
+            await saveCanvas();
+            if(smartSavedVersion < smartEditVersion && !pageOutdated) throw new Error(smartUiIsEnglish() ? 'Restored, but saving failed; it will retry' : '已恢复，但保存失败，会自动重试');
+            StalePage.clearDrafts(drafts.map(d => d.key));
+            toast(StalePage.restoreSummary(total));
+            return total;
+        },
+    });
+}
+// ---- 保存状态与失败重试（C2）----
+// 以前保存失败（5xx / 断网）被 catch 吞掉：不提示、不重试，内存里的修改在刷新后丢失。
+// 现在：用编辑版本号判断是否还有未落盘的修改；失败后按 1s、2s、4s… 最长 30s 退避自动重试，
+// 期间显示常驻提示（可点击立即重试）；离开页面时若仍有未保存修改则补发或提示。
+// <html data-canvas-save-state="saving|saved|dirty|error"> 供样式和回归脚本使用。
+let smartEditVersion = 0;
+let smartSavedVersion = 0;
+let smartSaveRetryTimer = null;
+let smartSaveRetryDelay = 0;
+let smartSaveFailing = false;
+const SMART_KEEPALIVE_MAX_BYTES = 60000; // 浏览器对 keepalive 请求体的上限约 64KB
+function smartUiIsEnglish(){
+    try { return window.StudioI18n?.lang?.() === 'en'; } catch(e) { return false; }
+}
+function setCanvasSaveState(state){
+    document.documentElement.dataset.canvasSaveState = state;
+}
+function canvasHasUnsavedChanges(){
+    return smartSavedVersion < smartEditVersion || Boolean(smartSaveRunning) || Boolean(saveTimer);
+}
+function smartSaveFailureBadge(){
+    let el = document.getElementById('smartSaveFailureBadge');
+    if(el) return el;
+    el = document.createElement('button');
+    el.id = 'smartSaveFailureBadge';
+    el.type = 'button';
+    Object.assign(el.style, {
+        position:'fixed', top:'12px', left:'50%', transform:'translateX(-50%)', zIndex:'100000',
+        display:'none', padding:'6px 14px', borderRadius:'999px', border:'1px solid rgba(220,38,38,.45)',
+        background:'rgba(254,242,242,.97)', color:'#b91c1c', font:'500 12px/1.5 system-ui, -apple-system, sans-serif',
+        boxShadow:'0 4px 14px rgba(0,0,0,.14)', cursor:'pointer'
+    });
+    el.onclick = () => {
+        clearTimeout(smartSaveRetryTimer);
+        smartSaveRetryTimer = null;
+        saveCanvas();
+    };
+    document.body.appendChild(el);
+    return el;
+}
+function noteSmartSaveSucceeded(builtVersion){
+    smartSavedVersion = Math.max(smartSavedVersion, builtVersion);
+    const recovered = smartSaveFailing;
+    smartSaveFailing = false;
+    smartSaveRetryDelay = 0;
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = null;
+    const badge = document.getElementById('smartSaveFailureBadge');
+    if(badge) badge.style.display = 'none';
+    setCanvasSaveState(smartSavedVersion < smartEditVersion ? 'dirty' : 'saved');
+    if(recovered) toast(smartUiIsEnglish() ? 'Canvas saved' : '画布已重新保存');
+}
+function noteSmartSaveFailed(error){
+    if(pageOutdated) return;
+    const message = String(error?.message || error || '').slice(0, 160) || (smartUiIsEnglish() ? 'Save failed' : '保存失败');
+    smartSaveRetryDelay = Math.min(30000, smartSaveRetryDelay ? smartSaveRetryDelay * 2 : 1000);
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = setTimeout(() => {
+        smartSaveRetryTimer = null;
+        saveCanvas();
+    }, smartSaveRetryDelay);
+    const seconds = Math.round(smartSaveRetryDelay / 1000);
+    if(!smartSaveFailing) toast(smartUiIsEnglish() ? `Canvas save failed, retrying: ${message}` : `画布保存失败，正在自动重试：${message}`);
+    smartSaveFailing = true;
+    setCanvasSaveState('error');
+    const badge = smartSaveFailureBadge();
+    badge.textContent = smartUiIsEnglish()
+        ? `Canvas not saved · retrying in ${seconds}s (click to retry now)`
+        : `画布未保存 · ${seconds} 秒后自动重试（点击立即重试）`;
+    badge.title = message;
+    badge.style.display = 'block';
+}
+function scheduleSave(){
+    smartEditVersion++;
+    if(!smartSaveFailing) setCanvasSaveState('dirty');
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveCanvas();
+    }, 450);
+}
+// 保存串行化：同一时间只有一个 PUT 在途。以前 450ms 防抖后无条件发请求，上一次保存还没返回时
+// 下一次会带着同一个 base_updated_at 发出，必然 409，而 409 合并又以服务器（上一次保存）的节点为准，
+// 于是两次保存之间的编辑被丢掉（C1）。现在在途时只排队一次后续保存，等当前请求结束后用最新状态和
+// 新的 updated_at 再存；调用方 await saveCanvas() 会等到包含自己改动的那次保存完成。
+let smartSaveRunning = null;
+let smartSaveQueued = null;
+function saveCanvas(){
+    if(!canvasId || !canvas) return Promise.resolve();
+    if(pageOutdated){ refreshOutdatedDraft(); return Promise.resolve(); } // 过期页面：只更新暂存的草稿
+    // 直接调用 saveCanvas() 的地方通常刚改过节点（例如写入 pendingTasks），同样计为一次编辑。
+    smartEditVersion++;
+    if(smartSaveRunning){
+        if(!smartSaveQueued){
+            smartSaveQueued = smartSaveRunning.then(() => {
+                smartSaveQueued = null;
+                return saveCanvas();
+            });
+        }
+        return smartSaveQueued;
+    }
+    if(!smartSaveFailing) setCanvasSaveState('saving');
+    smartSaveRunning = performSmartCanvasSave().catch(noteSmartSaveFailed).finally(() => {
+        smartSaveRunning = null;
+    });
+    return smartSaveRunning;
+}
+function buildSmartSavePayload(){
     savePromptDraftForCurrent();
     nodes.forEach(node => {
         node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
@@ -6617,46 +6936,93 @@ async function saveCanvas(){
     canvas.nodes = nodes;
     canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
     canvas.viewport = {...viewport};
+    const builtVersion = smartEditVersion;
     const storageCanvas = canvasForStorage();
+    // C7：标题和图标只通过 /meta 修改，自动保存不再带上它们（后端对漏传的字段保持原值），
+    // 以免把列表页刚改的名字用本页内存里的旧值写回去。
+    const body = JSON.stringify({
+        nodes:storageCanvas.nodes || [],
+        connections:storageCanvas.connections || [],
+        viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
+        logs:storageCanvas.logs || [],
+        settings:storageCanvas.settings,
+        base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
+        client_id:smartClientId
+    });
+    return {storageCanvas, body, builtVersion};
+}
+// 离开页面时：没有在途保存且请求体足够小，就用 keepalive 补发；否则返回 false，由调用方弹出确认框。
+function trySmartKeepaliveSave(){
+    if(!canvasId || !canvas || smartSaveRunning) return false;
+    try {
+        const {body} = buildSmartSavePayload();
+        if(new TextEncoder().encode(body).length > SMART_KEEPALIVE_MAX_BYTES) return false;
+        fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {method:'PUT', headers:StalePage.withBuildHeader({'Content-Type':'application/json'}), body, keepalive:true}).catch(() => {});
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+window.addEventListener('beforeunload', event => {
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面不保存；草稿已暂存，刷新时不再拦截
+    if(!canvasHasUnsavedChanges()) return;
+    if(trySmartKeepaliveSave()) return;
+    event.preventDefault();
+    event.returnValue = '';
+});
+async function fetchSmartServerCanvasForMerge(id){
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}`, {cache:'no-store'});
+        if(!res.ok) return null;
+        const data = await res.json();
+        return data?.canvas?.id === id ? data.canvas : null;
+    } catch(e) {
+        return null;
+    }
+}
+async function performSmartCanvasSave(){
     canvasSyncInFlight = true;
     try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:storageCanvas.title || tr('smart.title'),
-                icon:storageCanvas.icon || 'sparkles',
-                nodes:storageCanvas.nodes || [],
-                connections:storageCanvas.connections || [],
-                viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
-                logs:storageCanvas.logs || [],
-                settings:storageCanvas.settings,
-                base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
-                client_id:smartClientId
-            })
-        });
-        if(res.ok){
-            const data = await res.json();
-            if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
-        } else if(res.status === 409) {
-            // 冲突：别人先保存了。合并对方的状态（节点 id 合并、图片取并集，谁都不丢），
-            // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
-            const data = await res.json().catch(() => ({}));
-            const serverCanvas = data.detail?.canvas;
-            if(serverCanvas){
-                applyMergedServerCanvas(serverCanvas);
-                nodes.forEach(node => {
-                    node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
-                });
-                canvas.nodes = nodes;
-            } else if(data.detail?.updated_at) {
-                canvas.updated_at = data.detail.updated_at;
+        // 409 时把服务器版本三方合并进本地，再用新的 base 立即重存；连续冲突最多重试几次。
+        for(let attempt = 0; attempt < 5; attempt++){
+            if(!canvasId || !canvas) return;
+            const {storageCanvas, body, builtVersion} = buildSmartSavePayload();
+            const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
+                method:'PUT',
+                headers:StalePage.withBuildHeader({'Content-Type':'application/json'}),
+                body
+            });
+            if(res.status === 412){
+                const data = await res.json().catch(() => ({}));
+                if(StalePage.isOutdatedPayload(data)){
+                    enterOutdatedMode();
+                    return;
+                }
+                throw new Error(ApiErrors.message(data, `HTTP ${res.status}`));
             }
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(saveCanvas, 300);
+            if(res.ok){
+                const data = await res.json();
+                // C6：成功响应只有 updated_at（旧后端会带整张画布，这里只取它的 updated_at）。
+                const savedUpdatedAt = Number(data.updated_at || data.canvas?.updated_at || 0);
+                if(savedUpdatedAt) canvas.updated_at = savedUpdatedAt;
+                // 服务器现在保存的正是这份节点（canvasForStorage 已深拷贝），作为下一次合并的基线。
+                smartSyncBaseNodes = storageCanvas.nodes || [];
+                smartSyncBaseConnections = storageCanvas.connections || [];
+                noteSmartSaveSucceeded(builtVersion);
+                return;
+            }
+            if(res.status !== 409) throw new Error(await smartResponseErrorMessage(res, `HTTP ${res.status}`));
+            // 冲突：别人先保存了。按字段三方合并对方的状态（双方各自的改动都保留，图片取并集），
+            // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
+            // C6：409 只带 updated_at，不再带整张画布，这里自己取服务器上的最新版本来合并；
+            // 取不到时报错重试，绝不只换个基线就重存（那会覆盖对方的修改）。
+            const data = await res.json().catch(() => ({}));
+            const serverCanvas = data.detail?.canvas || await fetchSmartServerCanvasForMerge(canvasId);
+            if(!serverCanvas) throw new Error('HTTP 409');
+            applyMergedServerCanvas(serverCanvas);
         }
-    } catch(e) {} finally {
+        throw new Error(smartUiIsEnglish() ? 'Repeated save conflicts' : '连续保存冲突');
+    } finally {
         canvasSyncInFlight = false;
     }
 }
@@ -7841,7 +8207,7 @@ async function zipDownloadImageItems(title, items){
                 items:list.map((item, index) => ({url:item.url, name:downloadNameForMediaItem(item, `image-${String(index + 1).padStart(2, '0')}`)}))
             })
         });
-        if(!response.ok) throw new Error((await response.text()) || '批量下载失败');
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '批量下载失败'));
         const blob = await response.blob();
         const href = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -7929,8 +8295,9 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:outputItems,
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
-        error:error ? String(error) : ''
+        error:ApiErrors.forLog(error)
     };
+    ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
     if(!error && recoverStuckLoopOutputsFromLogs()) render();
     scheduleSave();
@@ -8124,13 +8491,13 @@ function renderSmartCanvasLog(){
         return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''} ${deleting ? 'is-deleting' : ''}" data-canvas-log-id="${escapeAttr(log.id || '')}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.failureKind === 'validation' ? '输入校验失败' : log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${log.model ? `<span class="log-chip">${escapeHtml(log.model)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
-                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
+                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.errorMessage || log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
                 <div class="log-actions">
                     <button type="button" data-log-delete="record" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="list-x"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogRecordOnly'))}</span></button>
@@ -8190,10 +8557,10 @@ function closeSmartCanvasShortcuts(){
     smartShortcutModal?.classList.remove('open');
 }
 function normalizedPromptNodeText(value){
-    return String(value == null ? '' : value).slice(0, PROMPT_TEXT_MAX_LENGTH);
+    return Array.from(String(value == null ? '' : value)).slice(0, PROMPT_TEXT_MAX_LENGTH).join('');
 }
 function promptEditorCountLabel(value){
-    return `${String(value || '').length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
+    return `${Array.from(String(value || '')).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
 }
 function updatePromptEditorCount(value){
     if(promptEditorCount) promptEditorCount.textContent = promptEditorCountLabel(value);
@@ -8219,7 +8586,7 @@ function syncPromptNodeText(node, value, source=null){
         textPreview.classList.toggle('is-empty', !next);
     }
     const textCount = nodeEl?.querySelector('.text-node-count');
-    if(textCount) textCount.textContent = `${next.length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
+    if(textCount) textCount.textContent = `${Array.from(next).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}`;
     if(nodeEl && node.type === 'smart-prompt'){
         refreshPromptNodeSegmentsUi(nodeEl, node);
         if(node.promptSplitEnabled === true){
@@ -8266,7 +8633,7 @@ function ensurePromptEditor(){
                 </div>
             </header>
             <div class="prompt-editor-main">
-                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+                <textarea class="prompt-editor-textarea" data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
             </div>
             <footer class="prompt-editor-footer">
                 <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
@@ -9209,7 +9576,7 @@ function textNodeBodyHtml(node){
         <div class="text-node-label"><span>T</span><strong>文本</strong></div>
         <div class="text-node-preview ${value ? '' : 'is-empty'}">${escapeHtml(value || '输入提示词或文本')}</div>
         <div class="text-node-footer">
-            <span class="text-node-count">${value.length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
+            <span class="text-node-count">${Array.from(value).length.toLocaleString('en-US')} / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString('en-US')}</span>
             <span class="text-node-edit-hint">双击编辑文本</span>
             <button class="text-node-expand" type="button" title="展开编辑文本" aria-label="展开编辑文本"><i data-lucide="maximize-2"></i></button>
         </div>
@@ -9565,7 +9932,7 @@ async function recognizeFocusEditCandidates(context){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({message:payload.message, messages:[], images:payload.images, videos:[], model, provider, ms_model:provider === 'modelscope' ? model : '', system_prompt:'只输出严格 JSON。'})
     }).then(async response => {
-        if(!response.ok) throw new Error(await response.text());
+        if(!response.ok) throw new Error(await responseErrorMessage(response));
         return response.json();
     });
     return parseFocusEditCandidates(result?.text || result);
@@ -9766,7 +10133,7 @@ function focusEditUiHtml(){
             <section class="focus-edit-section"><div class="focus-edit-section-head"><h3>参考元素</h3>${reference && !running ? '<button type="button" data-focus-reselect>重新选择</button>' : ''}</div>
                 ${reference ? `<div class="focus-edit-reference-card"><span class="focus-edit-reference-preview">${referencePreview}</span><span class="focus-edit-reference-copy"><strong>${escapeHtml(reference.label)}</strong><small>${escapeHtml(source?.title || reference.sourceNodeId || '来源图片')}</small><em>Approximate region · ${(reference.point.x * 100).toFixed(1)}%, ${(reference.point.y * 100).toFixed(1)}%</em></span>${running ? '' : '<button type="button" data-focus-remove title="删除参考元素"><i data-lucide="trash-2"></i></button>'}</div>` : '<button type="button" class="focus-edit-pick-hint" data-focus-reselect><i data-lucide="mouse-pointer-2"></i><span>请在画布中点击其他图片的局部内容</span></button>'}
             </section>
-            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction maxlength="4000" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
+            <section class="focus-edit-section focus-edit-instruction"><h3>修改说明</h3><textarea data-focus-instruction data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" placeholder="例如：把上衣颜色改成参考元素的奶油白，只改上衣，不动人物、姿势和背景。" ${running ? 'disabled' : ''}>${escapeHtml(focusEditSession.instruction)}</textarea></section>
             <footer>${running ? `<button type="button" class="focus-edit-cancel" data-focus-cancel ${cancelling ? 'disabled' : ''}>${cancelling ? '正在取消…' : '取消任务'}</button>` : '<span>执行时会同时提交目标图、参考元素视觉与文字指令。</span>'}<button type="button" class="focus-edit-run" data-focus-run ${!reference || !focusEditSession.instruction.trim() || running ? 'disabled' : ''}>${running ? '编辑中…' : '执行焦点编辑'}</button></footer>
         </aside>${candidate}`;
 }
@@ -9788,7 +10155,8 @@ function ensureFocusEditUi(){
     });
     root.addEventListener('input', event => {
         if(event.target.matches('[data-focus-instruction]')){
-            focusEditSession.instruction = event.target.value;
+            focusEditSession.instruction = normalizedPromptNodeText(event.target.value);
+            event.target.value = focusEditSession.instruction;
             const runButton = root.querySelector('[data-focus-run]');
             if(runButton) runButton.disabled = !focusEditSession.referenceElement || !focusEditSession.instruction.trim() || focusEditSession.status === FOCUS_EDIT_RUNNING;
         }
@@ -9846,6 +10214,24 @@ function buildFocusEditRequest(targetNode, referenceElement, instruction, cropUr
     ].join('\n');
     return {targetImage, referenceElement:reference, instruction:String(instruction || '').trim(), prompt, refs};
 }
+async function validateSmartModelPrompt(node, prompt, refs, runSettings){
+    if(!isApiLikeEngine(runSettings.engine) || runSettings.apiKind === 'video') return true;
+    try {
+        await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
+        return true;
+    } catch(error){
+        if(ModelPromptLimits.details(error)){
+            const attempt = createNodeGenerationAttempt(node, {prompt:''}, runSettings, 'image');
+            if(attempt) finishNodeGenerationAttempt(node, 'failed', error.message, attempt.id);
+            addSmartGenerationLog({run:{nodeId:node.id, settings:runSettings}, error:error.message});
+            node.runValidation = ModelPromptLimits.details(error);
+            render();
+            scheduleSave();
+        }
+        toast(error.message);
+        return false;
+    }
+}
 async function runFocusEdit(){
     if(!focusEditActive() || focusEditSession.status === FOCUS_EDIT_RUNNING) return false;
     const target = focusEditTargetNode();
@@ -9854,6 +10240,8 @@ async function runFocusEdit(){
     if(!target || !reference || !instruction){ toast('请先选择参考元素并填写修改说明'); return false; }
     if(smartNodeInFlight(target)){ toast('目标节点正在执行其他任务'); return false; }
     const runSettings = smartSettingsForNode(target);
+    const preflight = buildFocusEditRequest(target, reference, instruction);
+    if(!await validateSmartModelPrompt(target, preflight.prompt, preflight.refs, runSettings)) return false;
     const cropUrl = await uploadFocusEditCrop(reference);
     if(!focusEditActive() || focusEditTargetNode()?.id !== target.id) return false;
     let request;
@@ -10028,7 +10416,7 @@ function renderNodeGenerationHistoryPanel(){
     const upstreamTaskIds = Array.from(new Set([selected.upstreamTaskId, ...(selected.upstreamTaskIds || [])].filter(Boolean)));
     const refs = selected.references || [];
     const details = [
-        ['状态', nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus)],
+        ['状态', (selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus))],
         ['本地任务 ID', taskIds.join(' / ') || '未记录'],
         ['上游任务 ID', upstreamTaskIds.join(' / ') || '未记录'],
         ['Provider', selected.providerId || '未记录'],
@@ -10052,20 +10440,20 @@ function renderNodeGenerationHistoryPanel(){
             return `<button type="button" class="node-generation-history-card ${item.id === selected.id ? 'selected' : ''} ${adopted ? 'adopted' : ''}" data-generation-history-id="${escapeAttr(item.id)}">
                 <span class="node-generation-history-thumb">${preview ? smartPreviewImgHtml(preview.url, 240) : `<i data-lucide="${item.status === 'running' ? 'loader-2' : item.status === 'cancelled' ? 'ban' : 'triangle-alert'}"></i>`}</span>
                 <span class="node-generation-history-card-copy"><strong>Version ${history.length - index}${item.mode === 'focus-edit' ? ' · 焦点编辑' : ''}</strong><small>${escapeHtml(nodeGenerationHistoryTime(item.createdAt))}</small></span>
-                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml(nodeGenerationHistoryStatusLabel(item.status, item.localResultStatus))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(item.status || 'failed')}">${adopted ? '当前' : escapeHtml((item.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(item.status, item.localResultStatus)))}</span>
             </button>`;
         }).join('')}</aside>
         <main class="node-generation-history-main">
             <div class="node-generation-history-preview">${nodeGenerationHistoryPreviewHtml(selected)}</div>
             <div class="node-generation-history-adopt-row">
-                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml(nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus))}</span>
+                <span class="node-generation-history-status is-${escapeAttr(selected.status || 'failed')}">${current ? '当前采用版本' : escapeHtml((selected.failureKind === 'validation' ? '输入校验失败' : nodeGenerationHistoryStatusLabel(selected.status, selected.localResultStatus)))}</span>
                 <button type="button" class="node-generation-history-adopt" data-node-id="${escapeAttr(node.id)}" data-generation-history-adopt="${escapeAttr(selected.id)}" ${selected.status === 'success' && !current ? '' : 'disabled'}>${current ? '当前版本' : '采纳到当前节点'}</button>
             </div>
             <dl class="node-generation-history-details">${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
             <section class="node-generation-history-section"><h3>当次提示词</h3><pre>${escapeHtml(selected.displayPrompt || selected.prompt || '未记录')}</pre></section>
             ${selected.mode === 'focus-edit' ? `<section class="node-generation-history-section"><h3>焦点编辑说明</h3><pre>${escapeHtml(selected.userInstruction || selected.displayPrompt || '未记录')}</pre></section>${nodeGenerationHistoryFocusElementHtml(selected.referenceElement)}` : ''}
             <section class="node-generation-history-section"><h3>参考素材 ${refs.length ? `(${refs.length})` : ''}</h3><div class="node-generation-history-refs">${refs.length ? refs.map(nodeGenerationHistoryReferenceHtml).join('') : '<span class="node-generation-history-missing">未记录</span>'}</div></section>
-            ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.error)}</pre></section>` : ''}
+            ${selected.error ? `<section class="node-generation-history-section is-error"><h3>错误信息</h3><pre>${escapeHtml(selected.errorMessage || selected.error)}</pre></section>` : ''}
         </main>
     </div>`;
     bindSmartPreviewImageFallbacks(content);
@@ -10187,7 +10575,7 @@ async function runJimengUpscale(node, index){
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({prompt:`upscale ${resolution}`, provider_id:providerId, model:'', operation:'upscale', resolution_type:resolution, n:1, reference_images:[{url:item.url, name:item.name || 'upscale-input.png'}]})
         }).then(async response => {
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             return response.json();
         });
         if(!task.task_id) throw new Error(tr('smart.errRunFailed'));
@@ -10416,6 +10804,7 @@ function render(){
     refreshRunTimerPills();
     renderNodeGenerationHistoryPanel();
     if(smartCanvasReferencePicker) applySmartCanvasReferencePickerVisuals();
+    applySmartMissingProviderMarkers();
     renderFocusEditUi();
     return;
     world.innerHTML = '';
@@ -16012,17 +16401,7 @@ function smartImageFilesFromDataTransfer(dataTransfer){
     return [...(dataTransfer?.files || [])].filter(isSupportedUploadFile);
 }
 async function smartResponseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        const detail = data.detail ?? data.error ?? data.message;
-        if(typeof detail === 'string') return detail || fallback;
-        if(Array.isArray(detail)) return detail.map(item => item?.msg || item?.message || String(item)).join('\n') || fallback;
-    } catch(_) {}
-    try {
-        const text = await response.text();
-        if(text) return text;
-    } catch(_) {}
-    return fallback;
+    return ApiErrors.fromResponse(response, fallback);
 }
 function smartDropDataTypes(dataTransfer){
     return [...(dataTransfer?.types || [])].map(type => String(type || ''));
@@ -16145,7 +16524,7 @@ async function uploadFiles(files){
     const form = new FormData();
     supported.forEach(file => form.append('files', file, file.name || 'media'));
     const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async r => {
-        if(!r.ok) throw new Error((await r.text()) || tr('smart.toastUploadFail'));
+        if(!r.ok) throw new Error(await responseErrorMessage(r, tr('smart.toastUploadFail')));
         return r.json();
     });
     return (data.files || []).map((file, index) => ({
@@ -16650,6 +17029,7 @@ function finishNodeGenerationAttempt(node, status, error='', generationId=''){
     attempt.updatedAt = attempt.completedAt;
     if(attempt.status === 'cancelled') attempt.cancelledAt = attempt.completedAt;
     attempt.error = String(error || '').slice(0, 1200);
+    ModelPromptLimits.sanitizeHistory(attempt, error);
     clearNodeGenerationTerminalState(node, attempt.id);
     node.runFinishedAt = attempt.completedAt;
     if(!node.runStartedAt) node.runStartedAt = Number(attempt.createdAt || 0) || attempt.completedAt;
@@ -18922,7 +19302,7 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
     const workflowName = runSettings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
     const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const fields = wf.config?.fields || [];
@@ -19462,6 +19842,8 @@ async function runGeneration(options={}){
     const initialRunSettings = smartSettingsForNode(node);
     const includeSelf = Boolean(options?.includeSelf) || smartRunSelfRequirement(node, initialRunSettings).required;
     setSmartRunIntent(includeSelf ? SMART_RUN_INTENT_CONTINUE_EDIT : SMART_RUN_INTENT_REGENERATE, node);
+    const preflightRequest = buildPromptRequest(node, null, false, smartLoopContext, {includeSelf});
+    if(!await validateSmartModelPrompt(node, preflightRequest.prompt, preflightRequest.refs, initialRunSettings)) return;
     try {
         await materializeSmartCanvasReferenceEdges(node.id, initialRunSettings);
     } catch(error){
@@ -19493,6 +19875,8 @@ async function runGeneration(options={}){
             customSize:`${outpaintSize.width}x${outpaintSize.height}`
         };
     }
+    if(!await validateSmartModelPrompt(node, prompt, refs, settings)){ settings = previousSettings; return; }
+    delete node.runValidation;
     const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs);
     const logKind = isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 'video' : 'image';
     const runLog = smartRunSnapshot(node, prompt, refs, logKind);
@@ -19635,7 +20019,7 @@ async function runGeneration(options={}){
                 scheduleSave();
                 return;
             }
-            if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
+            if(!(pendingNode.images || []).length) throw new Error(generationAttempt?.errorMessage || generationAttempt?.error || tr('smart.errNoOutImages'));
             if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
             addSmartGenerationLog({run:runLog, outputs:pendingNode.images || [], runMs:nowMs() - runLogStart});
@@ -19820,9 +20204,13 @@ function comfyFieldKind(field){
     return 'setting';
 }
 async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=null){
+    await ModelPromptLimits.validate({provider_id:runSettings.provider_id, model:runSettings.model, prompt, reference_images:imageRefsOnly(refs)});
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
+    // 平台已删除/不可用：明确报错，不提交任务（A1）。
+    const providerProblem = smartProviderProblem(runSettings.provider_id, imageProviders());
+    if(providerProblem) throw new Error(providerProblem);
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
-    const kieSchema = isKieProviderId(runSettings.provider_id) ? currentKieCapability(runSettings) : null;
+    const kieSchema = isKieProviderId(runSettings.provider_id) ? (currentKieCapability(runSettings) || await ensureKieCapability(runSettings.provider_id, runSettings.model)) : null;
     if(isKieProviderId(runSettings.provider_id) && !kieSchema) throw new Error('Kie 模型参数尚未加载，请稍后再试');
     if(kieSchema) normalizeKieSettings(kieSchema, runSettings);
     const imageRefs = imageRefsOnly(refs);
@@ -19844,6 +20232,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
         n:1,
         reference_images:imageRefs
     };
+    if(kieSchema) KieImageParams.validate(kieSchema, payload, imageRefs.length);
     const limits = apiProviders.find(item => item.id === runSettings.provider_id)?.model_limits?.[runSettings.model];
     if(limits){
         if(count > limits.max_images) throw new Error(`单次最多生成 ${limits.max_images} 张图片`);
@@ -19856,12 +20245,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings, bindingNode=
             payload.generation_id = bindingNode.activeGenerationId || '';
         }
         const response = await fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        if(!response.ok) throw new Error(await response.text());
+        if(!response.ok) throw new Error(await responseErrorMessage(response));
         const task = await response.json();
         return {taskIds:[task.task_id], count, controlled:true, providerId:payload.provider_id, model:payload.model};
     }
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw await ModelPromptLimits.responseError(r);
         return r.json();
     })));
     return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
@@ -19916,7 +20305,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)
     }).then(async r => {
-        const data = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+        const data = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
         if(!r.ok || data.success === false) throw runningHubPayloadError('提交', data, tr('smart.rhFailed'), {
             endpoint,
             workflowId:body.workflowId || '',
@@ -19933,7 +20322,7 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     for(let i = 0; i < 720; i++){
         await sleep(2500);
         const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${useWallet ? '1' : '0'}`).then(async r => {
-            const json = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+            const json = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
             if(!r.ok || json.success === false) throw runningHubPayloadError('查询', json, tr('smart.rhFailed'), {taskId});
             return json.data || json;
         });
@@ -19947,6 +20336,10 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     throw new Error(tr('smart.rhTimeout'));
 }
 async function runApiVideoGeneration(prompt, refs, runSettings=settings){
+    if(runSettings.videoProvider !== 'volcengine'){
+        const providerProblem = smartProviderProblem(runSettings.videoProvider, videoApiProviders());
+        if(providerProblem) throw new Error(providerProblem);
+    }
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
@@ -19954,7 +20347,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
         // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
         const useAssetUris = trustedSource === 'library';
-        const targetPlatform = videoProviderPlatform(runSettings.videoProvider || 'comfly');
+        const targetPlatform = videoProviderPlatform(runSettings.videoProvider || '');
         let mismatchedAsset = false;
         const effUrl = ref => {
             const uris = (ref && ref.asset_uris && typeof ref.asset_uris === 'object') ? ref.asset_uris : null;
@@ -19980,7 +20373,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
         const payload = {
             prompt,
-            provider_id: runSettings.videoProvider || 'comfly',
+            provider_id: runSettings.videoProvider || '',
             model: runSettings.videoModel || 'veo3-fast',
             duration: Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)),
             aspect_ratio: runSettings.videoAspect || '16:9',
@@ -20029,7 +20422,7 @@ async function runModelscopeGeneration(prompt, refs, runSettings=settings){
         else if(modelKey === 'qwen_edit') body = {prompt, image_urls:imageUrls, resolution:`${width}x${height}`};
         else body = {prompt, model:modelKey === 'custom' ? (runSettings.msCustomModel || modelscopeImageModels()[0]) : msModel.modelId, image_urls:imageUrls, width, height, size:`${width}x${height}`};
         const data = await fetch(msModel.endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
+            if(!r.ok) throw new Error(await responseErrorMessage(r));
             return r.json();
         });
         return data.url || data.images?.[0] || '';
@@ -20059,7 +20452,7 @@ async function runComfyGeneration(node, prompt, refs, pendingNode, meta){
     const workflowName = settings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
     const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const fields = wf.config?.fields || [];
@@ -20155,7 +20548,7 @@ async function comfyNameForRef(ref){
     const form = new FormData();
     form.append('files', blob, ref.name || 'smart-ref.png');
     const data = await fetch('/api/upload', {method:'POST', body:form}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
     const name = String(data.files?.[0]?.comfy_name || '').trim();
@@ -20551,7 +20944,9 @@ async function cancelSmartImageGeneration(nodeId){
     toast(localOnly ? '已停止本地等待；任务已提交服务商，可能仍会继续执行。' : '生成已取消');
     return true;
 }
-window.addEventListener('beforeunload', () => {
+// 只在真正离开页面时取消本地任务轮询：beforeunload 可能因为“未保存修改”确认框而被用户取消，
+// 那时不能已经把任务取消掉。
+window.addEventListener('pagehide', () => {
     [...activeSmartTaskControllers.keys()].forEach(cancelSmartCanvasTask);
 });
 window.addEventListener('pagehide', () => {
@@ -20695,7 +21090,7 @@ async function fetchJimengQuery(submitId, kind){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({submit_id:submitId, kind:kind || 'image'})
-    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r)); return r.json(); });
 }
 async function queryJimengNow(nodeId){
     const node = nodes.find(n => n.id === nodeId);
@@ -20716,15 +21111,15 @@ async function queryJimengNow(nodeId){
     }
 }
 function providerIdForSmartTask(node, task){
-    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';
+    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || '';
 }
 async function fetchImageTaskQuery(providerId, taskId){
     return fetch('/api/image-task-query', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId})
+        body:JSON.stringify({provider_id:providerId || '', task_id:taskId})
     }).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
+        if(!r.ok) throw new Error(await responseErrorMessage(r));
         return r.json();
     });
 }
@@ -20745,7 +21140,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         let data;
         if(task.controlled){
             const response = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(task.taskId)}/refresh`, {method:'POST'});
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             const owned = await response.json();
             assertSmartTaskBinding(owned, node, task);
             data = {status:'succeeded', ...await pollSmartCanvasTask(task.taskId, node, task)};
@@ -20847,7 +21242,7 @@ async function pollSmartCanvasTask(taskId, bindingNode=null, bindingTask=null){
                 }
                 throw error;
             }
-            if(!response.ok) throw new Error(await response.text());
+            if(!response.ok) throw new Error(await responseErrorMessage(response));
             const task = await response.json();
             if(bindingNode && bindingTask) assertSmartTaskBinding(task, bindingNode, bindingTask);
             updateSmartPendingTaskStatus(taskId, task.upstream_status || task.status, task.upstream_task_id || '');
@@ -20860,6 +21255,7 @@ async function pollSmartCanvasTask(taskId, bindingNode=null, bindingTask=null){
             if(task.status === 'canceled') throw new SmartTaskCancelledSignal();
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
+                if(task.validation) throw ModelPromptLimits.fromData(task);
                 const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
                 if(recoverTaskId && !smartTaskHasTerminalFailure({status:task.upstream_status})){
                     throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
@@ -20971,7 +21367,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             node = liveNodeGenerationState(node);
             if(!node || node.id !== nodeId) return;
             const liveTask = smartPendingTasks(node).find(item => item.taskId === task.taskId);
-            if(!liveTask) return;
+            if(!liveTask){ if(ModelPromptLimits.details(e)) throw e; return; }
             if(e && e.smartTaskCancelled){
                 const attempt = nodeGenerationAttemptForTask(node, liveTask.taskId);
                 if(attempt?.status === 'running'){
@@ -23259,6 +23655,7 @@ window.addEventListener('resize', () => {
     if(panoramaState.enabled) resizePanoramaViewer();
 });
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
+// A6：配置变更只走一个通知通道——设置页发出的 BroadcastChannel('studio-api')；外壳页不再转发 postMessage。
 try {
     const apiChannel = new BroadcastChannel('studio-api');
     apiChannel.onmessage = async event => {
@@ -23275,7 +23672,6 @@ window.addEventListener('focus', () => {
 window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-theme') applyTheme(event.data.theme || 'light');
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed') refreshSmartConfigFromSettings();
     if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
     if(event.data?.type === 'studio-lang' && window.StudioI18n) {

@@ -49,7 +49,8 @@ class SmartNodeGenerationHistoryContractTests(unittest.TestCase):
 
     def test_02_history_is_optional_node_data_saved_by_existing_canvas_path(self):
         storage = function_source("canvasForStorage")
-        save = function_source("saveCanvas")
+        # 保存逻辑拆成 saveCanvas（串行化入口）、performSmartCanvasSave（实际请求）、buildSmartSavePayload（组装请求体）。
+        save = function_source("saveCanvas") + function_source("performSmartCanvasSave") + function_source("buildSmartSavePayload")
         normalize = function_source("normalizeLegacySmartNode")
         self.assertIn("JSON.parse(JSON.stringify(canvas || {}))", storage)
         self.assertIn("canvas.nodes = nodes", save)
@@ -114,6 +115,7 @@ applyNodeGenerationAttempt(node, oldItem, {{layout:nodeGenerationLayoutSnapshot(
 const adopted = {{current:node.currentGenerationId, image:node.images[0].url, history:node.generationHistory.length}};
 console.log(JSON.stringify({{during, afterFailure, afterSuccess, adopted}}));
 """
+        harness = (ROOT / "static/js/model-prompt-limits.js").read_text() + "\n" + harness
         completed = subprocess.run(["node", "-e", harness], cwd=ROOT, text=True, capture_output=True, check=True)
         result = json.loads(completed.stdout)
         self.assertEqual(result["during"], {"current": "v1", "image": "/old.png", "active": "generation-1000", "history": 2})

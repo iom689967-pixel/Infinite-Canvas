@@ -1306,6 +1306,7 @@
             max-width: 42px;
         }
     </style>
+    <script src="/static/js/workspace-socket.js"></script>
 </head>
 
 <body>
@@ -1705,24 +1706,8 @@
             resetStudioRootScroll();
         }
 
-        function forwardStudioApiChange(data) {
-            if(!data || !['providers-changed','workflows-changed','comfy-instances-changed'].includes(data.type)) return;
-            document.querySelectorAll('iframe').forEach(iframe => {
-                try {
-                    if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage(data, '*');
-                } catch(e) {}
-            });
-        }
-
-        window.addEventListener('message', event => {
-            if (event.origin && event.origin !== location.origin) return;
-            forwardStudioApiChange(event.data);
-        });
-
-        try {
-            const studioApiChannel = new BroadcastChannel('studio-api');
-            studioApiChannel.onmessage = event => forwardStudioApiChange(event.data);
-        } catch(e) {}
+        // A6：平台/工作流/ComfyUI 地址变更只走 BroadcastChannel('studio-api')，各 iframe 直接收到，
+        // 外壳页不再把它转发成 postMessage（以前会让画布对同一次保存重复加载配置）。
 
         function restoreActivePage() {
             restoreSidebarPinned();
@@ -1759,7 +1744,7 @@
         const host = window.location.host;
         if (host) {
             const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-            const ws = new WebSocket(`${protocol}://${host}/ws/stats?client_id=${CID}`);
+            const ws = new MioWorkspaceSocket(`${protocol}://${host}/ws/stats?client_id=${CID}`);
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 if (data.type === 'stats') {

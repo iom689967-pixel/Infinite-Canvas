@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -26,6 +27,19 @@ from PIL import Image
 from instance_model_policy import GuardedClient, ModelPolicy
 from test_instance_isolation import ROOT, clean_env, free_port, instance_env
 import test_instance_isolation as isolation
+
+
+# 模拟上游在 EVIL_RESULT / REDIRECT_RESULT 里指向的内部地址；结果里不能出现它的任何部分。
+INTERNAL_RESULT_TARGET = ('127.0.0.1:3000', 'private.png')
+STANDALONE_INTERNAL_PORT = re.compile(r'(?<![0-9A-Za-z])3000(?![0-9A-Za-z])')
+
+
+def internal_target_leaks(text):
+    """返回 text 里泄露的内部地址片段。只匹配地址和单独成词的端口号，
+    不会把随机任务 id（例如 canvas_img_e974d3000d…）里碰巧出现的 3000 当成泄露。"""
+    leaks = [part for part in INTERNAL_RESULT_TARGET if part in text]
+    leaks += STANDALONE_INTERNAL_PORT.findall(text)
+    return leaks
 
 
 def configuration(port):
@@ -223,7 +237,7 @@ class ControlledModelTests(unittest.TestCase):
         self.assertEqual(self.request('A','GET',url).content,self.request('A','GET','/api/download-output',params={'url':url}).content)
         self.assertEqual(self.request('A','GET','/api/media-preview',params={'url':url}).status_code,200)
         canvas=self.canvas('A','model workflow')
-        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'result','type':'image','images':[{'url':url}]}]})
+        self.ok('A','PUT','/api/canvases/'+canvas['id'],json={'nodes':[{'id':'result','type':'image','images':[{'url':url}]}],'base_updated_at':canvas['updated_at']})
         self.assertTrue(list((self.roots['A']/'.auth/reference-cache').glob('*.json')))
         self.assertTrue(list((self.roots['A']/'data/media_previews').glob('*')))
         self.assertFalse(list((self.roots['B']/'.auth/reference-cache').glob('*')))
@@ -351,7 +365,7 @@ class ControlledModelTests(unittest.TestCase):
         for prompt in ('EVIL_RESULT','REDIRECT_RESULT'):
             task=self.ok('A','POST','/api/canvas-image-tasks',json=self.image_payload(prompt))['task_id']
             result=self.wait_job(task);self.assertEqual(result['status'],'result_recovery_required');self.assertEqual(result['upstream_status'],'success');self.assertEqual(result['error_code'],'download')
-            self.assertNotIn('3000',json.dumps(result))
+            self.assertEqual(internal_target_leaks(json.dumps(result)),[],prompt)
 
     def test_credentials_never_appear_in_catalog_errors_canvas_exports_or_logs(self):
         for endpoint in ('/api/providers','/api/config','/api/models'):
@@ -421,6 +435,17 @@ class ControlledModelTests(unittest.TestCase):
         response=self.request('A','POST','/api/canvas-llm',json={'provider':'atelier-text','model':'gemini-mock-vision','message':'TRICKLE'})
         self.assertEqual(response.status_code,504)
         self.assertLess(time.monotonic()-start,1.8)
+
+
+class InternalTargetLeakCheckTests(unittest.TestCase):
+    def test_detects_internal_target_but_not_random_ids(self):
+        for leaked in ('{"url": "http://127.0.0.1:3000/assets/private.png"}',
+                       '{"location": "http://127.0.0.1:3000/"}',
+                       '{"file": "private.png"}', '{"port": 3000}', '{"host": "localhost:3000"}'):
+            self.assertNotEqual(internal_target_leaks(leaked),[],leaked)
+        for clean in ('{"task_id": "canvas_img_e974d3000d1f"}', '{"task_id": "30001a"}',
+                      '{"elapsed_ms": 13000}', '{"size": 30000}'):
+            self.assertEqual(internal_target_leaks(clean),[],clean)
 
 
 class PolicyUnitTests(unittest.TestCase):

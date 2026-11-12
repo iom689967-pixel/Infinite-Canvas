@@ -7,6 +7,7 @@ import json
 import uuid
 import base64
 import hashlib
+import sqlite3
 import hmac
 import datetime
 import urllib.request
@@ -27,11 +28,12 @@ import zipfile
 import mimetypes
 import tempfile
 import math
+import ipaddress
 import shlex
 import functools
 import html
 import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import List, Dict, Any, Optional, Tuple
 from threading import Lock, RLock
 import httpx
@@ -43,6 +45,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from providers.prompt_limits import (
+    ModelPromptLimitError, public_prompt_capabilities, validate_model_prompt,
+    is_upstream_prompt_limit_error,
+)
 from instance_auth import AuthStore, PRINCIPAL, task_namespace
 from instance_http import InstanceAuthMiddleware
 from instance_model_tasks import ControlledModels
@@ -239,6 +245,13 @@ async def startup_event():
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
+    # C9：恢复上次进程里的画布生成任务（本地模式），不会自动重新提交；放在迁移之后，仍在开始接收请求之前
+    try:
+        restored = await asyncio.to_thread(restore_canvas_tasks)
+        if restored:
+            print(f"已恢复 {restored} 个画布生成任务记录")
+    except Exception as exc:
+        print(f"恢复画布生成任务失败: {exc}")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -264,13 +277,158 @@ async def instance_control_boundary(request: Request, call_next):
             return JSONResponse(status_code=403, content={'detail':'自动素材描述/分类尚未开放，请使用 Canvas 获批模型'})
     return await call_next(request)
 
+# --- 跨站请求防护（CORS / Origin / Host） ---
+# 本服务没有登录认证，任何网页都能让浏览器向 127.0.0.1 发请求。因此：
+# 1. 可信来源只有本服务自己：同源页面，或指向同一端口的本机别名（localhost ↔ 127.0.0.1）。
+#    本机其他端口上的网页（开发服务器、其他本地应用）不再被信任；浏览器扩展照常放行。
+# 2. 写操作（POST/PUT/PATCH/DELETE）若带 Origin/Referer，必须来自可信来源；
+#    不带 Origin/Referer 的写请求来自非浏览器客户端（PS UXP 插件、脚本、测试），浏览器无法伪造，予以放行。
+# 3. 所有 GET/HEAD 请求和 WebSocket 握手都校验 Host，挡住 DNS rebinding（恶意域名解析到 127.0.0.1
+#    后的同源读取，包括画布内容和静态页）；WebSocket 握手带 Origin 时同样必须来自可信来源。
+#    IP 字面量（含 IPv6）与 localhost 不可能来自 DNS rebinding，直接放行，局域网按 IP 访问不受影响。
+# 额外放行：INFINITE_CANVAS_ALLOWED_ORIGINS / INFINITE_CANVAS_ALLOWED_HOSTS（逗号分隔）。
+UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+HOST_CHECKED_METHODS = {"GET", "HEAD", "WEBSOCKET"}
+BROWSER_EXTENSION_SCHEMES = {"chrome-extension", "moz-extension"}
+# 同源请求不需要 CORS；跨源调用只剩浏览器扩展（以及 INFINITE_CANVAS_ALLOWED_ORIGINS 显式放行的来源）。
+EXTENSION_CORS_ORIGIN_REGEX = r"^(chrome-extension://[a-z0-9]+|moz-extension://[0-9a-f-]+)$"
+
+
+def _env_csv(name):
+    return {item.strip().lower().rstrip("/") for item in os.getenv(name, "").split(",") if item.strip()}
+
+
+def _split_host_header(host_header):
+    """返回 (hostname, port)；没有端口时 port 为 None。支持 [IPv6]:port。"""
+    host = str(host_header or "").strip().lower()
+    port = None
+    if host.startswith("["):
+        end = host.find("]")
+        hostname = host[1:end] if end > 0 else host
+        rest = host[end + 1:] if end > 0 else ""
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+        return hostname, port
+    if host.count(":") == 1:
+        hostname, _, raw_port = host.partition(":")
+        if raw_port.isdigit():
+            port = int(raw_port)
+        return hostname, port
+    return host, None
+
+
+def _hostname_from_host_header(host_header):
+    return _split_host_header(host_header)[0]
+
+
+def _is_ip_literal(hostname):
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_loopback_hostname(hostname):
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def request_host_allowed(host_header):
+    """IP 字面量与 localhost 不可能来自 DNS rebinding；其他域名需显式加入 INFINITE_CANVAS_ALLOWED_HOSTS。"""
+    hostname = _hostname_from_host_header(host_header)
+    if not hostname:
+        return True
+    return hostname == "localhost" or _is_ip_literal(hostname) or hostname in _env_csv("INFINITE_CANVAS_ALLOWED_HOSTS")
+
+
+def request_origin_allowed(origin, host_header, server_port=None):
+    origin = str(origin or "").strip()
+    if not origin or origin.lower() == "null":
+        return False
+    if origin.lower().rstrip("/") in _env_csv("INFINITE_CANVAS_ALLOWED_ORIGINS"):
+        return True
+    parsed = urllib.parse.urlsplit(origin)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in BROWSER_EXTENSION_SCHEMES:
+        return True
+    if scheme not in ("http", "https"):
+        return False
+    # 同源：Origin 与 Host 完全一致（含局域网 IP 访问）
+    if parsed.netloc.lower() == str(host_header or "").strip().lower():
+        return request_host_allowed(host_header)
+    # 同一服务的本机别名：两边都是回环地址，且端口就是本服务的端口
+    host_name, host_port = _split_host_header(host_header)
+    own_port = server_port or host_port
+    try:
+        origin_port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return False
+    origin_host = (parsed.hostname or "").lower()
+    return bool(own_port) and origin_port == own_port and _is_loopback_hostname(origin_host) and _is_loopback_hostname(host_name)
+
+
+def cross_site_rejection_reason(method, path, headers, server_port=None):
+    """返回拒绝原因；允许时返回空字符串。headers 为小写键的 dict；WebSocket 握手传 method="WEBSOCKET"。"""
+    method = str(method or "").upper()
+    host_checked = method in HOST_CHECKED_METHODS
+    if method not in UNSAFE_HTTP_METHODS and not host_checked:
+        return ""
+    host = headers.get("host", "")
+    origin = headers.get("origin")
+    referer = headers.get("referer")
+    browser_like = origin is not None or referer is not None or "sec-fetch-site" in headers
+    if (host_checked or browser_like) and not request_host_allowed(host):
+        return f"Host「{host}」不在允许列表中（可能是 DNS rebinding）。如需通过域名访问，请设置 INFINITE_CANVAS_ALLOWED_HOSTS。"
+    if origin is not None:
+        if not request_origin_allowed(origin, host, server_port):
+            return f"来源「{origin}」不在允许列表中（只接受本服务自己的页面）。如需放行，请设置 INFINITE_CANVAS_ALLOWED_ORIGINS。"
+    elif referer and method in UNSAFE_HTTP_METHODS:
+        referer_origin = origin_from_url(referer)
+        if not referer_origin or not request_origin_allowed(referer_origin, host, server_port):
+            return "请求来源（Referer）不在允许列表中。"
+    return ""
+
+
+class CrossSiteRequestGuard:
+    """纯 ASGI 中间件：只读请求头，不包装响应体，因此不影响流式响应。HTTP 拒绝返回 403，WebSocket 拒绝时关闭握手。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        scope_type = scope.get("type")
+        if scope_type in ("http", "websocket"):
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+            method = scope.get("method") if scope_type == "http" else "WEBSOCKET"
+            server = scope.get("server") or (None, None)
+            reason = cross_site_rejection_reason(method, scope.get("path") or "", headers, server[1] if len(server) > 1 else None)
+            if reason:
+                if scope_type == "websocket":
+                    # 在 accept 之前关闭：服务器对握手返回 403
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = JSONResponse(status_code=403, content={"detail": f"已拒绝跨站请求：{reason}"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 if not PATHS.explicit:
+    # 独立实例（公测）不开 CORS：InstanceAuthMiddleware 只接受实例自己的 Origin。
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=sorted(_env_csv("INFINITE_CANVAS_ALLOWED_ORIGINS")),
+        allow_origin_regex=EXTENSION_CORS_ORIGIN_REGEX,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+# 最后添加的中间件位于最外层：先过跨站防护，再进入 CORS 与路由。
+app.add_middleware(CrossSiteRequestGuard)
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -327,6 +485,66 @@ DEFAULT_STORAGE_DIRS = {
     "local": LOCAL_UPLOAD_DIR,
 }
 
+# --- 原子写入 ---
+# 状态文件（画布、配置、素材库、历史等）都是“读出 → 修改 → 整体写回”。直接 open('w') 会先把文件截断，
+# 写到一半时进程退出就只剩半个文件；其他线程同时读取也会读到不完整的 JSON（实测会让并发的 PUT 返回 500）。
+# 这里统一改为：完整序列化 → 写同目录临时文件并 fsync → os.replace 原子替换。
+
+def _replace_file_with_retry(source, target, attempts=20, delay=0.05):
+    # Windows 上目标文件正被其他句柄打开时 os.replace 会抛 PermissionError，稍等重试即可。
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+def atomic_write_text(path, text, encoding="utf-8", newline=None):
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        mode = 0o666 & ~current_umask
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, mode)  # mkstemp 默认 0600，保持原文件权限
+        _replace_file_with_retry(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+def atomic_write_json(path, data, **dump_kwargs):
+    dump_kwargs.setdefault("ensure_ascii", False)
+    # 先在内存里完整序列化：序列化失败时磁盘上的旧文件保持不变。
+    atomic_write_text(path, json.dumps(data, **dump_kwargs))
+
+# 画布文件用紧凑格式写入：不改数据结构，任何 JSON 解析器（包括旧版代码的 json.load）都能读取。
+# 缩进格式会让大画布的文件明显变大（几十 MB 的画布里空白占了相当比例），每次保存都要多写这么多。
+CANVAS_JSON_SEPARATORS = (",", ":")
+
+def canvas_json_text(canvas):
+    return json.dumps(canvas, ensure_ascii=False, separators=CANVAS_JSON_SEPARATORS)
+
+def write_canvas_json(path, canvas):
+    """写一个画布文件：独立实例走存储配额，否则原子写入。调用方负责持有 CANVAS_LOCK。"""
+    if INSTANCE_STORAGE:
+        INSTANCE_STORAGE.replace_json(path, canvas, separators=CANVAS_JSON_SEPARATORS)
+        return
+    atomic_write_text(path, canvas_json_text(canvas))
+
 def _storage_abs_path(value, fallback):
     text = str(value or "").strip()
     if not text:
@@ -357,8 +575,7 @@ def save_storage_settings(payload):
     for path in dirs.values():
         os.makedirs(path, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STORAGE_SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(dirs, f, ensure_ascii=False, indent=2)
+    atomic_write_json(STORAGE_SETTINGS_FILE, dirs, ensure_ascii=False, indent=2)
     apply_storage_settings(dirs)
     return {"dirs": dirs}
 
@@ -683,10 +900,12 @@ TUDOU_ASYNC_IMAGE_TASK_TIMEOUT = float(os.getenv("TUDOU_ASYNC_IMAGE_TASK_TIMEOUT
 TUDOU_ASYNC_IMAGE_POLL_INTERVAL = float(os.getenv("TUDOU_ASYNC_IMAGE_POLL_INTERVAL", "4"))
 TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY", "12"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
-ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
-VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
-MAX_LLM_TEXT_CHARS = int(os.getenv("MAX_LLM_TEXT_CHARS", "100000"))
-LLM_MESSAGE_MAX_LENGTH = MAX_LLM_TEXT_CHARS
+# User generation input is measured in Python/Unicode characters, not bytes or tokens.
+PROMPT_TEXT_MAX_LENGTH = 100_000
+ONLINE_IMAGE_PROMPT_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
+VIDEO_PROMPT_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
+MAX_LLM_TEXT_CHARS = PROMPT_TEXT_MAX_LENGTH
+LLM_MESSAGE_MAX_LENGTH = PROMPT_TEXT_MAX_LENGTH
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 
@@ -696,23 +915,72 @@ FIELD_LABELS = {
     "system_prompt": "系统提示词",
 }
 
+def _validation_error_field(err):
+    loc = [str(item) for item in err.get("loc", []) if item != "body"]
+    return loc[-1] if loc else ""
+
 def friendly_validation_error(errors):
     parts = []
     for err in errors or []:
-        loc = [str(item) for item in err.get("loc", []) if item != "body"]
-        field = loc[-1] if loc else ""
-        label = FIELD_LABELS.get(field, field or "请求参数")
-        ctx = err.get("ctx") or {}
-        limit = ctx.get("limit_value") or ctx.get("max_length") or ctx.get("min_length")
         err_type = str(err.get("type") or "")
         msg = str(err.get("msg") or "")
+        ctx = err.get("ctx") or {}
+        if err_type == "json_invalid":
+            # loc 里的数字是出错位置，不是字段名
+            position = next((item for item in err.get("loc", []) if isinstance(item, int)), None)
+            where = f"（第 {position} 个字符附近）" if position is not None else ""
+            parts.append(f"请求体不是有效的 JSON{where}。")
+            continue
+        if tuple(err.get("loc") or ()) == ("body",) and err_type in {"model_attributes_type", "dict_type", "model_type"}:
+            parts.append("请求体必须是 JSON 对象，并使用 Content-Type: application/json。")
+            continue
+        field = _validation_error_field(err)
+        if field == "base_updated_at":
+            parts.append("保存请求缺少画布版本基线（base_updated_at 必须是大于 0 的 updated_at），请刷新页面后重试。")
+            continue
+        label = FIELD_LABELS.get(field, field or "请求参数")
+        limit = ctx.get("limit_value") or ctx.get("max_length") or ctx.get("min_length")
         if "max_length" in err_type or "at most" in msg:
             parts.append(f"{label}过长：当前内容超过后端上限 {limit} 个字符。请拆分为多个提示词节点，或先用 LLM 节点压缩后再生成。")
         elif "min_length" in err_type:
             parts.append(f"{label}不能为空。")
+        elif err_type == "value_error" and ctx.get("error") is not None:
+            parts.append(f"{label}格式不正确：{ctx.get('error')}")
         else:
             parts.append(f"{label}格式不正确：{msg}")
     return "\n".join(parts) or "请求参数不正确。"
+
+_VALIDATION_SCALAR_TYPES = (bool, int, float, type(None))
+
+def sanitize_validation_errors(errors):
+    """把 pydantic 的校验错误整理成可以安全返回给客户端的结构。
+
+    - 去掉 input 里的字符串、字节和对象：它们可能是整段提示词、画布内容或密钥，
+      原样返回会让 422 响应和前端日志变得很大，也可能把敏感内容写进日志；只保留类型和长度。
+      数字、布尔值和 null 原样保留，便于排查类型错误。
+    - ctx 里的异常对象（例如自定义校验器抛出的 ValueError）转成字符串，避免 JSON 序列化失败返回 500。
+    """
+    cleaned = []
+    for err in errors or []:
+        item = {
+            "type": str(err.get("type") or ""),
+            "loc": [part if isinstance(part, (str, int)) else str(part) for part in err.get("loc", ())],
+            "msg": str(err.get("msg") or ""),
+        }
+        ctx = err.get("ctx")
+        if isinstance(ctx, dict) and ctx:
+            item["ctx"] = {str(key): (value if isinstance(value, (str, *_VALIDATION_SCALAR_TYPES)) else str(value))
+                           for key, value in ctx.items()}
+        if "input" in err:
+            value = err["input"]
+            if isinstance(value, _VALIDATION_SCALAR_TYPES):
+                item["input"] = value
+            else:
+                item["input_omitted"] = {"type": type(value).__name__}
+                if isinstance(value, (str, bytes, bytearray, list, tuple, dict)):
+                    item["input_omitted"]["length"] = len(value)
+        cleaned.append(item)
+    return cleaned
 
 def validate_llm_text_length(value, field_path):
     if isinstance(value, str) and len(value) > MAX_LLM_TEXT_CHARS:
@@ -736,11 +1004,20 @@ def validate_llm_message_content(value, field_path):
         if "content" in value:
             validate_llm_message_content(value.get("content"), f"{field_path}.content")
 
+@app.get("/api/model-prompt-limits")
+async def model_prompt_limits():
+    return public_prompt_capabilities()
+
+@app.exception_handler(ModelPromptLimitError)
+async def model_prompt_limit_exception_handler(request: Request, exc: ModelPromptLimitError):
+    return JSONResponse(status_code=400, content={"detail": exc.details["message"], "validation": exc.details})
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = sanitize_validation_errors(exc.errors())
     return JSONResponse(
         status_code=422,
-        content={"detail": friendly_validation_error(exc.errors()), "errors": exc.errors()},
+        content={"detail": friendly_validation_error(errors), "errors": errors},
     )
 
 def model_list(env_name, primary, defaults):
@@ -1444,7 +1721,12 @@ def normalize_provider(item):
         protocol = "openai"
     if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
-    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
+    # 用户在设置页明确选过图片接口时（image_request_mode_manual），以用户的选择为准；
+    # 否则按地址和模型自动识别，识别不出时用保存的值。
+    image_request_mode_manual = bool(item.get("image_request_mode_manual"))
+    requested_image_request_mode = normalize_image_request_mode(item.get("image_request_mode"))
+    image_request_mode = requested_image_request_mode if image_request_mode_manual else (
+        detect_image_request_mode(base_url, item.get("image_models") or []) or requested_image_request_mode)
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
     volc_project = re.sub(r"\s+", " ", str(item.get("volcengine_project_name") or "").strip())[:80]
@@ -1467,12 +1749,14 @@ def normalize_provider(item):
         protocol = "kie"
         base_url = KIE_BASE_URL
         image_request_mode = "openai"
+        image_request_mode_manual = False
         image_generation_endpoint = ""
         image_edit_endpoint = ""
     locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
     if locked_rule:
         protocol = locked_rule["protocol"]
         image_request_mode = locked_rule["image_request_mode"]
+        image_request_mode_manual = False
     video_models = model_list_from_values(item.get("video_models") or [])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
@@ -1482,7 +1766,7 @@ def normalize_provider(item):
         "base_url": base_url,
         "protocol": protocol,
         "image_request_mode": image_request_mode,
-        "image_edit_route": (item.get("image_edit_route") if item.get("image_edit_route") in {"general", "auto", "chat"} else "general"),
+        "image_request_mode_manual": image_request_mode_manual,
         "image_generation_endpoint": image_generation_endpoint,
         "image_edit_endpoint": image_edit_endpoint,
         "enabled": bool(item.get("enabled", True)),
@@ -1526,8 +1810,7 @@ def load_api_providers():
 def save_api_providers(providers):
     os.makedirs(DATA_DIR, exist_ok=True)
     with GLOBAL_CONFIG_LOCK:
-        with open(API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(providers, f, ensure_ascii=False, indent=2)
+        atomic_write_json(API_PROVIDERS_FILE, providers, ensure_ascii=False, indent=2)
 
 def public_provider(provider):
     if provider.get("id") == "runninghub":
@@ -1582,7 +1865,22 @@ def get_primary_provider_id(providers=None):
         return non_ms["id"]
     return providers[0]["id"] if providers else "modelscope"
 
-def get_api_provider(provider_id="comfly"):
+def unknown_provider_error(provider_id):
+    return HTTPException(
+        status_code=400,
+        detail=f"未找到 API 平台：{provider_id}。该平台可能已被删除或改名，请在节点或 API 设置中重新选择平台。",
+    )
+
+def is_unknown_provider_id(provider_id, providers=None):
+    """非空、且不在当前配置中的平台 id。空值表示“未指定”，由调用方回退到默认平台。
+    旧版的 "comfly" 别名已删除：前端不再发送它；配置了 id 为 comfly 的平台时它就是普通平台 id。"""
+    target = str(provider_id or "").strip().lower()
+    if not target:
+        return False
+    providers = providers if providers is not None else load_api_providers()
+    return not any(p["id"] == target for p in providers)
+
+def get_api_provider(provider_id=""):
     if PATHS.explicit and INSTANCE_MODELS and INSTANCE_MODELS.policy.providers:
         configured = INSTANCE_MODELS.policy.providers.get(provider_id)
         if not configured:
@@ -1594,7 +1892,10 @@ def get_api_provider(provider_id="comfly"):
     target = (provider_id or "").strip().lower()
     if PATHS.explicit and not any(p['id'] == target for p in providers):
         raise model_access_failure('not_configured', 503)
-    # 兼容旧的 "comfly" 硬编码：若 comfly 不存在或未指定，回退到首选 provider
+    # 找不到明确指定的平台时直接报错，不再悄悄改用首选平台（否则任务会被发到别的服务商）。
+    # 只有“未指定”（空值）才回退到首选平台。
+    if is_unknown_provider_id(target, providers):
+        raise unknown_provider_error(target)
     if not target or not any(p["id"] == target for p in providers):
         target = get_primary_provider_id(providers)
     provider = next((p for p in providers if p["id"] == target), None)
@@ -1617,11 +1918,19 @@ def get_api_provider_exact(provider_id: str):
 def modelscope_provider_config():
     return get_api_provider_exact("modelscope")
 
+def is_masked_secret(value):
+    """mask_secret() 的输出（如 ••••••••abcd）。旧页面会把 /api/config/token 拿到的值原样回传，
+    这类值不是真实密钥，必须忽略并改用服务端保存的 Key。"""
+    return "•" in str(value or "")
+
 def modelscope_api_key(explicit_key: str = ""):
+    if is_masked_secret(explicit_key):
+        explicit_key = ""
     return (
         strip_auth_scheme(explicit_key, "Bearer")
         or strip_auth_scheme(provider_env_key_value("modelscope"), "Bearer")
         or strip_auth_scheme(MODELSCOPE_API_KEY, "Bearer")
+        or strip_auth_scheme(legacy_global_modelscope_token(), "Bearer")
     )
 
 def modelscope_api_root(provider=None):
@@ -1640,9 +1949,16 @@ def env_quote(value):
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return text
 
+ENV_FILE_LOCK = RLock()
+
 def update_env_values(updates):
     if PATHS.explicit and any(not PATHS.allow_env_key(key) for key in updates):
         raise InstanceBoundaryError("Cannot change server startup/system configuration through API")
+    # 读 → 改 → 写回整个 .env；加锁避免两个保存请求交错时丢失其中一方的 Key。
+    with ENV_FILE_LOCK:
+        _update_env_values_locked(updates)
+
+def _update_env_values_locked(updates):
     os.makedirs(os.path.dirname(API_ENV_FILE), exist_ok=True)
     lines = []
     if os.path.exists(API_ENV_FILE):
@@ -1666,8 +1982,7 @@ def update_env_values(updates):
         if key not in seen:
             next_lines.append(f"{key}={env_quote(value)}")
             os.environ[key] = str(value or "")
-    with open(API_ENV_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(next_lines).rstrip() + "\n")
+    atomic_write_text(API_ENV_FILE, "\n".join(next_lines).rstrip() + "\n")
 
 BACKEND_LOCAL_LOAD = {addr: 0 for addr in COMFYUI_INSTANCES}
 
@@ -1819,7 +2134,51 @@ def fetch_release_update_notes(version: str, timeout: float = 3.0) -> Dict[str, 
         "items": [],
     }
 
+def compute_client_build_id() -> str:
+    """页面版本过期检测：对程序代码（后端 .py、static 下的 js/css/html、VERSION）的内容做哈希。
+    代码有任何变化（git 更新、应用内更新）构建号就变；只是重启服务、代码没变时不变。"""
+    digest = hashlib.sha256()
+    candidates = [os.path.join(PROGRAM_ROOT, "VERSION")]
+    for name in sorted(os.listdir(PROGRAM_ROOT)):
+        if name.endswith(".py"):
+            candidates.append(os.path.join(PROGRAM_ROOT, name))
+    for top, suffixes in ((os.path.join(PROGRAM_ROOT, "providers"), (".py",)), (STATIC_DIR, (".js", ".css", ".html"))):
+        for root, dirs, files in os.walk(top):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            candidates.extend(os.path.join(root, f) for f in sorted(files) if f.endswith(suffixes))
+    for path in candidates:
+        try:
+            with open(path, "rb") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        digest.update(os.path.relpath(path, PROGRAM_ROOT).encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()[:16]
+
+
+CLIENT_BUILD_ID = compute_client_build_id()
+CLIENT_BUILD_META_RE = re.compile(r"<head(\s[^>]*)?>", re.I)
+
+
+def inject_client_build_meta(html: str) -> str:
+    """每个页面都带上下发时的构建号，编辑器保存时用 X-Client-Build 头回传。"""
+    tag = f'<meta name="ic-client-build" content="{CLIENT_BUILD_ID}">'
+    match = CLIENT_BUILD_META_RE.search(html)
+    if not match:
+        return tag + html
+    return html[:match.end()] + tag + html[match.end():]
+
+
+def client_build_is_outdated(request_build: str) -> bool:
+    """页面带了构建号且与当前不同 → 页面是旧代码。没带（测试、工具、本功能上线前打开的页面）不判断。"""
+    value = str(request_build or "").strip()
+    return bool(value) and value != CLIENT_BUILD_ID
+
+
 def versioned_static_html(html: str) -> str:
+    html = inject_client_build_meta(html)
     if PATHS.explicit:
         from instance_frontend import authenticated_html
         html = authenticated_html(html, PATHS, PRINCIPAL.get())
@@ -2989,7 +3348,7 @@ def rollback_update(req: RollbackRequest):
         UPDATE_LOCK.release()
 
 class GenerateRequest(BaseModel):
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
     width: int = 1024
     height: int = 1024
     workflow_json: str = "Z-Image.json"
@@ -3005,7 +3364,7 @@ class TokenRequest(BaseModel):
     token: str
 
 class CloudGenRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(max_length=PROMPT_TEXT_MAX_LENGTH)
     api_key: str = ""
     model: str = ""
     resolution: str = "1024x1024"
@@ -3031,7 +3390,7 @@ class AIReference(BaseModel):
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
-    provider_id: str = "comfly"
+    provider_id: str = ""
     model: str = ""
     size: str = "1024x1024"
     aspect_ratio: str = ""
@@ -3075,20 +3434,213 @@ class MidjourneyModalRequest(BaseModel):
     mask_image: Optional[AIReference] = None
 
 class ImageTaskQueryRequest(BaseModel):
-    provider_id: str = "comfly"
+    provider_id: str = ""
     task_id: str = Field(min_length=1, max_length=240)
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
 CANVAS_TASK_CANCEL_EVENTS: Dict[str, asyncio.Event] = {}
 CANVAS_TASK_RUNNERS: Dict[str, asyncio.Task] = {}
+
+# ===== C9：本地模式的画布生成任务持久化 =====
+# 以前任务只在内存里：从不清理，服务重启后查询一律 404，Kie 等上游已经生成（已计费）的结果找不回来。
+# 现在本地模式把任务写进 data/canvas_tasks.sqlite3（与实例模式 27982b4 的私有账本同样是一行一个任务的 SQLite），
+# 重启后按同一套状态约定恢复（instance_model_tasks.py / docs/kie-result-recovery.md）：
+#   - 上游已确认成功、本地结果未保存      → result_recovery_required，可 POST /refresh 只查询原任务取回结果；
+#   - 有上游任务 ID 但未确认完成          → failed + upstream_task_id + recovery=query-existing（编辑器的“查询结果”）；
+#   - 没有上游任务 ID（尚未提交或同步接口） → failed，明确提示需重新生成；
+# 任何情况下都不会自动重新提交。已结束的任务保留 CANVAS_TASK_TTL_SECONDS 后清理，内存和数据库同步清理。
+# 实例模式不使用这里（受控任务有自己的账本，其余任务仍按原逻辑只在内存中）。
+CANVAS_TASK_DB_PATH = os.path.join(DATA_DIR, "canvas_tasks.sqlite3")
+CANVAS_TASK_TTL_SECONDS = 7 * 24 * 3600
+CANVAS_TASK_MAX_ROWS = 2000
+CANVAS_TASK_TERMINAL = {"succeeded", "failed", "canceled", "result_recovery_required", "jimeng_pending"}
+CANVAS_TASK_PERSISTED_KEYS = ("id", "type", "status", "created_at", "updated_at", "result", "error", "provider_id", "model",
+                              "workflow_json", "upstream_task_id", "upstream_status", "status_code", "recovery",
+                              "local_result_status", "submit_id", "kind", "queue_info", "message", "jimeng_pending",
+                              "canceled_at", "restored_after_restart", "recovery_attempts", "validation")
+CANVAS_TASK_DB_LOCK = Lock()
+CANVAS_TASK_REFRESHING: set = set()
+# 账本不存：result.raw（上游原始响应）、result.prompt（完整提示词，history.json 和画布日志里已有）。
+CANVAS_TASK_RESULT_DROPPED_KEYS = ("raw", "prompt")
+# error、message 落盘前把已知的密钥值替换掉：环境变量和 API/.env 里名字像密钥的项（KEY/SECRET/TOKEN/PASSWORD），
+# 值至少 8 个字符（太短的值替换会误伤正常文字）。上游报错时原样回显请求地址或密钥也不会写进文件。
+CANVAS_TASK_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD", re.IGNORECASE)
+CANVAS_TASK_SECRET_MIN_LENGTH = 8
+CANVAS_TASK_REDACTED = "[redacted]"
+CANVAS_TASK_REDACTED_KEYS = ("error", "message")
+
+
+def known_secret_values() -> List[str]:
+    values = set()
+
+    def add(name, value):
+        value = str(value or "").strip().strip('"').strip("'")
+        if CANVAS_TASK_SECRET_NAME_RE.search(str(name or "")) and len(value) >= CANVAS_TASK_SECRET_MIN_LENGTH:
+            values.add(value)
+
+    for name, value in os.environ.items():
+        add(name, value)
+    try:
+        # 设置页刚保存、还没进环境变量的密钥也算
+        with open(API_ENV_FILE, "r", encoding="utf-8-sig") as f:
+            for raw_line in f.read().splitlines():
+                line = raw_line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    name, value = line.split("=", 1)
+                    add(name.strip(), value)
+    except OSError:
+        pass
+    return sorted(values, key=len, reverse=True)
+
+
+def redact_known_secrets(value, secrets: List[str]):
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret in value:
+                value = value.replace(secret, CANVAS_TASK_REDACTED)
+        return value
+    if isinstance(value, dict):
+        return {k: redact_known_secrets(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_known_secrets(v, secrets) for v in value]
+    return value
+
+
+def canvas_task_ledger_snapshot(task: Dict[str, Any], secrets: Optional[List[str]] = None) -> Dict[str, Any]:
+    """一个任务写进账本的内容：只保留恢复需要的字段，去掉提示词和上游原始响应，错误信息里的已知密钥替换掉。"""
+    snapshot = {key: task[key] for key in CANVAS_TASK_PERSISTED_KEYS if task and key in task}
+    if isinstance(snapshot.get("result"), dict):
+        snapshot["result"] = {k: v for k, v in snapshot["result"].items() if k not in CANVAS_TASK_RESULT_DROPPED_KEYS}
+    secrets = known_secret_values() if secrets is None else secrets
+    for key in CANVAS_TASK_REDACTED_KEYS:
+        if key in snapshot:
+            snapshot[key] = redact_known_secrets(snapshot[key], secrets)
+    return snapshot
+
+
+def canvas_task_persistence_enabled():
+    return not PATHS.explicit
+
+
+@contextmanager
+def canvas_task_db():
+    os.makedirs(os.path.dirname(CANVAS_TASK_DB_PATH), exist_ok=True)
+    db = sqlite3.connect(CANVAS_TASK_DB_PATH, timeout=5)
+    try:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, data TEXT, updated REAL)")
+            yield db
+    finally:
+        db.close()
+
+
+def persist_canvas_task(task_id: str):
+    """把一个任务的当前状态写入本地账本（只在本地模式）。写失败只记日志，不影响生成本身。"""
+    if not canvas_task_persistence_enabled():
+        return
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        snapshot = {key: task[key] for key in CANVAS_TASK_PERSISTED_KEYS if task and key in task}
+    if not snapshot:
+        return
+    try:
+        snapshot = canvas_task_ledger_snapshot(snapshot)
+        data = json.dumps(snapshot, ensure_ascii=False, default=str)
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            db.execute("INSERT OR REPLACE INTO jobs (id, status, data, updated) VALUES (?, ?, ?, ?)",
+                       (task_id, str(snapshot.get("status") or ""), data, float(snapshot.get("updated_at") or time.time())))
+    except Exception as exc:
+        print(f"画布任务持久化失败 task={task_id}: {exc}")
+
+
+def prune_canvas_tasks(now: Optional[float] = None):
+    """清理过期的已结束任务（内存和账本），并把账本行数限制在 CANVAS_TASK_MAX_ROWS 以内。"""
+    now = time.time() if now is None else now
+    cutoff = now - CANVAS_TASK_TTL_SECONDS
+    with CANVAS_TASK_LOCK:
+        expired = [task_id for task_id, task in CANVAS_TASKS.items()
+                   if task.get("status") in CANVAS_TASK_TERMINAL and float(task.get("updated_at") or 0) < cutoff
+                   and task_id not in CANVAS_TASK_RUNNERS]
+        for task_id in expired:
+            CANVAS_TASKS.pop(task_id, None)
+    if not canvas_task_persistence_enabled():
+        return len(expired)
+    try:
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            placeholders = ",".join("?" for _ in CANVAS_TASK_TERMINAL)
+            db.execute(f"DELETE FROM jobs WHERE updated < ? AND status IN ({placeholders})", (cutoff, *CANVAS_TASK_TERMINAL))
+            db.execute("DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY updated DESC LIMIT ?)", (CANVAS_TASK_MAX_ROWS,))
+    except Exception as exc:
+        print(f"画布任务清理失败: {exc}")
+    return len(expired)
+
+
+def restored_canvas_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """服务重启后，把上次进程里没有结束的任务换成明确的恢复状态；绝不自动重新提交。"""
+    task = dict(task)
+    if task.get("status") in CANVAS_TASK_TERMINAL:
+        return task
+    upstream = str(task.get("upstream_task_id") or "").strip()
+    task["restored_after_restart"] = True
+    task["updated_at"] = time.time()
+    if upstream and task.get("upstream_status") == "success":
+        task.update(status="result_recovery_required", recovery="query-existing", local_result_status="pending",
+                    error="图片已在上游生成成功，本地结果尚未保存（服务曾重启）；可恢复结果，不会重新生成")
+    elif upstream:
+        task.update(status="failed", recovery="query-existing",
+                    error=f"服务重启时任务仍在进行；任务未丢失，可查询原任务找回结果，不会重新提交（task_id: {upstream}）")
+    else:
+        task.update(status="failed", recovery="",
+                    error="服务重启，任务在提交给服务商之前或同步等待中被中断，没有可查询的任务 ID；请重新生成")
+    return task
+
+
+def restore_canvas_tasks():
+    """启动时从账本恢复任务（本地模式）。返回恢复的任务数。"""
+    if not canvas_task_persistence_enabled() or not os.path.exists(CANVAS_TASK_DB_PATH):
+        return 0
+    prune_canvas_tasks()
+    restored = []
+    try:
+        with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+            rows = db.execute("SELECT id, data FROM jobs").fetchall()
+    except Exception as exc:
+        print(f"读取画布任务账本失败: {exc}")
+        return 0
+    # 旧版本写进账本的行可能带着提示词或未替换的密钥：按现在的规则重写一遍
+    secrets = known_secret_values()
+    rewrites = []
+    for task_id, data in rows:
+        try:
+            stored = json.loads(data)
+            clean = json.dumps(canvas_task_ledger_snapshot(stored, secrets), ensure_ascii=False, default=str)
+            if clean != data:
+                rewrites.append((clean, task_id))
+            task = restored_canvas_task(stored)
+        except Exception:
+            continue
+        with CANVAS_TASK_LOCK:
+            if task_id not in CANVAS_TASKS:
+                CANVAS_TASKS[task_id] = task
+                restored.append(task_id)
+    if rewrites:
+        try:
+            with CANVAS_TASK_DB_LOCK, canvas_task_db() as db:
+                db.executemany("UPDATE jobs SET data = ? WHERE id = ?", rewrites)
+        except Exception as exc:
+            print(f"重写画布任务账本失败: {exc}")
+    for task_id in restored:
+        if CANVAS_TASKS[task_id].get("restored_after_restart"):
+            persist_canvas_task(task_id)
+    return len(restored)
 CANVAS_LLM_ACTIVE_REQUESTS: Dict[str, asyncio.Task] = {}
 CANVAS_LLM_CANCEL_MARKERS: Dict[str, float] = {}
 CANVAS_LLM_CANCEL_MARKER_TTL = 30.0
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
-    provider_id: str = "comfly"
+    provider_id: str = ""
     model: str = "veo3-fast"
     duration: int = 5
     aspect_ratio: str = "16:9"
@@ -3106,9 +3658,6 @@ class CanvasVideoRequest(BaseModel):
     generate_audio: bool = False
     multimodal: bool = False
     trusted_asset: bool = False
-
-class TempShUploadRequest(BaseModel):
-    url: str = ""
 
 class CloudVideoUploadRequest(BaseModel):
     url: str = ""
@@ -3186,7 +3735,7 @@ class ChatRequest(BaseModel):
     resolution: str = ""
     quality: str = "auto"
     reference_images: List[AIReference] = []
-    provider: str = "comfly"
+    provider: str = ""
     ms_model: str = ""
 
 def chat_system_prompt(payload):
@@ -3194,7 +3743,7 @@ def chat_system_prompt(payload):
     return prompt or SYSTEM_PROMPT
 
 class MsGenerateRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(max_length=PROMPT_TEXT_MAX_LENGTH)
     api_key: str = ""
     model: str = "black-forest-labs/FLUX.2-klein-9B"
     image_urls: List[str] = []
@@ -3209,7 +3758,7 @@ class CanvasLLMRequest(BaseModel):
     system_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     model: str = ""
     messages: List[Dict[str, Any]] = []
-    provider: str = "comfly"
+    provider: str = ""
     ms_model: str = ""
     request_id: str = Field(default="", max_length=80, pattern=r"^[A-Za-z0-9_-]*$")
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
@@ -3255,15 +3804,15 @@ class ProjectUpdateRequest(BaseModel):
     order: Optional[int] = None
 
 class CanvasSaveRequest(BaseModel):
-    title: str = "未命名画布"
-    icon: str = "🧩"
+    # 标题和图标只能通过 POST /api/canvases/{id}/meta 修改；PUT 里即使带了也会被忽略（多余字段不报错）。
     nodes: List[Dict[str, Any]] = []
     connections: List[Dict[str, Any]] = []
     viewport: Dict[str, Any] = {}
     logs: List[Dict[str, Any]] = []
     settings: Dict[str, Any] = {}
     client_id: str = ""
-    base_updated_at: int = 0
+    # 必填且大于 0：保存必须说明是基于哪个版本改的，否则无法做冲突检查（以前 0 或不传会直接覆盖）。
+    base_updated_at: int = Field(gt=0)
 
 class DeleteCanvasLogRequest(BaseModel):
     log_id: str
@@ -3316,10 +3865,10 @@ class LocalImageImportRequest(BaseModel):
 
 class LocalAssetCaptionRequest(BaseModel):
     names: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
-    prompt: str = "描述图片"
+    prompt: str = Field(default="描述图片", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetCaptionSaveRequest(BaseModel):
     name: str = ""
@@ -3327,10 +3876,10 @@ class LocalAssetCaptionSaveRequest(BaseModel):
 
 class LocalAssetClassifyRequest(BaseModel):
     names: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetUrlImportItem(BaseModel):
     url: str = ""
@@ -3342,10 +3891,10 @@ class LocalAssetUrlImportRequest(BaseModel):
     items: List[LocalAssetUrlImportItem] = []
     folder: str = ""
     classify: bool = False
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class LocalAssetFolderRequest(BaseModel):
     parent: str = ""
@@ -3415,10 +3964,10 @@ class AssetAvatarRegisterRequest(BaseModel):
 class AssetLibraryClassifyRequest(BaseModel):
     library_id: str = ""
     ids: List[str] = []
-    provider: str = "comfly"
+    provider: str = ""
     model: str = ""
     ms_model: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
 
 class PromptLibraryRequest(BaseModel):
     name: str = "提示词库"
@@ -3428,8 +3977,8 @@ class PromptLibraryItemRequest(BaseModel):
     item_id: str = ""
     name: str = "提示词"
     category: str = "custom"
-    positive: str = ""
-    negative: str = ""
+    positive: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
+    negative: str = Field(default="", max_length=PROMPT_TEXT_MAX_LENGTH)
     scene: str = ""
 
 class PromptLibraryBatchDeleteRequest(BaseModel):
@@ -3734,22 +4283,7 @@ def save_to_history(record, *, identity_key=None):
         if INSTANCE_STORAGE:
             INSTANCE_STORAGE.replace_json(HISTORY_FILE, history[:5000])
             return
-        if identity_key is not None:
-            # A recoverable task must not truncate existing history on a failed write.
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=os.path.dirname(HISTORY_FILE), delete=False) as f:
-                    temporary = f.name
-                    json.dump(history[:5000], f, ensure_ascii=False, indent=4)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(temporary, HISTORY_FILE)
-            finally:
-                if temporary and os.path.exists(temporary):
-                    os.unlink(temporary)
-            return
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history[:5000], f, ensure_ascii=False, indent=4)
+        atomic_write_json(HISTORY_FILE, history[:5000], ensure_ascii=False, indent=4)
 
 def get_comfy_history(comfy_address, prompt_id):
     try:
@@ -3789,8 +4323,7 @@ def now_ms():
 def save_conversation(user_id, conversation):
     with CONVERSATION_LOCK:
         path = conversation_path(user_id, conversation["id"])
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(conversation, f, ensure_ascii=False, indent=2)
+        atomic_write_json(path, conversation, ensure_ascii=False, indent=2)
 
 def new_conversation(user_id, title="新对话"):
     timestamp = now_ms()
@@ -3842,11 +4375,7 @@ def canvas_path(canvas_id):
 def save_canvas(canvas):
     with CANVAS_LOCK:
         canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
-        if INSTANCE_STORAGE:
-            INSTANCE_STORAGE.replace_json(canvas_path(canvas['id']), canvas)
-            return
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+        write_canvas_json(canvas_path(canvas["id"]), canvas)
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -3868,8 +4397,7 @@ def load_projects():
 
 def save_projects(projects):
     with CANVAS_LOCK:
-        with open(PROJECTS_PATH, 'w', encoding='utf-8') as f:
-            json.dump({"projects": projects}, f, ensure_ascii=False, indent=2)
+        atomic_write_json(PROJECTS_PATH, {"projects": projects}, ensure_ascii=False, indent=2)
 
 def project_record(p):
     return {
@@ -3948,6 +4476,9 @@ def load_canvas(canvas_id):
         canvas = json.load(f)
     if canvas.get("deleted_at"):
         raise HTTPException(status_code=404, detail="画布已在回收站")
+    if not int(canvas.get("updated_at") or 0) > 0:
+        # 极旧的画布文件可能没有 updated_at；用文件修改时间补上，保证编辑器总能拿到 > 0 的保存基线。
+        canvas["updated_at"] = int(os.path.getmtime(path) * 1000)
     return canvas
 
 def load_canvas_any(canvas_id):
@@ -5089,6 +5620,8 @@ def detect_image_request_mode(base_url="", models=None):
     return ""
 
 def effective_image_request_mode(provider, model=""):
+    if (provider or {}).get("image_request_mode_manual"):
+        return normalize_image_request_mode(provider.get("image_request_mode"))
     detected = detect_image_request_mode((provider or {}).get("base_url"), [model])
     if detected:
         return detected
@@ -7409,8 +7942,7 @@ def prune_generation_history_for_media(paths: List[str]) -> int:
             ]
             removed = len(history) - len(kept)
             if removed:
-                with open(HISTORY_FILE, "w", encoding="utf-8") as handle:
-                    json.dump(kept, handle, ensure_ascii=False, indent=4)
+                atomic_write_json(HISTORY_FILE, kept, ensure_ascii=False, indent=4)
             return removed
     except (OSError, UnicodeError, json.JSONDecodeError):
         return 0
@@ -7625,9 +8157,9 @@ async def list_storage_files(kind: str = "generated", offset: int = 0, limit: in
     items.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
     total = len(items)
     page_items = items[offset:offset + limit]
+    # 不返回服务器上的绝对路径（root）：前端只用 items 里的相对路径和 url
     return {
         "kind": kind,
-        "root": root,
         "items": page_items,
         "total": total,
         "offset": offset,
@@ -8118,11 +8650,10 @@ def save_asset_classification_prompt(text):
     value = str(text or "").strip()
     if not value:
         raise HTTPException(status_code=400, detail="分类规则不能为空")
-    if len(value) > 20000:
-        raise HTTPException(status_code=400, detail="分类规则过长")
+    if len(value) > PROMPT_TEXT_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"分类规则过长：最多允许 {PROMPT_TEXT_MAX_LENGTH} 个字符")
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(ASSET_CLASSIFICATION_PROMPT_FILE, "w", encoding="utf-8") as f:
-        f.write(value)
+    atomic_write_text(ASSET_CLASSIFICATION_PROMPT_FILE, value)
     return value
 
 ASSET_CLASSIFICATION_DIMENSION_NAMES = {
@@ -8231,8 +8762,7 @@ def _read_local_upload_classification(filename):
 
 def _write_local_upload_classification(filename, classification):
     path = _local_upload_classification_path(filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalize_asset_classification(classification), f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, normalize_asset_classification(classification), ensure_ascii=False, indent=2)
 
 def asset_classification_prompt(extra_prompt=""):
     base = load_asset_classification_prompt()
@@ -8357,8 +8887,7 @@ def save_asset_library(lib):
     sort_asset_library_items(lib)
     lib["updated_at"] = now_ms()
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(ASSET_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(lib, f, ensure_ascii=False, indent=2)
+    atomic_write_json(ASSET_LIBRARY_PATH, lib, ensure_ascii=False, indent=2)
     if GLOBAL_LOOP:
         asyncio.run_coroutine_threadsafe(manager.broadcast_asset_library_updated(int(lib["updated_at"])), GLOBAL_LOOP)
 
@@ -8418,8 +8947,7 @@ def shared_folders_load():
 
 def shared_folders_save(data):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SHARED_FOLDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(SHARED_FOLDERS_FILE, data, ensure_ascii=False, indent=2)
 
 def shared_folder_by_id(folder_id):
     for entry in shared_folders_load().get("folders", []):
@@ -8689,8 +9217,7 @@ def save_prompt_libraries(data):
     data = normalize_prompt_libraries(data)
     data["updated_at"] = now_ms()
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(PROMPT_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(PROMPT_LIBRARY_PATH, data, ensure_ascii=False, indent=2)
     return data
 
 def public_prompt_libraries(data=None):
@@ -10056,10 +10583,7 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
             errors.append(f"{name}: {exc.detail}")
     raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))
 
-async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
-    return await upload_local_video_to_cloud(ref_url, "auto")
-
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", *, require_local=False):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
@@ -10082,6 +10606,12 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             response = await client.get(value)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
+            if require_local:
+                # A 200 HTML/error page is not a saved image. Validate the original
+                # bytes before writing; image_output_meta reads their real dimensions.
+                with Image.open(BytesIO(response.content)) as image:
+                    image.verify()
+                    content_type = Image.MIME.get(image.format, content_type)
             if "jpeg" in content_type or "jpg" in content_type:
                 filename = filename[:-4] + ".jpg"
                 path = output_path_for(filename, category)
@@ -10091,6 +10621,9 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             write_public_media(path, response.content)
             return output_url_for(filename, category)
     except Exception as e:
+        if require_local:
+            # Kie results expire: never mark a remote fallback as a saved result.
+            raise HTTPException(status_code=502, detail="图片已在上游生成，结果下载失败，请查询原任务恢复结果") from e
         print(f"保存上游图片失败: {e}; url={value}")
         return value
 
@@ -11846,6 +12379,8 @@ async def generate_kie_provider_image(
     cancel_event=None,
     status_callback=None,
 ):
+    reference_count = sum(bool(ref.get("url")) for ref in (reference_images or []) if isinstance(ref, dict))
+    validate_model_prompt("kie", model, prompt, reference_count)
     started_at = time.perf_counter()
     trace_id = new_trace_id()
     log_context = {
@@ -11881,6 +12416,11 @@ async def generate_kie_provider_image(
             )
 
     try:
+        # Validate before any reference upload, including the synchronous online endpoint.
+        build_kie_create_payload(
+            model, prompt, [ref["url"] for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")],
+            aspect_ratio=aspect_ratio, resolution=resolution, output_format=output_format,
+        )
         await report_status("preparing")
         ensure_not_cancelled()
         reference_urls, reference_audits = await kie_public_reference_urls(
@@ -11954,6 +12494,8 @@ async def generate_kie_provider_image(
         raise error from exc
     except KieTaskError as exc:
         log_failure("poll", "upstream_task", exc)
+        if is_upstream_prompt_limit_error(exc):
+            raise ModelPromptLimitError("kie", model, prompt, reference_count, upstream=True) from exc
         detail = f"Kie 任务失败{f'（{exc.fail_code}）' if exc.fail_code else ''}：{exc}"
         if reference_audits and any(token in str(exc).lower() for token in ("image info", "invalid image", "image format", "read image")):
             refs = "；".join(
@@ -11967,6 +12509,8 @@ async def generate_kie_provider_image(
         raise error from exc
     except KieAPIError as exc:
         log_failure("submit_or_query", "upstream_api", exc)
+        if is_upstream_prompt_limit_error(exc):
+            raise ModelPromptLimitError("kie", model, prompt, reference_count, upstream=True) from exc
         error_parts = [str(exc)]
         if exc.status_code:
             error_parts.append(f"HTTP {exc.status_code}")
@@ -11989,7 +12533,7 @@ async def generate_kie_provider_image(
         raise HTTPException(status_code=502, detail="Kie 请求发生内部错误") from exc
 
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
+async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="", aspect_ratio="", resolution="", output_format="", cancel_event=None, status_callback=None):
     provider = get_api_provider(provider_id)
     if is_kie_provider(provider):
         return await generate_kie_provider_image(
@@ -12336,6 +12880,8 @@ def chat_split_parallel_prompts(prompt, count):
     return [f"{item}的{suffix}" for item in candidates[:count]]
 
 def pick_chat_image_provider(provider_id="", fallback_id=""):
+    if is_unknown_provider_id(provider_id):
+        raise unknown_provider_error(str(provider_id).strip().lower())
     providers = [p for p in load_api_providers() if p.get("enabled", True) and (p.get("image_models") or [])]
     for target in (provider_id, fallback_id):
         clean = str(target or "").strip().lower()
@@ -12346,7 +12892,7 @@ def pick_chat_image_provider(provider_id="", fallback_id=""):
     if providers:
         primary = next((p for p in providers if p.get("primary")), None)
         return primary or providers[0]
-    return get_api_provider(provider_id or fallback_id or "comfly")
+    return get_api_provider(provider_id or fallback_id or "")
 
 def heuristic_agent_decision(message, refs, has_previous_image):
     text = str(message or "").strip().lower()
@@ -13320,8 +13866,7 @@ async def caption_local_assets(payload: LocalAssetCaptionRequest):
                 payload.ms_model,
             )
             txt_path = _local_upload_caption_path(filename)
-            with open(txt_path, "w", encoding="utf-8", newline="") as f:
-                f.write(caption)
+            atomic_write_text(txt_path, caption, newline="")
             item.update({
                 "ok": True,
                 "name": filename,
@@ -13383,14 +13928,8 @@ async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest):
         raise HTTPException(status_code=400, detail="仅支持图片素材保存提示词")
     caption = str(payload.caption or "")[:100000]
     txt_path = _local_upload_caption_path(filename)
-    with open(txt_path, "w", encoding="utf-8", newline="") as f:
-        f.write(caption)
+    atomic_write_text(txt_path, caption, newline="")
     return {"ok": True, "caption": caption, "caption_file": os.path.basename(txt_path)}
-
-@app.post("/api/temp-sh/upload")
-async def temp_sh_upload(payload: TempShUploadRequest, request: Request):
-    ensure_same_origin_request(request)
-    return await upload_local_video_to_cloud(payload.url, "auto")
 
 @app.post("/api/cloud-video/upload")
 async def cloud_video_upload(payload: CloudVideoUploadRequest, request: Request):
@@ -14022,22 +14561,22 @@ async def jimeng_query_media(payload: JimengQueryMediaRequest):
     except HTTPException as exc:
         return {"status": "failed", "submit_id": submit_id, "kind": kind, "error": str(getattr(exc, "detail", "") or exc)}
 
+def canvas_config_version(api_providers, comfy_instances=()):
+    """A6：画布用来判断配置是否真的变了。只由平台列表和 ComfyUI 地址决定，内容不变版本号就不变。"""
+    payload = json.dumps({"api_providers": api_providers, "comfy_instances": list(comfy_instances or [])},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
 @app.get("/api/config")
 async def ai_config():
-    preferred_chat_model = next((m for m in CHAT_MODELS if m == "gpt-5.5"), CHAT_MODELS[0] if CHAT_MODELS else CHAT_MODEL)
     providers = public_api_providers()
+    # A4：所有页面的平台和模型都只来自 api_providers。旧的全局字段（base_url、chat_model、image_model、
+    # chat_models、image_models、video_models、ms_chat_models）来自旧环境变量，和用户配置的平台无关，已全部删除。
+    # /api/models 仍按原样返回全局列表（实例模式的模型目录在用）。
     return {
-        "base_url": AI_BASE_URL,
-        "chat_model": preferred_chat_model,
-        "image_model": IMAGE_MODEL,
-        "chat_models": CHAT_MODELS,
-        "image_models": IMAGE_MODELS,
-        "video_models": VIDEO_MODELS,
+        "config_version": canvas_config_version(providers, COMFYUI_INSTANCES),
         "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
-        "has_api_key": bool(AI_API_KEY),
-        "ms_chat_models": MODELSCOPE_CHAT_MODELS,
-        "has_ms_key": bool(modelscope_api_key()),
     }
 
 @app.get("/api/models")
@@ -14113,20 +14652,22 @@ async def save_providers(payload: List[ApiProviderPayload]):
 
 # --- ModelScope Token (从 env 读取，不再支持通过 UI 修改) ---
 
+def legacy_global_modelscope_token():
+    """旧版把 ModelScope Token 存在 global_config.json；仅作兜底读取。"""
+    if not os.path.exists(GLOBAL_CONFIG_FILE):
+        return ""
+    try:
+        with open(GLOBAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return str((json.load(f) or {}).get("modelscope_token") or "").strip()
+    except Exception:
+        return ""
+
 @app.get("/api/config/token")
 async def get_global_token():
-    # 优先读 env，回退到 global_config.json（兼容旧数据）
+    # 只返回掩码：页面只需要知道“服务端已配置 Token”。旧页面会把这里拿到的值回传给
+    # /api/angle/generate、/api/generate 等接口，后端通过 is_masked_secret() 识别并改用服务端 Key。
     saved_token = modelscope_api_key()
-    if saved_token:
-        return {"token": saved_token}
-    if os.path.exists(GLOBAL_CONFIG_FILE):
-        try:
-            with open(GLOBAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                return {"token": config.get("modelscope_token", "")}
-        except:
-            pass
-    return {"token": ""}
+    return {"token": mask_secret(saved_token), "has_token": bool(saved_token), "masked": True}
 
 # --- 在线生图 (COMFLY) ---
 
@@ -14546,24 +15087,8 @@ async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
     api_key = api_key_from_payload(payload, protocol)
     return await fetch_models_from_upstream(payload.base_url, api_key, protocol, payload.image_request_mode)
 
-@app.get("/api/providers/{provider_id}/fetch-models")
-async def fetch_upstream_models(provider_id: str):
-    """从已保存的上游 OpenAI 兼容接口拉取 /v1/models 列表，按名称智能分类为 image/chat/video。"""
-    provider = get_api_provider_exact(provider_id)
-    if provider["id"] == "kie":
-        return await fetch_models_from_upstream(KIE_BASE_URL, "", "kie", "openai")
-    if is_codex_provider(provider):
-        return await fetch_models_from_upstream("", "", "codex", provider.get("image_request_mode") or "openai")
-    if is_gemini_cli_provider(provider):
-        return await fetch_models_from_upstream("", "", "gemini-cli", provider.get("image_request_mode") or "openai")
-    api_key = os.getenv(runninghub_wallet_key_env(), "") if provider["id"] == "runninghub" else ""
-    if not api_key:
-        api_key = provider_env_key_value(provider["id"])
-    if not api_key:
-        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
-    return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
-
 async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event=None, status_callback=None):
+    validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
@@ -14594,7 +15119,14 @@ async def build_online_image_result(payload: OnlineImageRequest, *, cancel_event
         local_urls = []
         local_items = []
         for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+            try:
+                if is_kie_provider(provider):
+                    local_url = await save_ai_image_to_output(item, prefix="online_", require_local=True)
+                else:
+                    local_url = await save_ai_image_to_output(item, prefix="online_")
+            except HTTPException as exc:
+                setattr(exc, "upstream_task_id", extract_task_id(raw_item))
+                raise
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
@@ -15013,7 +15545,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
                 local_items = []
                 for remote_url in remote_urls:
                     source_item = {"type": "url", "value": remote_url}
-                    local_url = await save_ai_image_to_output(source_item, prefix="online_")
+                    local_url = await save_ai_image_to_output(source_item, prefix="online_", require_local=True)
                     if local_url:
                         local_urls.append(local_url)
                         local_items.append(image_output_meta(local_url, source_item))
@@ -15146,12 +15678,17 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 task = CANVAS_TASKS.get(task_id)
                 if not task:
                     return
+                before = (task.get("upstream_task_id"), task.get("upstream_status"))
                 if upstream_task_id:
                     task["upstream_task_id"] = upstream_task_id
                 if task.get("status") != "canceled":
                     task["status"] = normalized or "running"
                     task["upstream_status"] = status
                 task["updated_at"] = time.time()
+                changed = before != (task.get("upstream_task_id"), task.get("upstream_status"))
+            # C9：拿到上游任务 ID、上游状态变化（尤其是 success）时立即落盘，重启后才能只查询不重交
+            if changed:
+                persist_canvas_task(task_id)
 
         result = await build_online_image_result(
             payload,
@@ -15192,7 +15729,10 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
         raise
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        status_code = getattr(exc, "status_code", 500)
+        status_code = 400 if isinstance(exc, ModelPromptLimitError) else getattr(exc, "status_code", 500)
+        if isinstance(exc, ModelPromptLimitError):
+            with CANVAS_TASK_LOCK:
+                CANVAS_TASKS[task_id]["validation"] = exc.details
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
@@ -15205,12 +15745,17 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     finally:
         CANVAS_TASK_CANCEL_EVENTS.pop(task_id, None)
         CANVAS_TASK_RUNNERS.pop(task_id, None)
+        persist_canvas_task(task_id)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
     if PATHS.explicit and INSTANCE_MODELS.policy.providers:
         return INSTANCE_MODELS.create(payload)
     require_instance_provider(payload.provider_id, payload.model)
+    # 在创建后台任务前解析平台：未知或已禁用的平台立即返回 400，
+    # 而不是先返回 task_id、再在后台悄悄改用其他平台。
+    get_api_provider(payload.provider_id)
+    validate_model_prompt(payload.provider_id, payload.model, payload.prompt, sum(bool(ref.url) for ref in payload.reference_images))
     if payload.provider_id == "kie":
         try:
             # 在创建本地后台任务之前完成模型、比例、分辨率、格式和数量校验，
@@ -15241,6 +15786,8 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "model": payload.model,
         }
     CANVAS_TASK_CANCEL_EVENTS[task_id] = cancel_event
+    persist_canvas_task(task_id)
+    prune_canvas_tasks()
     runner = asyncio.create_task(run_canvas_image_task(task_id, payload))
     CANVAS_TASK_RUNNERS[task_id] = runner
     return {"task_id": task_id, "status": "queued"}
@@ -15280,6 +15827,7 @@ async def cancel_canvas_image_task(task_id: str):
         task["canceled_at"] = time.time()
         task["updated_at"] = time.time()
         upstream_task_id = task.get("upstream_task_id") or ""
+    persist_canvas_task(task_id)
     cancel_event = CANVAS_TASK_CANCEL_EVENTS.get(task_id)
     if cancel_event:
         cancel_event.set()
@@ -15315,8 +15863,63 @@ async def refresh_controlled_image_task(task_id: str, request: Request):
     except ValueError:
         raise HTTPException(400, '恢复请求不接受 Provider、任务或节点覆盖参数') from None
     if not PATHS.explicit:
-        raise model_access_failure('not_configured', 503)
+        return await refresh_local_canvas_task(task_id)
     return INSTANCE_MODELS.refresh(task_id)
+
+
+def local_canvas_task_view(task: Dict[str, Any]) -> Dict[str, Any]:
+    view = dict(task)
+    view.pop("owner", None)
+    return view
+
+
+async def refresh_local_canvas_task(task_id: str):
+    """C9：本地模式复用实例模式的恢复接口——只用记录里的原平台和原上游任务 ID 查询，不重新提交、不换平台。"""
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        task = dict(task) if task else None
+    if not task:
+        raise HTTPException(status_code=404, detail="画布任务不存在或已过期")
+    if task.get("status") == "succeeded":
+        return local_canvas_task_view(task)
+    runner = CANVAS_TASK_RUNNERS.get(task_id)
+    if runner and not runner.done():
+        return local_canvas_task_view(task)  # 本进程仍在等待这个任务，不需要恢复
+    upstream = str(task.get("upstream_task_id") or "").strip()
+    if not upstream:
+        raise HTTPException(status_code=409, detail="这个任务没有上游任务 ID，无法恢复；不会重新提交，请重新生成")
+    provider_id = str(task.get("provider_id") or "").strip()
+    provider = next((p for p in load_api_providers() if p.get("id") == provider_id), None)
+    if not provider or provider.get("enabled") is False:
+        raise HTTPException(status_code=409, detail="原平台已删除或已停用；恢复不可用，不会使用其他平台或重新生成")
+    if task_id in CANVAS_TASK_REFRESHING:
+        return local_canvas_task_view(task)
+    CANVAS_TASK_REFRESHING.add(task_id)
+    try:
+        result = await query_image_task(ImageTaskQueryRequest(provider_id=provider_id, task_id=upstream))
+    finally:
+        CANVAS_TASK_REFRESHING.discard(task_id)
+    status = str((result or {}).get("status") or "")
+    with CANVAS_TASK_LOCK:
+        live = CANVAS_TASKS.get(task_id)
+        if live is None:
+            raise HTTPException(status_code=404, detail="画布任务不存在或已过期")
+        live["recovery_attempts"] = int(live.get("recovery_attempts") or 0) + 1
+        live["updated_at"] = time.time()
+        if status == "succeeded" and (result.get("images") or result.get("image_items")):
+            stored = {k: v for k, v in result.items() if k not in {"raw", "status"}}
+            stored["task_id"] = task_id
+            live.update(status="succeeded", result=stored, error="", recovery="", upstream_status="success",
+                        local_result_status="completed")
+        elif status == "failed":
+            live.update(status="failed", error=str(result.get("error") or "上游任务失败"), recovery="",
+                        upstream_status="fail")
+        else:
+            live["upstream_status"] = str(result.get("upstream_status") or result.get("status") or live.get("upstream_status") or "")
+            live["error"] = str(result.get("message") or result.get("error") or "上游任务仍在生成，请稍后再恢复")
+        view = local_canvas_task_view(live)
+    persist_canvas_task(task_id)
+    return view
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:
@@ -15344,6 +15947,8 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
                 "status_code": status_code,
                 "updated_at": time.time(),
             })
+    finally:
+        persist_canvas_task(task_id)
 
 @app.post("/api/canvas-comfy-tasks")
 async def create_canvas_comfy_task(payload: GenerateRequest):
@@ -15359,6 +15964,7 @@ async def create_canvas_comfy_task(payload: GenerateRequest):
             "error": "",
             "workflow_json": payload.workflow_json,
         }
+    persist_canvas_task(task_id)
     asyncio.create_task(run_canvas_comfy_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
 
@@ -17093,8 +17699,7 @@ async def delete_project(project_id: str):
                 continue
             if str(data.get("project") or "") == project_id:
                 data["project"] = DEFAULT_PROJECT_ID
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                write_canvas_json(path, data)
                 moved += 1
     return {"ok": True, "moved": moved}
 
@@ -17111,6 +17716,7 @@ async def get_canvas_meta(canvas_id: str):
     canvas = load_canvas(canvas_id)
     return {
         "id": canvas.get("id"),
+        "client_build": CLIENT_BUILD_ID,  # 编辑器据此提前发现自己是旧代码
         "updated_at": canvas.get("updated_at", 0),
         "title": canvas.get("title", "未命名画布"),
         "icon": canvas.get("icon", "layers"),
@@ -17121,6 +17727,10 @@ async def get_canvas_meta(canvas_id: str):
 async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
     """更新画布的轻量元数据（标题/图标/负责人/颜色/置顶）。
     刻意不走 save_canvas（它会刷新 updated_at），以免打标签/置顶把画布顶到列表最前。"""
+    with CANVAS_LOCK:
+        return _update_canvas_meta_locked(canvas_id, payload)
+
+def _update_canvas_meta_locked(canvas_id: str, payload: CanvasMetaUpdate):
     canvas = load_canvas(canvas_id)
     if payload.title is not None:
         canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
@@ -17138,9 +17748,7 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
         canvas["board_x"] = float(payload.board_x)
     if payload.board_y is not None:
         canvas["board_y"] = float(payload.board_y)
-    with CANVAS_LOCK:
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+    write_canvas_json(canvas_path(canvas["id"]), canvas)
     return {"canvas": canvas_record(canvas)}
 
 @app.get("/api/canvases/{canvas_id}")
@@ -17149,8 +17757,9 @@ async def get_canvas(canvas_id: str):
 
 @app.post("/api/canvases/{canvas_id}/touch")
 async def touch_canvas(canvas_id: str):
-    canvas = load_canvas(canvas_id)
-    save_canvas(canvas)
+    with CANVAS_LOCK:
+        canvas = load_canvas(canvas_id)
+        save_canvas(canvas)
     return {"canvas": canvas_record(canvas), "updated_at": canvas.get("updated_at", 0)}
 
 @app.get("/api/canvas-assets")
@@ -18267,29 +18876,50 @@ async def batch_crop_asset_library_items(payload: AssetLibraryBatchCropRequest):
     return {"library": lib, "added": len(added), "items": added}
 
 @app.put("/api/canvases/{canvas_id}")
-async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
-    canvas = load_canvas(canvas_id)
-    current_updated_at = int(canvas.get("updated_at") or 0)
-    if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
-        raise HTTPException(status_code=409, detail={
-            "message": "画布已被其他页面更新，已拒绝旧版本覆盖。",
-            "canvas": canvas,
-            "updated_at": current_updated_at,
+async def update_canvas(canvas_id: str, payload: CanvasSaveRequest, x_client_build: str = Header(default="")):
+    # 页面版本过期（后端已更新、页面未刷新）：旧代码不能再保存画布，提示刷新。
+    if client_build_is_outdated(x_client_build):
+        raise HTTPException(status_code=412, detail={
+            "code": "client_outdated",
+            "message": "页面版本已过期：服务已经更新，这个页面还是旧代码。为避免覆盖数据，已拒绝保存，请刷新页面。",
+            "client_build": CLIENT_BUILD_ID,
         })
-    canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
-    canvas["icon"] = (payload.icon or canvas.get("icon") or "layers")[:32]
-    canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
-    canvas["nodes"] = payload.nodes
-    canvas["connections"] = payload.connections
-    if canvas["kind"] == "smart":
-        canvas["viewport"] = payload.viewport
-    else:
-        canvas["viewport"] = canvas.get("viewport") or {"x": 0, "y": 0, "scale": 1}
-    canvas["logs"] = payload.logs[-500:]
-    canvas["settings"] = payload.settings or {}
-    save_canvas(canvas)
-    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
-    return {"canvas": canvas}
+    # 只更新请求里实际提供的字段：漏传 logs/settings/title 不再把它们清空或改成默认值。
+    provided = payload.model_fields_set
+    # 冲突检查与写入放在同一把锁里：logs/delete 等在线程中持锁读改写画布，
+    # 若检查在锁外，双方都会通过检查并先后写入，后写者覆盖先写者（丢失更新）。
+    # 本函数在锁内没有 await，同一事件循环里的其他请求也不会插进来。
+    with CANVAS_LOCK:
+        canvas = load_canvas(canvas_id)
+        current_updated_at = int(canvas.get("updated_at") or 0)
+        if current_updated_at and int(payload.base_updated_at) < current_updated_at:
+            # C6：不再带回整张画布（真实画布最大约 19MB）；编辑器收到 409 后自己 GET 最新版本再合并。
+            raise HTTPException(status_code=409, detail={
+                "message": "画布已被其他页面更新，已拒绝旧版本覆盖。",
+                "updated_at": current_updated_at,
+            })
+        # C7：PUT 不再修改标题和图标（只能走 /meta），编辑器的保存不可能把别处改的名字写回去。
+        # 旧版本 C7 修复留下的 meta_updated_at 已经不再使用，顺手清掉。
+        canvas.pop("meta_updated_at", None)
+        canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
+        if "nodes" in provided:
+            canvas["nodes"] = payload.nodes
+        if "connections" in provided:
+            canvas["connections"] = payload.connections
+        if canvas["kind"] == "smart":
+            if "viewport" in provided:
+                canvas["viewport"] = payload.viewport
+        else:
+            canvas["viewport"] = canvas.get("viewport") or {"x": 0, "y": 0, "scale": 1}
+        if "logs" in provided:
+            canvas["logs"] = payload.logs[-500:]
+        if "settings" in provided:
+            canvas["settings"] = payload.settings or {}
+        save_canvas(canvas)
+        updated_at = int(canvas.get("updated_at") or now_ms())
+    await manager.broadcast_canvas_updated(canvas_id, updated_at, payload.client_id)
+    # C6：保存成功只返回新的 updated_at，不再把刚收到的整张画布原样回传。
+    return {"updated_at": updated_at}
 
 @app.post("/api/canvases/{canvas_id}/logs/delete")
 async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
@@ -18371,18 +19001,20 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
 
 @app.delete("/api/canvases/{canvas_id}")
 async def delete_canvas(canvas_id: str):
-    canvas = load_canvas_any(canvas_id)
-    if not canvas.get("deleted_at"):
-        canvas["deleted_at"] = now_ms()
-        save_canvas(canvas)
+    with CANVAS_LOCK:
+        canvas = load_canvas_any(canvas_id)
+        if not canvas.get("deleted_at"):
+            canvas["deleted_at"] = now_ms()
+            save_canvas(canvas)
     return {"ok": True}
 
 @app.post("/api/canvases/{canvas_id}/restore")
 async def restore_canvas(canvas_id: str):
-    canvas = load_canvas_any(canvas_id)
-    if canvas.get("deleted_at"):
-        canvas.pop("deleted_at", None)
-        save_canvas(canvas)
+    with CANVAS_LOCK:
+        canvas = load_canvas_any(canvas_id)
+        if canvas.get("deleted_at"):
+            canvas.pop("deleted_at", None)
+            save_canvas(canvas)
     return {"canvas": canvas}
 
 @app.delete("/api/canvases/{canvas_id}/purge")
@@ -18423,7 +19055,8 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
     save_conversation(user_id, conversation)
 
     if payload.mode == "image":
-        image_provider_id = payload.provider if payload.provider not in {"modelscope"} else "comfly"
+        # ModelScope 只提供聊天模型：图片模式改用默认图片平台（空值 = 默认平台）
+        image_provider_id = payload.provider if payload.provider not in {"modelscope"} else ""
         provider = get_api_provider(image_provider_id)
         default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
         model = selected_model(payload.image_model or payload.model, default_model)
@@ -18851,8 +19484,7 @@ async def delete_history(req: DeleteHistoryRequest):
                 else:
                     new_history.append(item)
             if target_record:
-                with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(new_history, f, ensure_ascii=False, indent=4)
+                atomic_write_json(HISTORY_FILE, new_history, ensure_ascii=False, indent=4)
 
         if target_record:
             for img_url in target_record.get("images", []):
@@ -19533,8 +20165,7 @@ def load_runninghub_workflow_store():
 
 def save_runninghub_workflow_store(store):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(RUNNINGHUB_WORKFLOW_STORE_FILE, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
+    atomic_write_json(RUNNINGHUB_WORKFLOW_STORE_FILE, store, ensure_ascii=False, indent=2)
 
 def prune_runninghub_workflow_store_for_provider(provider):
     if not isinstance(provider, dict) or provider.get("id") != "runninghub":
@@ -20045,8 +20676,7 @@ def upload_workflow(payload: WorkflowUploadRequest):
     os.makedirs(custom_dir, exist_ok=True)
     stored_name = f"{CUSTOM_WORKFLOW_FOLDER}/{name}"
     path = workflow_path_from_name(stored_name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload.workflow, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload.workflow, ensure_ascii=False, indent=2)
     return {"name": stored_name}
 
 @app.put("/api/workflows/{name:path}/config")
@@ -20057,8 +20687,7 @@ def save_workflow_config(name: str, payload: WorkflowConfig):
     if not os.path.exists(workflow_path):
         raise HTTPException(status_code=404, detail="Workflow not found")
     cfg_path = workflow_config_path(name)
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
+    atomic_write_json(cfg_path, payload.dict(), ensure_ascii=False, indent=2)
     return {"config": payload.dict()}
 
 @app.delete("/api/workflows/{name:path}")
@@ -20118,6 +20747,23 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
     )
     return generate(req)
 
+def env_flag_enabled(name):
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+def resolve_bind_host():
+    """默认只监听本机。服务没有登录认证，局域网访问必须显式开启：
+    INFINITE_CANVAS_ALLOW_LAN=1 → 0.0.0.0；或用 INFINITE_CANVAS_HOST 指定具体地址。"""
+    explicit = os.getenv("INFINITE_CANVAS_HOST", "").strip()
+    if explicit:
+        return explicit
+    return "0.0.0.0" if env_flag_enabled("INFINITE_CANVAS_ALLOW_LAN") else "127.0.0.1"
+
+def resolve_bind_port():
+    try:
+        return int(os.getenv("INFINITE_CANVAS_PORT", "3000"))
+    except ValueError:
+        return 3000
+
 def require_instance_provider(provider_id, model=""):
     if not PATHS.explicit:
         return
@@ -20162,9 +20808,17 @@ if PATHS.explicit:
 
 if __name__ == "__main__":
     import uvicorn
+    if PATHS.explicit:
+        # 独立实例：审计钩子只允许监听 INSTANCE_HOST/INSTANCE_PORT（必须是 127.0.0.1）。
+        bind_host, bind_port = INSTANCE_HOST, INSTANCE_PORT
+    else:
+        bind_host = resolve_bind_host()
+        bind_port = resolve_bind_port()
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"[安全提示] 服务将监听 {bind_host}:{bind_port}，同一网络内的设备都能访问；本服务没有登录认证，请只在可信网络中开启。")
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
-    uvicorn.run(app, host=INSTANCE_HOST, port=INSTANCE_PORT,
+    uvicorn.run(app, host=bind_host, port=bind_port,
                 ws_ping_interval=None, ws_ping_timeout=None, proxy_headers=not PATHS.explicit,
                 ws="websockets-sansio" if PATHS.explicit else "auto")

@@ -100,7 +100,10 @@
             <aside id="canvasAssetPanel" class="canvas-asset-panel">
                 <div class="canvas-asset-head">
                     <strong><i data-lucide="library" class="w-4 h-4"></i><span>资产库</span></strong>
-                    <button id="canvasAssetCloseBtn" class="canvas-asset-icon-btn" type="button" title="关闭"><i data-lucide="x" class="w-4 h-4"></i></button>
+                    <div class="canvas-asset-head-actions">
+                        <button id="canvasAssetManageBtn" class="canvas-asset-icon-btn" type="button" title="资产库管理" aria-label="资产库管理" data-i18n-title="canvas.assetManager"><i data-lucide="settings-2" class="w-4 h-4"></i></button>
+                        <button id="canvasAssetCloseBtn" class="canvas-asset-icon-btn" type="button" title="关闭"><i data-lucide="x" class="w-4 h-4"></i></button>
+                    </div>
                 </div>
                 <select id="canvasAssetLibrarySelect" class="canvas-asset-select"></select>
                 <div class="canvas-asset-row">
@@ -357,6 +360,11 @@
     <script src="/static/js/ltx-director-timeline.js?v=2026.08.04.1785292592"></script>
     <script src="/static/js/image-hover-preview.js?v=2026.08.29.1"></script>
     <script src="/static/js/canvas-log-cleanup.js?v=2026.09.07.1"></script>
-    <script src="/static/js/canvas.js?v=2026.08.04.1788165871"></script>
+    <script src="/static/js/api-errors.js?v=2026.11.11.1"></script>
+    <script src="/static/js/stale-page.js?v=2026.11.11.1"></script>
+    <script src="/static/js/model-prompt-limits.js"></script>
+    <script src="/static/js/kie-image-params.js?v=2026.09.15.1"></script>
+    <script src="/static/js/canvas-merge.js?v=2026.11.11.c8"></script>
+    <script src="/static/js/canvas.js?v=2026.11.11.c8"></script>
 </body>
 </html>

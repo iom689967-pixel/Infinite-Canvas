@@ -1,5 +1,6 @@
 """Default-deny HTTP/WebSocket session boundary for explicit single-person instances."""
 import asyncio
+import hashlib
 from http.cookies import SimpleCookie
 import hmac
 import json
@@ -82,6 +83,10 @@ class InstanceAuthMiddleware:
         method = scope["method"]
         if path == "/healthz" and method == "GET":
             return await self.reply(scope, receive, send, JSONResponse({"ok": True}))
+        if path == "/favicon.ico" and method in {"GET", "HEAD"}:
+            # 页面没有声明图标，浏览器会自动请求 /favicon.ico；登录前也回一个空的 204，
+            # 不再在登录页上产生 401。不读取任何文件，Host/传输方式的校验仍在上面先执行。
+            return await self.reply(scope, receive, send, Response(status_code=204))
         if getattr(self.paths, "public_beta", False) and path == '/__mio/health' and method == 'GET':
             from public_beta_handoff import health_proof
             return await self.reply(scope, receive, send, JSONResponse({'proof':health_proof(self.store.root, headers.get('x-mio-challenge',''))}))
@@ -278,7 +283,14 @@ class InstanceAuthMiddleware:
         try:
             if method == "GET" and path in {"/api/config", "/api/providers", "/api/models"}:
                 result = self.catalog()
-                if path == "/api/providers":
+                if path == "/api/config":
+                    # A6：与本地模式的 canvas_config_version 相同的算法（实例模式没有 ComfyUI 地址）
+                    payload = json.dumps({"api_providers": result.get("api_providers") or [], "comfy_instances": []},
+                                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+                    # 和本地模式一致：/api/config 只给 api_providers，不再附带全局模型列表（/api/models 照旧）
+                    result = {"api_providers": result.get("api_providers") or [],
+                              "config_version": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]}
+                elif path == "/api/providers":
                     result = {"providers": result["api_providers"]}
                 elif path == "/api/models":
                     result = {key: result[key] for key in ("chat_models", "image_models", "video_models")}

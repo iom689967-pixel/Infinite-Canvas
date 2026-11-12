@@ -37,7 +37,6 @@ ROUTE_ACCESS = {
     "POST /api/local-assets/caption": "workbench",
     "POST /api/local-assets/classify": "workbench",
     "PATCH /api/local-assets/caption": "workbench",
-    "POST /api/temp-sh/upload": "disabled",
     "POST /api/cloud-video/upload": "disabled",
     "POST /api/ai/import-local-image": "workbench",
     "GET /api/runninghub/app-info": "disabled",
@@ -70,7 +69,6 @@ ROUTE_ACCESS = {
     "POST /api/providers/test-connection": "admin",
     "POST /api/providers/probe-async": "admin",
     "POST /api/providers/fetch-models": "admin",
-    "GET /api/providers/{provider_id}/fetch-models": "admin",
     "POST /api/online-image": "disabled",
     "POST /api/midjourney/submit": "disabled",
     "POST /api/midjourney/actions": "disabled",
@@ -92,6 +90,7 @@ ROUTE_ACCESS = {
     "GET /api/conversations/{conversation_id}": "workbench",
     "DELETE /api/conversations/{conversation_id}": "workbench",
     "GET /api/canvases": "workbench",
+    "GET /api/model-prompt-limits": "workbench",
     "GET /api/projects": "workbench",
     "POST /api/projects": "workbench",
     "POST /api/projects/{project_id}": "workbench",
@@ -243,7 +242,14 @@ WORKBENCH_STATIC = frozenset([
     "/static/vendor/js/tailwindcss-cdn.js",
     "/static/vendor/js/three-0.160.0.module.js",
     "/static/js/instance-session.js",
-    "/static/css/instance-login.css"
+    "/static/css/instance-login.css",
+    # 画布页面依赖的共享脚本（合并规则、提示词长度、Kie 参数校验）
+    "/static/js/api-errors.js",
+    "/static/js/stale-page.js",
+    "/static/js/workspace-socket.js",
+    "/static/js/canvas-merge.js",
+    "/static/js/kie-image-params.js",
+    "/static/js/model-prompt-limits.js",
 ])
 
 PUBLIC_STATIC = frozenset({"/static/js/instance-login.js", "/static/css/instance-login.css"})

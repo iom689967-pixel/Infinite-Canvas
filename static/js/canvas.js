@@ -220,29 +220,29 @@ function scheduleCanvasImageResolutionSync(root=nodesEl, delay=120){
 function applyLanguage(lang){
     if(lang && window.StudioI18n) StudioI18n.set(lang);
     document.title = tr('canvas.title');
-    refreshGateViewControls();
     if(canvas) {
         currentCanvasTitle.textContent = canvas?.title || tr('canvas.untitled');
     }
-    renderCanvasList();
     render();
 }
 async function refreshCanvasConfigFromSettings(){
-    await loadConfig();
-    pruneMissingComfyWorkflows();
-    (nodes || []).forEach(node => {
-        sanitizeImageNodeProviderModel(node);
-        sanitizeVideoNodeProviderModel(node);
-    });
+    const loaded = await loadConfig();
+    // 拉取失败时不清理、不改写任何节点：失败不等于“配置为空”（A2）。
+    // 配置和工作流都没变化时（例如切回画布的兜底刷新）不重新渲染（A6）。
+    if(loaded && !lastConfigLoadChanged) return;
+    if(loaded){
+        pruneMissingComfyWorkflows();
+        (nodes || []).forEach(node => {
+            sanitizeImageNodeProviderModel(node);
+            sanitizeVideoNodeProviderModel(node);
+        });
+    }
     if(typeof render === 'function') render();
 }
 window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-lang') applyLanguage(event.data.lang);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed'){
-        refreshCanvasConfigFromSettings();
-    }
     if(event.data?.type === 'canvas-focus'){
         // 从其他标签页切换回画布时，重新拉取工作流列表并刷新节点
         refreshCanvasConfigFromSettings();
@@ -251,14 +251,11 @@ window.addEventListener('message', event => {
 });
 window.addEventListener('studio-lang-change', () => {
     document.title = tr('canvas.title');
-    refreshGateViewControls();
     if(canvas) currentCanvasTitle.textContent = canvas?.title || tr('canvas.untitled');
-    renderCanvasList();
     render();
 });
 window.addEventListener('studio-ui-scale-change', applyQuickToolbarState);
 const shell = document.getElementById('shell');
-const canvasGate = document.getElementById('canvasGate');
 const board = document.getElementById('board');
 const world = document.getElementById('world');
 const nodesEl = document.getElementById('nodes');
@@ -276,20 +273,6 @@ const nodeOutputMenu = document.getElementById('nodeOutputMenu');
 const imageNodeMenu = document.getElementById('imageNodeMenu');
 const selectionBox = document.getElementById('selectionBox');
 const selectionHub = document.getElementById('selectionHub');
-const gateStatus = document.getElementById('gateStatus');
-const gateCreateBtn = document.getElementById('gateCreateBtn');
-const gateCreateSmartBtn = document.getElementById('gateCreateSmartBtn');
-const gateRefreshBtn = document.getElementById('gateRefreshBtn');
-const gateBackBtn = document.getElementById('gateBackBtn');
-const gateTrashBtn = document.getElementById('gateTrashBtn');
-const gateAssetManagerBtn = document.getElementById('gateAssetManagerBtn');
-const gateTrashCount = document.getElementById('gateTrashCount');
-const gateTitleText = document.getElementById('gateTitleText');
-const gateSubtitle = document.getElementById('gateSubtitle');
-const gateCanvasList = document.getElementById('gateCanvasList');
-const gateTitleInput = document.getElementById('gateTitleInput');
-const gateConfirmBtn = document.getElementById('gateConfirmBtn');
-const gateCancelBtn = document.getElementById('gateCancelBtn');
 const backToManagerBtn = document.getElementById('backToManagerBtn');
 const currentCanvasTitle = document.getElementById('currentCanvasTitle');
 const currentCanvasTime = document.getElementById('currentCanvasTime');
@@ -319,6 +302,7 @@ const promptTemplateBody = document.getElementById('promptTemplateBody');
 const canvasAssetToggle = document.getElementById('canvasAssetToggle');
 const canvasAssetPanel = document.getElementById('canvasAssetPanel');
 const canvasAssetCloseBtn = document.getElementById('canvasAssetCloseBtn');
+const canvasAssetManageBtn = document.getElementById('canvasAssetManageBtn');
 const canvasAssetLibrarySelect = document.getElementById('canvasAssetLibrarySelect');
 const canvasAssetCategorySelect = document.getElementById('canvasAssetCategorySelect');
 const canvasAssetAddCategoryBtn = document.getElementById('canvasAssetAddCategoryBtn');
@@ -348,8 +332,6 @@ const logList = document.getElementById('logList');
 const errorModal = document.getElementById('errorModal');
 const errorTitle = document.getElementById('errorTitle');
 const errorMessage = document.getElementById('errorMessage');
-let canvases = [];
-let deletedCanvases = [];
 let canvas = null;
 let nodes = [];
 let connections = [];
@@ -388,16 +370,7 @@ let selected = new Set();
 // 连线选择与节点选择完全独立；这里只保存临时 UI 状态，绝不写入画布数据。
 let selectedConnections = new Set();
 let saveTimer = null;
-let creatingCanvas = false;
-let createCanvasKind = 'classic';
-let trashMode = false;
-let pendingDeleteCanvasId = null;
-let pendingPurgeCanvasId = null;
-let emojiPickerCanvasId = null;
-let canvasMetaAnchorId = '';
-let canvasSortMode = (() => { try { return localStorage.getItem('canvasSortMode') || 'recent'; } catch(e){ return 'recent'; } })();
 const CANVAS_LIST_PROJECT_KEY = 'canvasListCurrentProjectId';
-const CANVAS_COLOR_OPTIONS = ['red','orange','amber','green','teal','blue','violet','pink','slate'];
 // 先绑定返回，避免编辑器后续初始化较慢时丢失来源项目。
 backToManagerBtn?.addEventListener('click', () => {
     window.location.href = canvasListUrlForProject(canvas?.project || requestedCanvasListProject() || rememberedCanvasListProject());
@@ -410,27 +383,21 @@ let remoteSyncTimer = null;
 let remoteSyncInterval = null;
 let remoteSyncBusy = false;
 let lastCanvasUpdatedAt = 0;
+// 旧节点里的 'gpt' / 'nano' 别名解析成已配置平台里的具体模型（见 loadConfig）。
+// A4：平台和模型只来自 /api/config 的 api_providers，不再读取旧的全局模型列表字段。
 let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
-let imageModels = ['gpt-image-2', 'nano-banana-pro'];
-let chatModels = ['gpt-4o-mini'];
-let videoModels = [];
-let msChatModels = [];
 let apiProviders = [];
 let comfyBackendCount = 1;
 let comfyWorkflows = [];
 let comfyWorkflowCache = {};
 let runningHubWorkflowCache = {};
-let managedProviderId = 'comfly';
-let localImageModels = [];
-let localChatModels = [];
+let managedProviderId = '';
 const MS_GEN_MODELS = {
     zimage:    { label: 'ZImage',     modelId: 'Tongyi-MAI/Z-Image-Turbo',            supportsImage: false, endpoint: '/generate'            },
     qwen_edit: { label: 'Qwen Edit',  modelId: 'Qwen/Qwen-Image-Edit-2511',            supportsImage: true,  endpoint: '/api/angle/generate'  },
     klein_edit:{ label: 'Klein',      modelId: 'black-forest-labs/FLUX.2-klein-9B',   supportsImage: true,  endpoint: '/api/ms/generate'     },
     custom:    { label: '自定义', labelKey: 'canvas.custom', modelId: '',                acceptsImage: true,   endpoint: '/api/ms/generate'     }
 };
-let hasManagedImageModels = false;
-let hasManagedChatModels = false;
 let outputCompareDrag = false;
 let outputPreviewZoom = 1;
 let outputPreviewPan = {x: 0, y: 0};
@@ -519,15 +486,6 @@ const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
 const LTX_DIRECTOR_WORKFLOW = 'LTXDirectorv2-API.json';
 const LTX_DIRECTOR_WF_NODE = '46';
 const LTX_DIRECTOR_SEED_NODE = '94:28';
-const LTX_SEGMENT_COLORS = ['#e07b3a', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#f59e0b'];
-const CANVAS_EMOJIS = ['layers','sparkles','image','palette','wand-2','star','heart','rocket','flame','moon','cloud','leaf','gem','compass','pin','flag','bookmark','crown'];
-function renderCanvasIcon(icon, size = 14) {
-    // 旧的默认 emoji 或空值都映射为 layers
-    if(!icon || icon === '🧩') return `<i data-lucide="layers" style="width:${size}px;height:${size}px"></i>`;
-    // 含非 ASCII 字符（用户旧选过的 emoji）继续按文本渲染
-    if(/[^\x00-\x7F]/.test(icon)) return escapeHtml(icon);
-    return `<i data-lucide="${escapeHtml(icon)}" style="width:${size}px;height:${size}px"></i>`;
-}
 
 const SIZE_MAP = {
     square: { '1k':'1024x1024', '2k':'2048x2048', '4k':'4096x4096' },
@@ -553,35 +511,11 @@ const API_RATIO_VALUES = {
 };
 const RES_LONG_SIDE = { '1k':1536, '2k':2048, '4k':3840 };
 const RES_PIXEL_LIMIT = { '1k':1572864, '2k':4194304, '4k':8294400 };
-const CUSTOM_IMAGE_MODELS_KEY = 'canvas_custom_image_models';
-const MANAGED_IMAGE_MODELS_KEY = 'canvas_image_models_ordered';
-const MANAGED_CHAT_MODELS_KEY = 'canvas_chat_models_ordered';
 const CANVAS_THEME_KEY = 'canvas_theme';
 const QUICK_TOOLBAR_COLLAPSED_KEY = 'canvas_quick_toolbar_collapsed';
 const CANVAS_SESSION_VIEWPORTS_KEY = 'canvas_session_viewports_v1';
 let canvasSessionViewportFallback = {};
 let quickToolbarExpanded = false;
-const DEFAULT_VIDEO_MODELS = [
-    // Veo
-    'veo2', 'veo2-fast', 'veo2-pro',
-    'veo3', 'veo3-fast', 'veo3-pro',
-    'veo3.1', 'veo3.1-fast', 'veo3.1-quality', 'veo3.1-lite',
-    // Sora
-    'sora-2', 'sora-2-pro',
-    // 通义万相
-    'wan2.6-t2v', 'wan2.6-i2v',
-    'wan2.5-t2v-preview', 'wan2.5-i2v-preview',
-    'wan2.2-t2v-plus', 'wan2.2-i2v-plus', 'wan2.2-i2v-flash',
-    // Seedance
-    'doubao-seedance-2-0-260128',
-    'doubao-seedance-2-0-fast-260128',
-    'doubao-seedance-1-5-pro-251215',
-    'doubao-seedance-1-0-pro-250528',
-    'doubao-seedance-1-0-lite-t2v-250428',
-    'doubao-seedance-1-0-lite-i2v-250428',
-    // Agnes
-    'agnes-video-v2.0'
-];
 
 function uid(prefix='n'){ return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`; }
 function loadLocalViewportMap(){
@@ -643,26 +577,6 @@ function toggleQuickToolbar(){
     quickToolbarExpanded = Boolean(toolbar?.classList.contains('collapsed'));
     applyQuickToolbarState();
 }
-function loadLocalModelLists(){
-    try {
-        const managedRaw = localStorage.getItem(MANAGED_IMAGE_MODELS_KEY);
-        const raw = JSON.parse(managedRaw || localStorage.getItem(CUSTOM_IMAGE_MODELS_KEY) || '[]');
-        localImageModels = Array.isArray(raw) ? raw.filter(Boolean) : [];
-        hasManagedImageModels = Boolean(managedRaw);
-    } catch(e) {
-        localImageModels = [];
-        hasManagedImageModels = false;
-    }
-    try {
-        const managedRaw = localStorage.getItem(MANAGED_CHAT_MODELS_KEY);
-        const raw = JSON.parse(managedRaw || '[]');
-        localChatModels = Array.isArray(raw) ? raw.filter(Boolean) : [];
-        hasManagedChatModels = Boolean(managedRaw);
-    } catch(e) {
-        localChatModels = [];
-        hasManagedChatModels = false;
-    }
-}
 function uniqueModels(list){
     const seen = new Set();
     return list.map(item => String(item || '').trim()).filter(item => {
@@ -671,22 +585,41 @@ function uniqueModels(list){
         return true;
     });
 }
-function defaultApiProviders(){
-    return [{id:'comfly', name:'Comfly', base_url:'', enabled:true, image_models:imageModels, chat_models:chatModels, video_models:videoModels.length ? videoModels : DEFAULT_VIDEO_MODELS, has_key:false, key_preview:''}];
+// ---- 平台解析（A1 前端）----
+// 以前：平台列表为空时凭空造出一个不存在的 “comfly” 平台；节点上的平台被删除或不可用时，
+// 渲染一次就悄悄换成列表里的第一个平台并保存——任务被发到用户没选过的服务商。
+// 现在：未选择时才默认取第一个；明确选过的平台原样保留，下拉框标出“已删除或不可用”，运行前给出明确错误。
+// “comfly” 是旧版的默认平台 id：没有配置同名平台时，等同于“未选择”。
+const LEGACY_DEFAULT_PROVIDER_IDS = new Set(['comfly']);
+function isUnsetProviderId(id){
+    const value = String(id || '').trim();
+    if(!value) return true;
+    return LEGACY_DEFAULT_PROVIDER_IDS.has(value.toLowerCase()) && !apiProviders.some(p => p.id === value);
 }
-function isRunningHubProvider(provider){
-    const id = String(provider?.id || '').trim().toLowerCase();
-    const protocol = String(provider?.protocol || '').trim().toLowerCase();
-    const name = String(provider?.name || '').trim().toLowerCase();
-    return id === 'runninghub' || protocol === 'runninghub' || name === 'runninghub' || id === 'rh';
+function resolveProviderFromList(id, providers){
+    if(isUnsetProviderId(id)) return providers[0]?.id || '';
+    return String(id).trim();
 }
-function normalizeProviderId(value){
-    return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40);
+function providerUnavailable(id, providers){
+    return !isUnsetProviderId(id) && !providers.some(p => p.id === String(id).trim());
+}
+// 运行前检查：返回错误文案；可以运行时返回空字符串。
+function canvasProviderProblem(id, providers){
+    const resolved = resolveProviderFromList(id, providers);
+    if(!resolved) return tr('canvas.providerNoneRun');
+    if(!providers.some(p => p.id === resolved)) return trf('canvas.providerMissingRun', {id:resolved});
+    return '';
+}
+function providerSelectOptions(selectedId, providers){
+    const selected = resolveProviderFromList(selectedId, providers);
+    const stale = selected && !providers.some(p => p.id === selected)
+        ? `<option value="${escapeHtml(selected)}" selected>⚠ ${escapeHtml(selected)}（${escapeHtml(tr('canvas.providerUnavailable'))}）</option>`
+        : '';
+    if(!providers.length && !stale) return `<option value="" disabled selected>${escapeHtml(tr('canvas.noApiProviders'))}</option>`;
+    return stale + providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function imageApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
-    return providers;
+    return apiProviders.filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
 }
 function midjourneyApiProviders(){
     return (apiProviders.length ? apiProviders : [])
@@ -706,37 +639,26 @@ function midjourneyProviderOptions(selectedId){
     return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
 }
 function providerById(id){
-    return (apiProviders.length ? apiProviders : defaultApiProviders()).find(p => p.id === id) || imageApiProviders()[0] || defaultApiProviders()[0];
-}
-function resolveProviderId(id){
-    return providerById(id)?.id || 'comfly';
+    return apiProviders.find(p => p.id === id) || null;
 }
 function chatApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.enabled !== false && (p.chat_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    return apiProviders.filter(p => p.enabled !== false && (p.chat_models || []).length);
 }
 function resolveChatProviderId(id){
-    const providers = chatApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return resolveProviderFromList(id, chatApiProviders());
 }
 function chatProviderOptions(selectedId){
-    const selected = resolveChatProviderId(selectedId);
-    return chatApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, chatApiProviders());
 }
 function providerChatModels(providerId){
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.chat_models || []);
 }
 function resolveImageProviderId(id){
-    const providers = imageApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || '';
+    return resolveProviderFromList(id, imageApiProviders());
 }
 function providerOptions(selectedId){
-    const selected = resolveImageProviderId(selectedId);
-    const providers = imageApiProviders();
-    if(!providers.length) return `<option value="" disabled selected>${tr('canvas.noApiProviders') || '暂无 API 平台'}</option>`;
-    return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, imageApiProviders());
 }
 function providerImageModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
@@ -744,24 +666,21 @@ function providerImageModels(providerId){
     return uniqueModels(provider?.image_models || []);
 }
 function sanitizeImageNodeProviderModel(node){
-    if(!node || node.type !== 'generator') return;
+    if(!node || node.type !== 'generator' || !apiConfigLoaded) return;
     node.apiProvider = resolveImageProviderId(node.apiProvider || '');
+    if(providerUnavailable(node.apiProvider, imageApiProviders())) return; // 平台已删除/不可用：原样保留平台和模型
     const models = providerImageModels(node.apiProvider);
     if(!models.length) node.model = '';
     else if(!models.includes(resolveImageModel(node.model))) node.model = models[0] || '';
 }
 function videoApiProviders(){
-    const providers = (apiProviders.length ? apiProviders : defaultApiProviders())
-        .filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.video_models || []).length);
-    return providers.length ? providers : defaultApiProviders();
+    return apiProviders.filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.video_models || []).length);
 }
 function resolveVideoProviderId(id){
-    const providers = videoApiProviders();
-    return providers.find(p => p.id === id)?.id || providers[0]?.id || 'comfly';
+    return resolveProviderFromList(id, videoApiProviders());
 }
 function videoProviderOptions(selectedId){
-    const selected = resolveVideoProviderId(selectedId);
-    return videoApiProviders().map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+    return providerSelectOptions(selectedId, videoApiProviders());
 }
 function providerVideoModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
@@ -769,8 +688,9 @@ function providerVideoModels(providerId){
     return uniqueModels(provider?.video_models || []);
 }
 function sanitizeVideoNodeProviderModel(node){
-    if(!node || node.type !== 'video') return;
-    node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
+    if(!node || node.type !== 'video' || !apiConfigLoaded) return;
+    node.apiProvider = resolveVideoProviderId(node.apiProvider || '');
+    if(!node.apiProvider || providerUnavailable(node.apiProvider, videoApiProviders())) return; // 无可用平台或平台已删除：保留模型
     const models = providerVideoModels(node.apiProvider);
     if(!models.length) node.model = '';
     else if(!models.includes(node.model)) node.model = models[0] || '';
@@ -821,8 +741,7 @@ function modelscopeLoraOptions(loras, selectedId){
     }).join('');
 }
 function allChatModels(){
-    const providerModels = chatApiProviders().flatMap(p => p.chat_models || []);
-    return uniqueModels(hasManagedChatModels ? localChatModels : [...providerModels, ...chatModels, ...localChatModels]);
+    return uniqueModels(chatApiProviders().flatMap(p => p.chat_models || []));
 }
 function resolveImageModel(value){
     if(value === 'gpt') return models.gpt;
@@ -850,7 +769,8 @@ function normalizedImageQuality(value){
 }
 function resolveChatModel(value, providerId=''){
     const providerModels = providerId ? providerChatModels(providerId) : [];
-    return value || providerModels[0] || allChatModels()[0] || chatModels[0] || 'gpt-4o-mini';
+    // A4：没有任何已配置的对话模型时返回空，由调用方提示，不再凭空用旧环境变量里的模型。
+    return value || providerModels[0] || allChatModels()[0] || '';
 }
 function showErrorModal(message, title=tr('canvas.generationFailed')){
     if(!errorModal || !errorMessage){
@@ -862,41 +782,9 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
     errorModal.classList.add('open');
     refreshIcons();
 }
-function apiErrorMessage(data, fallback='请求失败'){
-    if(!data) return fallback;
-    if(typeof data === 'string') return data || fallback;
-    const detail = data.detail ?? data.error ?? data.message;
-    if(typeof detail === 'string') return detail || fallback;
-    if(Array.isArray(detail)){
-        const messages = detail.map(item => {
-            if(typeof item === 'string') return item;
-            const loc = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
-            const msg = item?.msg || item?.message || JSON.stringify(item);
-            return loc ? `${loc}: ${msg}` : msg;
-        }).filter(Boolean);
-        return messages.join('\n') || fallback;
-    }
-    if(detail && typeof detail === 'object'){
-        return detail.message || detail.msg || JSON.stringify(detail);
-    }
-    try {
-        return JSON.stringify(data);
-    } catch(e) {
-        return fallback;
-    }
-}
 async function responseErrorMessage(response, fallback='请求失败'){
-    try {
-        const data = await response.clone().json();
-        return apiErrorMessage(data, fallback);
-    } catch(e) {
-        try {
-            const text = await response.text();
-            return text || fallback;
-        } catch(_) {
-            return fallback;
-        }
-    }
+    // 只取 detail；不是 JSON 时截断，不把整段响应文本放进提示和日志
+    return ApiErrors.fromResponse(response, fallback);
 }
 function closeErrorModal(){
     if(errorModal) errorModal.classList.remove('open');
@@ -1052,8 +940,30 @@ function exceedsFourKStandard(width, height){
     if(!standard) return false;
     return Number(width) > standard.width || Number(height) > standard.height;
 }
+function isCanvasKieNode(node){
+    return KieImageParams.isKie((apiProviders || []).find(p => p.id === node?.apiProvider) || {id:node?.apiProvider});
+}
+function canvasKieValues(node){
+    return {
+        aspect_ratio:node.aspectRatio || API_RATIO_VALUES[node.ratio] || (node.ratio === 'custom' ? node.customRatio : '') || 'auto',
+        resolution:String(node.resolution || '1K').toUpperCase(),
+        output_format:node.outputFormat || ''
+    };
+}
+async function canvasKieRequestFields(node, referenceCount){
+    if(!isCanvasKieNode(node)) return {};
+    const schema = await KieImageParams.load(node.apiProvider, resolveImageModel(node.model));
+    const input = canvasKieValues(node);
+    // Missing fields in old JSON inherit defaults; explicit invalid combinations fail locally.
+    if(!input.output_format) input.output_format = KieImageParams.field(schema, 'output_format')?.default || '';
+    return KieImageParams.validate(schema, input, referenceCount);
+}
 function normalizeApiNodeSizeChoice(node){
     if(!node) return;
+    if(isCanvasKieNode(node)){
+        if(!node.resolution || node.resolution === 'auto') node.resolution = '1k';
+        return;
+    }
     const allowAuto = isGptImageAutoSizeModel(resolveImageModel(node.model));
     if(allowAuto && node._apiResolutionUserSet !== true && (!node.resolution || node.resolution === '1k' || node.resolution === 'auto')) node.resolution = defaultApiImageResolution(node.model);
     else if(!node.resolution) node.resolution = defaultApiImageResolution(node.model);
@@ -1090,7 +1000,8 @@ function imageModelOptions(selectedModel, providerId){
         return `<option value="" disabled selected>${tr('canvas.noImageModelsHint') || '暂无生图模型，请到 API 设置添加'}</option>`;
     }
     const selectedValue = resolveImageModel(selectedModel);
-    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    const names = (apiProviders || []).find(p => p.id === providerId)?.model_names || {};
+    const options = models.map(model => `<option value="${escapeHtml(model)}" ${model === selectedValue ? 'selected' : ''}>${escapeHtml(names[model] || model)}</option>`).join('');
     const hasSelected = models.includes(selectedValue);
     return `${hasSelected || !selectedValue ? '' : `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}</option>`}${options}`;
 }
@@ -1114,7 +1025,6 @@ function formatCanvasTime(value){
 }
 function setStatus(text){
     document.getElementById('saveState').textContent = text;
-    if(gateStatus) gateStatus.textContent = text;
 }
 let generationCompleteSoundAt = 0;
 function playGenerationCompleteSound(){
@@ -1147,30 +1057,6 @@ function playGenerationCompleteSound(){
         else play();
     } catch(e) {}
 }
-function refreshGateViewControls(){
-    if(!canvasGate) return;
-    canvasGate.classList.toggle('trash-mode', trashMode);
-    if(gateTitleText) gateTitleText.textContent = trashMode ? tr('canvas.trash') : tr('canvas.selectCanvas');
-    if(gateSubtitle) gateSubtitle.textContent = trashMode ? tr('canvas.trashSubtitle') : tr('canvas.subtitle');
-    const trashCount = deletedCanvases.length;
-    if(gateTrashCount){
-        gateTrashCount.textContent = String(trashCount);
-        gateTrashCount.classList.toggle('visible', trashCount > 0);
-    }
-    const countPill = document.getElementById('gateCountPill');
-    if(countPill){
-        const items = trashMode ? deletedCanvases : canvases;
-        const suffix = tr('canvas.countSuffix');
-        countPill.textContent = suffix ? `${items.length} ${suffix}` : String(items.length);
-    }
-    const sortSwitch = document.getElementById('gateSortSwitch');
-    if(sortSwitch){
-        sortSwitch.classList.toggle('hidden', trashMode);
-        sortSwitch.querySelectorAll('[data-sort]').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.sort === canvasSortMode);
-        });
-    }
-}
 function setCanvasMode(open){
     shell.classList.toggle('no-canvas', !open);
     if(!open){
@@ -1188,25 +1074,6 @@ function ensureCanvas(){
     if(canvas) return true;
     setStatus(tr('canvas.needCanvas'));
     return false;
-}
-function setCreateMode(active, kind='classic'){
-    creatingCanvas = active;
-    createCanvasKind = active ? ((kind === 'smart') ? 'smart' : 'classic') : 'classic';
-    if(active) trashMode = false;
-    canvasGate.classList.toggle('creating', active);
-    refreshGateViewControls();
-    setStatus(active ? tr('canvas.enterCanvasName') : (canvases.length ? tr('canvas.chooseFirst') : tr('canvas.noCanvasCreateFirst')));
-    if(active) {
-        gateTitleInput.placeholder = createCanvasKind === 'smart'
-            ? (tr('canvas.newSmartCanvasPlaceholder') || tr('canvas.newCanvasPlaceholder'))
-            : tr('canvas.newCanvasPlaceholder');
-        gateTitleInput.focus();
-        gateTitleInput.select();
-    } else {
-        gateTitleInput.value = '';
-        gateTitleInput.placeholder = tr('canvas.newCanvasPlaceholder');
-    }
-    refreshIcons();
 }
 function screenToWorld(clientX, clientY){
     const rect = board.getBoundingClientRect();
@@ -1418,16 +1285,76 @@ function refreshGeometryAfterLayout(){
         requestAnimationFrame(refreshGeometry);
     });
 }
+// ---- 保存失败重试与离开提示（C2）----
+// 以前保存失败只显示 Save failed，不重试；修改留在内存里，刷新或关闭页面就丢了。
+// 现在失败后按 1s、2s、4s… 最长 30s 退避自动重试；离开页面时若仍有未保存修改则补发或提示。
+// <html data-canvas-save-state="saving|saved|dirty|error"> 供样式和回归脚本使用。
+let canvasSaveRetryTimer = null;
+let canvasSaveRetryDelay = 0;
+const CANVAS_KEEPALIVE_MAX_BYTES = 60000; // 浏览器对 keepalive 请求体的上限约 64KB
+function setCanvasSaveState(state){
+    document.documentElement.dataset.canvasSaveState = state;
+}
+function canvasHasUnsavedChanges(){
+    return Boolean(canvas) && (localCanvasDirty || savingCanvasNow || saveCanvasAgain || Boolean(saveTimer));
+}
+function buildCanvasSaveBody(){
+    // C7：标题和图标只通过 /meta 修改（列表页、侧栏改名都走那里），自动保存不再带上它们，
+    // 以免把别处刚改的名字用本页内存里的旧值写回去。后端对漏传的字段保持原值。
+    return JSON.stringify({
+        nodes:serializableCanvasNodes(),
+        connections,
+        viewport,
+        logs:canvas.logs || [],
+        client_id:CLIENT_ID,
+        base_updated_at:Number(lastCanvasUpdatedAt || canvas.updated_at || 0)
+    });
+}
+function scheduleCanvasSaveRetry(error){
+    canvasConflictStreak = 0; // 下一次重试重新允许合并
+    canvasSaveRetryDelay = Math.min(30000, canvasSaveRetryDelay ? canvasSaveRetryDelay * 2 : 1000);
+    clearTimeout(canvasSaveRetryTimer);
+    canvasSaveRetryTimer = setTimeout(() => {
+        canvasSaveRetryTimer = null;
+        if(canvas && canvasHasUnsavedChanges()) saveCanvas();
+    }, canvasSaveRetryDelay);
+    setCanvasSaveState('error');
+    setStatus(`Save failed · retry in ${Math.round(canvasSaveRetryDelay / 1000)}s`);
+    const statusEl = document.getElementById('saveState');
+    if(statusEl) statusEl.title = String(error?.message || error || '');
+}
+window.addEventListener('beforeunload', event => {
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面不保存；草稿已暂存，刷新时不再拦截
+    if(!canvasHasUnsavedChanges()) return;
+    if(!savingCanvasNow){
+        try {
+            const body = buildCanvasSaveBody();
+            if(new TextEncoder().encode(body).length <= CANVAS_KEEPALIVE_MAX_BYTES){
+                fetch(`/api/canvases/${canvas.id}`, {method:'PUT', headers:StalePage.withBuildHeader({'Content-Type':'application/json'}), body, keepalive:true}).catch(() => {});
+                return;
+            }
+        } catch(e) {}
+    }
+    event.preventDefault();
+    event.returnValue = '';
+});
 function scheduleSave(){
     if(!canvas || applyingRemoteCanvas) return;
     localCanvasDirty = true;
-    setStatus('Saving...');
+    if(!canvasSaveRetryTimer) setStatus('Saving...');
+    setCanvasSaveState(canvasSaveRetryTimer ? 'error' : 'dirty');
     clearTimeout(saveTimer);
+    saveTimer = null;
     if(savingCanvasNow){
         saveCanvasAgain = true;
         return;
     }
-    saveTimer = setTimeout(saveCanvas, 500);
+    // 触发后清空 saveTimer：否则它一直是旧的定时器 id，applyRemoteCanvasData 会永远认为“还有待保存的修改”，
+    // 轮询拿到的远端更新被无限推迟。
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveCanvas();
+    }, 500);
 }
 function scheduleViewportSave(){
     saveLocalViewport();
@@ -1470,58 +1397,156 @@ function serializableCanvasNode(node){
 function serializableCanvasNodes(list=nodes){
     return (list || []).map(serializableCanvasNode);
 }
+async function fetchServerCanvasForMerge(id){
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}`, {cache:'no-store'});
+        if(!res.ok) return null;
+        const data = await res.json();
+        return data?.canvas?.id === id ? data.canvas : null;
+    } catch(e) {
+        return null;
+    }
+}
+// ---- 页面版本过期（后端已更新、页面未刷新）----
+// 过期后不再保存；未保存的修改只记相对上次同步内容的变化，暂存到本机浏览器，刷新后可恢复（见 stale-page.js）。
+let pageOutdated = false;
+const OUTDATED_PAGE_ID = uid('page');
+function buildClassicOutdatedDraft(){
+    let base = null;
+    try { base = canvasSyncBaseJson ? JSON.parse(canvasSyncBaseJson) : null; } catch(e) { base = null; }
+    const patch = CanvasMerge.buildDraftPatch({
+        localNodes:serializableCanvasNodes(), baseNodes:base?.nodes || [],
+        localConnections:connections, baseConnections:base?.connections || [],
+        connectionKey:CanvasMerge.classicConnectionKey,
+    });
+    return {version:1, kind:'classic', canvasId:canvas.id, title:canvas.title || '', savedAt:Date.now(),
+            clientBuild:StalePage.clientBuild(), baseUpdatedAt:Number(lastCanvasUpdatedAt || 0), patch};
+}
+function refreshOutdatedDraft(){
+    if(!canvas) return;
+    let draft = null;
+    let state = 'none';
+    try {
+        draft = buildClassicOutdatedDraft();
+        if(CanvasMerge.draftPatchCount(draft.patch) > 0){
+            state = StalePage.saveDraft(canvas.id, OUTDATED_PAGE_ID, draft) ? 'stored' : 'failed';
+        } else {
+            StalePage.clearDrafts([StalePage.draftKey(canvas.id, OUTDATED_PAGE_ID)]);
+        }
+    } catch(e) {
+        console.error(e);
+    }
+    StalePage.showOutdatedBanner({draftState:state, draft});
+}
+function enterOutdatedMode(){
+    if(pageOutdated) return;
+    pageOutdated = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(canvasSaveRetryTimer);
+    canvasSaveRetryTimer = null;
+    setCanvasSaveState('outdated');
+    setStatus(langIsEn() ? 'Page out of date — refresh' : '页面已过期，请刷新');
+    refreshOutdatedDraft();
+}
+// 刷新后：这张画布有旧页面留下的草稿时，提示恢复（合并到服务器最新版本后正常保存）或丢弃。
+function offerOutdatedDraftRestore(){
+    if(!canvas || pageOutdated) return;
+    const drafts = StalePage.loadDrafts(canvas.id).filter(d => d.kind === 'classic');
+    const count = drafts.reduce((sum, d) => sum + CanvasMerge.draftPatchCount(d.patch), 0);
+    if(!drafts.length || !count) return;
+    StalePage.offerRestore({
+        drafts, count,
+        onDiscard:() => StalePage.clearDrafts(drafts.map(d => d.key)),
+        onRestore:async () => {
+            let mergedNodes = nodes.map(serializableCanvasNode);
+            let mergedConnections = connections.slice();
+            const total = {applied:0, merged:0, skippedDeletedOnServer:0, keptChangedOnServer:0, connections:0};
+            drafts.forEach(draft => {
+                const result = CanvasMerge.applyDraftPatch({
+                    serverNodes:mergedNodes, serverConnections:mergedConnections, patch:draft.patch,
+                    mergeNode:CanvasMerge.mergeClassicNode, connectionKey:CanvasMerge.classicConnectionKey,
+                });
+                mergedNodes = result.nodes;
+                mergedConnections = result.connections;
+                Object.keys(total).forEach(key => { total[key] += result.report[key] || 0; });
+            });
+            nodes = mergedNodes;
+            connections = mergedConnections;
+            resetTransientRunState(nodes);
+            sanitizeConnections();
+            localCanvasDirty = true;
+            render();
+            await saveCanvas();
+            if(localCanvasDirty && !pageOutdated) throw new Error(langIsEn() ? 'Restored, but saving failed; it will retry' : '已恢复，但保存失败，会自动重试');
+            StalePage.clearDrafts(drafts.map(d => d.key));
+            setStatus(StalePage.restoreSummary(total));
+            return total;
+        },
+    });
+}
 async function saveCanvas(){
     if(!canvas || applyingRemoteCanvas) return;
+    if(pageOutdated){ refreshOutdatedDraft(); return; } // 过期页面：只更新暂存的草稿，不再请求服务器
     if(savingCanvasNow){
         saveCanvasAgain = true;
         return;
     }
+    clearTimeout(saveTimer);
+    saveTimer = null;
     sanitizeConnections();
     normalizeStoredConnectionAnchors();
     savingCanvasNow = true;
     saveCanvasAgain = false;
+    if(!canvasSaveRetryTimer) setCanvasSaveState('saving');
     try {
+        const body = buildCanvasSaveBody();
         const res = await fetch(`/api/canvases/${canvas.id}`, {
             method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:canvas.title,
-                icon:canvas.icon || '🧩',
-                nodes:serializableCanvasNodes(),
-                connections,
-                viewport,
-                logs:canvas.logs || [],
-                client_id:CLIENT_ID,
-                base_updated_at:Number(lastCanvasUpdatedAt || canvas.updated_at || 0)
-            })
+            headers:StalePage.withBuildHeader({'Content-Type':'application/json'}),
+            body
         });
-        if(res.status === 409){
+        if(res.status === 412){
             const data = await res.json().catch(() => ({}));
-            const remote = data.detail?.canvas || data.canvas;
-            if(localCanvasDirty || saveCanvasAgain){
-                lastCanvasUpdatedAt = Number(data.detail?.updated_at || data.updated_at || remote?.updated_at || lastCanvasUpdatedAt || 0);
-                saveCanvasAgain = true;
-                setStatus('Saving...');
+            if(StalePage.isOutdatedPayload(data)){
+                enterOutdatedMode();
                 return;
             }
-            if(remote) applyRemoteCanvasData(remote);
-            setStatus('Synced');
+            throw new Error(ApiErrors.message(data, `HTTP ${res.status}`));
+        }
+        if(res.status === 409){
+            // 冲突：别人先保存了。三方合并对方的版本（双方的改动都保留），再以对方的 updated_at 为基底重存。
+            // 以前这里直接拿对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）。
+            // C6：409 只带 updated_at，不再带整张画布，这里自己取服务器上的最新版本来合并。
+            const data = await res.json().catch(() => ({}));
+            canvasConflictStreak += 1;
+            if(canvasConflictStreak > 5) throw new Error('连续保存冲突');
+            const remote = data.detail?.canvas || await fetchServerCanvasForMerge(canvas.id);
+            if(!remote) throw new Error('保存冲突后无法读取服务器上的画布');
+            mergeRemoteCanvasIntoLocal(remote);
+            localCanvasDirty = true;
+            saveCanvasAgain = true;
+            setStatus('Merging...');
             return;
         }
-        if(!res.ok) throw new Error('save failed');
+        if(!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`));
         const data = await res.json().catch(() => ({}));
-        const localViewport = {...viewport};
-        if(data.canvas) canvas = {...canvas, ...data.canvas, viewport:localViewport};
-        viewport = localViewport;
-        canvas.updated_at = Number(canvas.updated_at || Date.now());
+        canvasConflictStreak = 0;
+        canvasSyncBaseJson = body; // 服务器现在保存的正是这份内容，作为下一次合并的基线
+        // C6：成功响应只有 updated_at（旧后端会带整张画布，这里只取它的 updated_at）。
+        const savedUpdatedAt = Number(data.updated_at || data.canvas?.updated_at || 0);
+        canvas.updated_at = savedUpdatedAt || Number(canvas.updated_at || Date.now());
         lastCanvasUpdatedAt = canvas.updated_at;
         localCanvasDirty = Boolean(saveCanvasAgain);
         if(currentCanvasTime) currentCanvasTime.textContent = formatCanvasTime(canvas.updated_at);
+        canvasSaveRetryDelay = 0;
+        clearTimeout(canvasSaveRetryTimer);
+        canvasSaveRetryTimer = null;
+        setCanvasSaveState(localCanvasDirty ? 'dirty' : 'saved');
         setStatus('Saved');
-        loadCanvasList(false);
     } catch(e) {
-        setStatus('Save failed');
         console.error(e);
+        scheduleCanvasSaveRetry(e);
     } finally {
         savingCanvasNow = false;
         if(saveCanvasAgain && canvas && !applyingRemoteCanvas){
@@ -1532,36 +1557,95 @@ async function saveCanvas(){
     }
 }
 
-async function loadConfig(){
-    loadLocalModelLists();
-    try {
-        const cfg = await fetch('/api/config').then(r=>r.json());
-        imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
-        chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
-        videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
-        msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
-        comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
-        apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
-        models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
-        models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
-        try {
-            const wf = await fetch('/api/workflows').then(r=>r.json());
-            comfyWorkflows = wf.workflows || [];
-        } catch(_) {
-            comfyWorkflows = [];
+// 配置是否至少成功加载过一次。没有可信配置时，sanitize / prune 一律不动节点数据（A2）。
+let apiConfigLoaded = false;
+let comfyWorkflowsLoaded = false;
+async function fetchJsonOrThrow(url){
+    const res = await fetch(url);
+    if(!res.ok) throw new Error(`${url} HTTP ${res.status}`);
+    return res.json();
+}
+// 返回 true 表示 /api/config 加载成功。失败时保留上一次的配置，不再用假的默认平台顶替。
+// A6：同一时间只跑一个请求；进行中又被触发时，只在它结束后再补跑一次（保证拿到最新配置）。
+// 每次加载记录服务端的 config_version 和工作流列表，lastConfigLoadChanged 表示这次是否真有变化。
+let configLoadInFlight = null;
+let configLoadQueued = null;
+let appliedConfigVersion = '';
+let appliedWorkflowsJson = '';
+let lastConfigLoadChanged = false;
+let configLoadCount = 0;
+function loadConfig(){
+    if(configLoadInFlight){
+        if(!configLoadQueued){
+            configLoadQueued = configLoadInFlight.catch(() => false).then(() => {
+                configLoadQueued = null;
+                return loadConfig();
+            });
         }
+        return configLoadQueued;
+    }
+    configLoadInFlight = loadConfigOnce().finally(() => { configLoadInFlight = null; });
+    return configLoadInFlight;
+}
+function imageModelAliasesFromProviders(){
+    const list = uniqueModels(imageApiProviders().flatMap(p => p.image_models || []));
+    models.nano = list.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
+    models.gpt = list.find(m => !m.toLowerCase().includes('nano')) || 'gpt-image-2';
+}
+// 与后端 runninghub_workflow_config_has_payload 同一判断：保存过参数（fields / workflowJson / raw 任一非空）。
+// 只有标题和缩略图、从没拉取过参数的条目，后端必然返回 404，预取时跳过；真正用到时仍会按需获取。
+function runningHubEntryHasSavedParams(entry){
+    const nonEmpty = value => Array.isArray(value) ? value.length > 0 : Boolean(value && typeof value === 'object' && Object.keys(value).length);
+    return nonEmpty(entry?.fields) || nonEmpty(entry?.workflowJson) || nonEmpty(entry?.raw);
+}
+async function loadConfigOnce(){
+    configLoadCount += 1;
+    let cfg;
+    try {
+        cfg = await fetchJsonOrThrow('/api/config');
+    } catch(e) {
+        console.warn('API 配置加载失败，保留当前配置', e);
+        setStatus(tr('canvas.apiConfigLoadFailed'));
+        lastConfigLoadChanged = false;
+        return false;
+    }
+    // 没有版本号（旧后端）时视为有变化
+    const version = String(cfg.config_version || '');
+    const configChanged = !version || version !== appliedConfigVersion || !apiConfigLoaded;
+    if(configChanged){
+        comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
+        apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
+        imageModelAliasesFromProviders();
+        appliedConfigVersion = version;
+    }
+    apiConfigLoaded = true;
+    let workflowsChanged = false;
+    try {
+        const wf = await fetchJsonOrThrow('/api/workflows');
+        const nextWorkflows = wf.workflows || [];
+        const nextJson = JSON.stringify(nextWorkflows);
+        workflowsChanged = nextJson !== appliedWorkflowsJson || !comfyWorkflowsLoaded;
+        comfyWorkflows = nextWorkflows;
+        appliedWorkflowsJson = nextJson;
+        comfyWorkflowsLoaded = true;
+    } catch(_) {
+        // 工作流列表拉取失败：保留上一次的列表；从未成功过时 pruneMissingComfyWorkflows 不会清空节点。
+        console.warn('ComfyUI 工作流列表加载失败，保留当前列表');
+    }
+    lastConfigLoadChanged = configChanged || workflowsChanged;
+    if(configChanged){
         runningHubWorkflowCache = {};
         const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
+        const rhWorkflowIds = (rhProvider?.rh_workflows || []).filter(runningHubEntryHasSavedParams).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
         await Promise.all(rhWorkflowIds.map(async workflowId => {
             try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
         }));
-    } catch(e) {
-        apiProviders = defaultApiProviders();
     }
+    return true;
 }
 
-// 监听 API 设置页面的变更广播，实时刷新画布的模型/平台下拉
+// A6：配置变更只走一个通知通道——设置页发出的 BroadcastChannel('studio-api')。
+// 同源的标签页和 iframe 都能直接收到（实例模式下按账号隔离），外壳页不再转发 postMessage。
 try {
     const apiChannel = new BroadcastChannel('studio-api');
     apiChannel.onmessage = async (e) => {
@@ -1570,510 +1654,21 @@ try {
         }
     };
 } catch(e) { /* 不支持 BroadcastChannel 的旧浏览器忽略 */ }
-function msChatModelOptions(selected){
-    // 单一数据源：从 API 设置里 modelscope 平台的 chat_models 取
-    const msProvider = apiProviders.find(p => p.id === 'modelscope');
-    const list = uniqueModels(msProvider?.chat_models || []);
-    if(!list.length){
-        return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
-    }
-    const sel = selected && list.includes(selected) ? selected : list[0];
-    return list.map(m => `<option value="${escapeHtml(m)}" ${m === sel ? 'selected' : ''}>${escapeHtml(m.split('/').pop().split(':')[0])}</option>`).join('');
-}
-async function loadCanvasList(openFirst=true){
-    try {
-        const res = await fetch('/api/canvases');
-        if(!res.ok) throw new Error(tr('canvas.canvasListFailed'));
-        const data = await res.json();
-        canvases = data.canvases || [];
-        sortCanvasListByUpdated();
-        refreshGateViewControls();
-        renderCanvasList();
-        refreshTrashCount();
-        if(openFirst && canvases[0]) await openCanvas(canvases[0].id);
-        else if(!canvas) {
-            setCanvasMode(false);
-            setStatus(trashMode ? (deletedCanvases.length ? tr('canvas.trash') : tr('canvas.trashEmpty')) : (canvases.length ? tr('canvas.chooseFirst') : tr('canvas.noCanvasCreateFirst')));
-        }
-    } catch(e) {
-        setStatus(tr('canvas.canvasListFailed'));
-        console.error(e);
-    }
-}
-async function loadTrashList(){
-    try {
-        const res = await fetch('/api/canvases/trash');
-        if(!res.ok) throw new Error(tr('canvas.trashLoadFailed'));
-        const data = await res.json();
-        deletedCanvases = data.canvases || [];
-        refreshGateViewControls();
-        renderCanvasList();
-        setStatus(deletedCanvases.length ? tr('canvas.trash') : tr('canvas.trashEmpty'));
-    } catch(e) {
-        setStatus(tr('canvas.trashLoadFailed'));
-        console.error(e);
-    }
-}
-async function refreshTrashCount(){
-    if(trashMode) return;
-    try {
-        const res = await fetch('/api/canvases/trash');
-        if(!res.ok) return;
-        const data = await res.json();
-        deletedCanvases = data.canvases || [];
-        refreshGateViewControls();
-    } catch(e) {}
-}
-async function setTrashMode(active){
-    trashMode = active;
-    creatingCanvas = false;
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = null;
-    closeCanvasMetaPopover();
-    canvasGate.classList.toggle('creating', false);
-    refreshGateViewControls();
-    if(trashMode) await loadTrashList();
-    else await loadCanvasList(false);
-    refreshIcons();
-}
-function renderCanvasList(){
-    // 选画布 gate 已拆分到独立页面 canvas-list.html；编辑器页不再有该 DOM，调用直接跳过。
-    if(!gateCanvasList) return;
-    renderCanvasListInto(gateCanvasList);
-}
-function compareCanvasRecords(a, b){
-    // 置顶始终排在最前；其余按当前排序模式（最近编辑 / 名称）。
-    const ap = a.pinned ? 1 : 0, bp = b.pinned ? 1 : 0;
-    if(ap !== bp) return bp - ap;
-    if(canvasSortMode === 'name'){
-        const cmp = String(a.title || '').localeCompare(String(b.title || ''), 'zh-Hans-CN', {numeric:true, sensitivity:'base'});
-        if(cmp !== 0) return cmp;
-    }
-    return Number(b.updated_at || b.created_at || 0) - Number(a.updated_at || a.created_at || 0);
-}
-function sortCanvasListByUpdated(){
-    canvases.sort(compareCanvasRecords);
-}
-function setCanvasSortMode(mode){
-    const next = mode === 'name' ? 'name' : 'recent';
-    if(next === canvasSortMode) { refreshGateViewControls(); return; }
-    canvasSortMode = next;
-    try { localStorage.setItem('canvasSortMode', canvasSortMode); } catch(e){}
-    sortCanvasListByUpdated();
-    renderCanvasList();
-    refreshGateViewControls();
-}
-async function patchCanvasMeta(id, patch){
-    const item = canvases.find(c => c.id === id);
-    if(item) Object.assign(item, patch);
-    if(canvas?.id === id) Object.assign(canvas, patch);
-    sortCanvasListByUpdated();
-    renderCanvasList();
-    try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(id)}/meta`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(patch)
-        });
-        if(!res.ok) throw new Error('meta save failed');
-        const data = await res.json();
-        if(data.canvas) updateCanvasListRecord(data.canvas);
-    } catch(e){
-        setStatus(tr('canvas.metaSaveFailed') || '保存失败');
-        console.error(e);
-        await loadCanvasList(false);
-    }
-}
-function togglePinCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    const item = canvases.find(c => c.id === id);
-    closeCanvasMetaPopover();
-    patchCanvasMeta(id, {pinned: !(item && item.pinned)});
-}
-function setCanvasColorValue(id, color, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    patchCanvasMeta(id, {color: color || ''});
-}
-function commitCanvasOwner(id, value){
-    const owner = String(value || '').trim().slice(0, 40);
-    const item = canvases.find(c => c.id === id);
-    if((item?.owner || '') === owner) return;
-    patchCanvasMeta(id, {owner});
-}
-function updateCanvasListRecord(record){
-    if(!record?.id) return;
-    const index = canvases.findIndex(item => item.id === record.id);
-    if(index >= 0) canvases[index] = {...canvases[index], ...record};
-    else canvases.unshift(record);
-    sortCanvasListByUpdated();
-    renderCanvasList();
-}
 async function touchCanvasOpened(id){
     if(!id) return null;
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(id)}/touch`, {method:'POST'});
         if(!res.ok) return null;
         const data = await res.json();
-        if(data.canvas) updateCanvasListRecord(data.canvas);
         return data.canvas || data;
     } catch(e) {
         console.warn('touch canvas failed', e);
         return null;
     }
 }
-function renderCanvasListInto(list){
-    if(!list) return;
-    refreshGateViewControls();
-    const items = trashMode ? deletedCanvases : canvases;
-    list.innerHTML = '';
-    if(!items.length){
-        const empty = document.createElement('div');
-        empty.className = 'gate-list-empty';
-        empty.innerHTML = trashMode
-            ? `<div class="gate-list-empty-icon"><i data-lucide="trash-2" class="w-6 h-6"></i></div>${tr('canvas.trashEmpty')}`
-            : `<div class="gate-list-empty-icon"><i data-lucide="layout-grid" class="w-6 h-6"></i></div>${tr('canvas.noCanvas')}<br>${tr('canvas.startWithNewCanvas')}`;
-        list.appendChild(empty);
-        refreshIcons();
-        return;
-    }
-    items.forEach(item => {
-        const row = document.createElement('div');
-        const isSmartCanvas = (item.kind || 'classic') === 'smart';
-        const color = String(item.color || '').trim();
-        const owner = String(item.owner || '').trim();
-        const pinned = !!item.pinned && !trashMode;
-        row.className = `canvas-item ${isSmartCanvas ? 'smart-canvas' : ''} ${canvas?.id === item.id ? 'active' : ''} ${pinned ? 'pinned' : ''} ${color ? 'has-color' : ''}`;
-        row.dataset.canvasId = item.id;
-        const ownerChip = owner
-            ? `<span class="canvas-owner-chip" role="button" tabindex="0" title="${escapeAttr(owner)}"><i data-lucide="user-round" class="w-3 h-3"></i><span class="canvas-owner-text">${escapeHtml(owner)}</span></span>`
-            : '';
-        row.innerHTML = `
-            <div class="canvas-open" role="button" tabindex="${trashMode ? '-1' : '0'}">
-                <div class="canvas-card-icon-row">
-                    <span class="canvas-preview-mark ${color ? `icon-has-color cc-${escapeAttr(color)}` : ''}" role="button" tabindex="0" title="${trashMode ? tr('canvas.deletedCanvas') : (tr('canvas.editMeta') || '编辑图标 / 颜色 / 负责人')}">${renderCanvasIcon(isSmartCanvas && /[^\x00-\x7F]/.test(item.icon || '') ? 'sparkles' : item.icon, 16)}</span>
-                    ${isSmartCanvas ? `<span class="canvas-kind-chip">${tr('canvas.smartCanvasShort')}</span>` : ''}
-                </div>
-                <div class="canvas-card-title">${escapeHtml(item.title)}</div>
-                ${ownerChip}
-                <div class="canvas-card-meta">
-                    <span class="canvas-card-meta-dot"></span>
-                    <div class="canvas-card-time">${trashMode ? `${tr('canvas.deletedAt')} ${formatCanvasTime(item.deleted_at)}` : formatCanvasTime(item.updated_at || item.created_at)}</div>
-                </div>
-            </div>
-            ${trashMode ? (pendingPurgeCanvasId === item.id ? `
-                <div class="canvas-delete-confirm">
-                    <div class="canvas-delete-box">
-                        <div class="canvas-delete-title">${tr('canvas.purgeConfirm')}</div>
-                        <div class="canvas-delete-actions">
-                            <button class="canvas-confirm-btn" type="button">${tr('common.confirm')}</button>
-                            <button class="canvas-cancel-btn" type="button">${tr('common.cancel')}</button>
-                        </div>
-                    </div>
-                </div>
-            ` : `
-                <button class="canvas-delete canvas-restore" type="button" title="${tr('canvas.restoreCanvas')}" aria-label="${tr('canvas.restoreCanvas')} ${escapeHtml(item.title)}" style="right:42px">
-                    <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-delete canvas-purge" type="button" title="${tr('canvas.purgeCanvas')}" aria-label="${tr('canvas.purgeCanvas')} ${escapeHtml(item.title)}">
-                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
-                </button>
-            `) : (pendingDeleteCanvasId === item.id ? `
-                <div class="canvas-delete-confirm">
-                    <div class="canvas-delete-box">
-                        <div class="canvas-delete-title">${tr('canvas.moveToTrashConfirm')}</div>
-                        <div class="canvas-delete-actions">
-                            <button class="canvas-confirm-btn" type="button">${tr('common.confirm')}</button>
-                            <button class="canvas-cancel-btn" type="button">${tr('common.cancel')}</button>
-                        </div>
-                    </div>
-                </div>
-            ` : `
-                <button class="canvas-pin-btn ${pinned ? 'active' : ''}" type="button" title="${pinned ? (tr('canvas.unpin') || '取消置顶') : (tr('canvas.pin') || '置顶')}" aria-label="${pinned ? (tr('canvas.unpin') || '取消置顶') : (tr('canvas.pin') || '置顶')}">
-                    <i data-lucide="pin" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-card-edit" type="button" title="${tr('canvas.rename')}" aria-label="${tr('canvas.rename')} ${escapeHtml(item.title)}">
-                    <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
-                </button>
-                <button class="canvas-delete" type="button" title="${tr('canvas.moveToTrash')}" aria-label="${tr('canvas.moveToTrash')} ${escapeHtml(item.title)}">
-                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-                </button>
-            `)}
-        `;
-        if(!trashMode) row.querySelector('.canvas-open').onclick = () => openCanvas(item.id);
-        const titleEl = row.querySelector('.canvas-card-title');
-        const editBtn = row.querySelector('.canvas-card-edit');
-        if(editBtn && titleEl && !trashMode) {
-            editBtn.onmousedown = e => e.stopPropagation();
-            editBtn.onclick = e => { e.stopPropagation(); startTitleEdit(item.id, titleEl); };
-        }
-        const iconBtn = row.querySelector('.canvas-preview-mark');
-        if(iconBtn && !trashMode) {
-            iconBtn.onclick = e => toggleEmojiPicker(item.id, e);
-            iconBtn.onkeydown = e => {
-                if(e.key === 'Enter' || e.key === ' ') toggleEmojiPicker(item.id, e);
-            };
-        }
-        row.querySelectorAll('.emoji-option').forEach(btn => {
-            btn.onclick = e => setCanvasIcon(item.id, btn.dataset.icon, e);
-        });
-        const pinBtn = row.querySelector('.canvas-pin-btn');
-        if(pinBtn){
-            pinBtn.onmousedown = e => e.stopPropagation();
-            pinBtn.onclick = e => togglePinCanvas(item.id, e);
-        }
-        const ownerChipEl = row.querySelector('.canvas-owner-chip');
-        if(ownerChipEl && !trashMode){
-            ownerChipEl.onmousedown = e => e.stopPropagation();
-            ownerChipEl.onclick = e => { e.stopPropagation(); toggleEmojiPicker(item.id, e); };
-        }
-        const deleteBtn = row.querySelector('.canvas-delete');
-        if(deleteBtn) deleteBtn.onclick = e => requestDeleteCanvas(item.id, e);
-        const confirmBtn = row.querySelector('.canvas-confirm-btn');
-        if(confirmBtn) confirmBtn.onclick = e => trashMode ? purgeCanvas(item.id, e) : deleteCanvas(item.id, e);
-        const cancelBtn = row.querySelector('.canvas-cancel-btn');
-        if(cancelBtn) cancelBtn.onclick = e => cancelDeleteCanvas(e);
-        const restoreBtn = row.querySelector('.canvas-restore');
-        if(restoreBtn) restoreBtn.onclick = e => restoreCanvas(item.id, e);
-        const purgeBtn = row.querySelector('.canvas-purge');
-        if(purgeBtn) purgeBtn.onclick = e => requestPurgeCanvas(item.id, e);
-        list.appendChild(row);
-    });
-    refreshIcons();
-    renderCanvasMetaPopover();
-}
-function closeCanvasMetaPopover(){
-    emojiPickerCanvasId = null;
-    canvasMetaAnchorId = '';
-    document.querySelector('.canvas-meta-pop')?.remove();
-}
-function renderCanvasMetaPopover(){
-    document.querySelector('.canvas-meta-pop')?.remove();
-    if(trashMode || !emojiPickerCanvasId) return;
-    const item = canvases.find(entry => entry.id === emojiPickerCanvasId);
-    if(!item) return;
-    const color = String(item.color || '').trim();
-    const owner = String(item.owner || '').trim();
-    const pop = document.createElement('div');
-    pop.className = 'canvas-meta-pop';
-    pop.dataset.canvasMetaPop = item.id;
-    pop.innerHTML = `
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.ownerLabel') || '负责人 / 项目'}</div>
-            <input class="canvas-owner-input" type="text" maxlength="40" value="${escapeAttr(owner)}" placeholder="${escapeAttr(tr('canvas.ownerPlaceholder') || '如：张三 / 双十一项目')}">
-        </div>
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.colorLabel') || '颜色标记'}</div>
-            <div class="canvas-color-row">
-                <button class="canvas-color-swatch cc-none ${!color ? 'active' : ''}" type="button" data-color="" title="${tr('canvas.colorNone') || '无'}"><i data-lucide="ban" class="w-3 h-3"></i></button>
-                ${CANVAS_COLOR_OPTIONS.map(c => `<button class="canvas-color-swatch cc-${c} ${color === c ? 'active' : ''}" type="button" data-color="${c}" aria-label="${c}"></button>`).join('')}
-            </div>
-        </div>
-        <div class="canvas-meta-section">
-            <div class="canvas-meta-label">${tr('canvas.changeIcon')}</div>
-            <div class="emoji-picker-grid">
-                ${CANVAS_EMOJIS.map(icon => `<button class="emoji-option" type="button" data-icon="${escapeHtml(icon)}">${renderCanvasIcon(icon, 14)}</button>`).join('')}
-            </div>
-        </div>
-    `;
-    document.body.appendChild(pop);
-    pop.querySelectorAll('.emoji-option').forEach(btn => {
-        btn.onclick = e => setCanvasIcon(item.id, btn.dataset.icon, e);
-    });
-    pop.querySelectorAll('.canvas-color-swatch').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => setCanvasColorValue(item.id, btn.dataset.color || '', e);
-    });
-    const ownerInput = pop.querySelector('.canvas-owner-input');
-    if(ownerInput){
-        ownerInput.onmousedown = e => e.stopPropagation();
-        ownerInput.onclick = e => e.stopPropagation();
-        ownerInput.onkeydown = e => {
-            e.stopPropagation();
-            if(e.key === 'Enter'){ e.preventDefault(); ownerInput.blur(); }
-            if(e.key === 'Escape'){ e.preventDefault(); closeCanvasMetaPopover(); renderCanvasList(); }
-        };
-        ownerInput.onblur = () => commitCanvasOwner(item.id, ownerInput.value);
-    }
-    refreshIcons();
-    requestAnimationFrame(positionCanvasMetaPopover);
-}
-function positionCanvasMetaPopover(){
-    if(!emojiPickerCanvasId) return;
-    const pop = document.querySelector('.canvas-meta-pop');
-    const anchorId = canvasMetaAnchorId || emojiPickerCanvasId;
-    const row = document.querySelector(`.canvas-item[data-canvas-id="${CSS.escape(anchorId)}"]`);
-    const icon = row?.querySelector('.canvas-preview-mark') || row?.querySelector('.canvas-owner-chip');
-    if(!pop || !icon) return;
-    const iconRect = icon.getBoundingClientRect();
-    const width = pop.offsetWidth || 212;
-    const height = pop.offsetHeight || 260;
-    const margin = 12;
-    let left = Math.min(Math.max(iconRect.left, margin), window.innerWidth - width - margin);
-    let top = iconRect.bottom + 8;
-    if(top + height > window.innerHeight - margin) top = iconRect.top - height - 8;
-    if(top < margin) top = margin;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
-}
-async function createCanvas(){
-    const customTitle = gateTitleInput?.value.trim();
-    const isSmart = createCanvasKind === 'smart';
-    const titleBase = isSmart ? tr('canvas.newSmartCanvas') : tr('canvas.newCanvas');
-    const title = customTitle || `${titleBase} ${new Date().toLocaleTimeString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN', {hour:'2-digit', minute:'2-digit'})}`;
-    trashMode = false;
-    refreshGateViewControls();
-    setStatus('Creating...');
-    try {
-        const res = await fetch('/api/canvases', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({title, icon:isSmart ? 'sparkles' : '🧩', kind:isSmart ? 'smart' : 'classic'})
-        });
-        if(!res.ok) throw new Error(tr('canvas.createFailed'));
-        const data = await res.json();
-        if(isSmart){
-            setCreateMode(false);
-            await loadCanvasList(false);
-            openSmartCanvasPage(data.canvas?.id);
-            return;
-        }
-        resetCascadeRuntimeState();
-        canvas = data.canvas;
-        canvas.logs = canvas.logs || [];
-        nodes = canvas.nodes || [];
-        connections = canvas.connections || [];
-        undoStack = [];
-        redoStack = [];
-        viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
-        canvas.viewport = {...viewport};
-        resetTransientRunState(nodes);
-        sanitizeConnections();
-        selected.clear();
-        setCanvasMode(true);
-        render();
-        setStatus('Saved');
-        setCreateMode(false);
-        await loadCanvasList(false);
-        renderCanvasList();
-    } catch(e) {
-        setStatus(tr('canvas.createFailed'));
-        console.error(e);
-    }
-}
-async function createSmartCanvas(){
-    setCreateMode(true, 'smart');
-}
 function openSmartCanvasPage(id){
     if(!id) return;
     window.location.href = `/static/smart-canvas.html?id=${encodeURIComponent(id)}&v=2026.05.22.1`;
-}
-function toggleEmojiPicker(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    pendingDeleteCanvasId = null;
-    const opening = emojiPickerCanvasId !== id;
-    emojiPickerCanvasId = opening ? id : null;
-    canvasMetaAnchorId = opening ? id : '';
-    renderCanvasList();
-}
-async function setCanvasIcon(id, icon, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    const item = canvases.find(c => c.id === id);
-    if(item) item.icon = icon || 'layers';
-    closeCanvasMetaPopover();
-    renderCanvasList();
-    try {
-        let target = canvas?.id === id ? canvas : null;
-        if(!target) {
-            const data = await fetch(`/api/canvases/${id}`).then(r => r.json());
-            target = data.canvas;
-        }
-        target.icon = icon || 'layers';
-        const res = await fetch(`/api/canvases/${id}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:target.title,
-                icon:target.icon,
-                nodes:target.nodes || [],
-                connections:target.connections || [],
-                viewport:target.viewport || {x:0, y:0, scale:1}
-            })
-        });
-        if(!res.ok) throw new Error('图标保存失败');
-        if(canvas?.id === id) canvas.icon = target.icon;
-        await loadCanvasList(false);
-    } catch(e) {
-        setStatus('图标保存失败');
-        console.error(e);
-    }
-}
-function startTitleEdit(id, titleEl){
-    if(!titleEl || titleEl.querySelector('input')) return;
-    const item = canvases.find(c => c.id === id);
-    const current = item?.title || titleEl.textContent || '';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.maxLength = 80;
-    input.value = current;
-    input.className = 'canvas-card-title-input';
-    titleEl.innerHTML = '';
-    titleEl.appendChild(input);
-    input.onmousedown = e => e.stopPropagation();
-    input.onclick = e => e.stopPropagation();
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = async (commit) => {
-        if(done) return;
-        done = true;
-        const newTitle = input.value.trim();
-        if(commit && newTitle && newTitle !== current){
-            await setCanvasTitle(id, newTitle);
-        } else {
-            renderCanvasList();
-        }
-    };
-    input.onblur = () => finish(true);
-    input.onkeydown = e => {
-        e.stopPropagation();
-        if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
-        if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
-    };
-}
-async function setCanvasTitle(id, title){
-    const item = canvases.find(c => c.id === id);
-    if(item) item.title = title;
-    if(canvas?.id === id) canvas.title = title;
-    renderCanvasList();
-    try {
-        let target = canvas?.id === id ? canvas : null;
-        if(!target){
-            const data = await fetch(`/api/canvases/${id}`).then(r => r.json());
-            target = data.canvas;
-        }
-        target.title = title;
-        const res = await fetch(`/api/canvases/${id}`, {
-            method:'PUT',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                title:target.title,
-                icon:target.icon,
-                nodes:target.nodes || [],
-                connections:target.connections || [],
-                viewport:target.viewport || {x:0, y:0, scale:1}
-            })
-        });
-        if(!res.ok) throw new Error('重命名失败');
-        if(currentCanvasTitle && canvas?.id === id) currentCanvasTitle.textContent = title;
-        await loadCanvasList(false);
-    } catch(e){
-        setStatus('重命名失败');
-        console.error(e);
-    }
 }
 async function openCanvas(id){
     if(canvasReferencePicker) cancelCanvasReferencePicker();
@@ -2092,6 +1687,7 @@ async function openCanvas(id){
             return;
         }
         canvas.logs = canvas.logs || [];
+        rememberCanvasSyncBase(canvas);
         nodes = canvas.nodes || [];
         connections = canvas.connections || [];
         viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
@@ -2105,11 +1701,11 @@ async function openCanvas(id){
         selected.clear();
         selectedConnections.clear();
         setCanvasMode(true);
-        renderCanvasList();
         render();
         resumeCanvasImageTasks();
         startCanvasRemotePolling();
         setStatus('Ready');
+        offerOutdatedDraftRestore();
     } catch(e) {
         setStatus(tr('canvas.openFailed'));
         console.error(e);
@@ -2117,13 +1713,76 @@ async function openCanvas(id){
         window.location.replace(canvasListUrlForProject(canvas?.project || requestedCanvasListProject() || rememberedCanvasListProject()));
     }
 }
+// ---- 三方合并（C3 + C4）----
+// 以前：保存遇到 409 时直接用对方的 updated_at 重存，把对方的修改整份覆盖掉（C3）；
+// 收到远端更新时先清掉本页未保存的修改再拉取，本页的编辑被丢掉（C4）。二者只能丢一方。
+// 现在：记住最近一次与服务器一致的内容作为共同基线，按字段三方合并——
+// 本地改过的字段保留本地值，否则采用对方的值；节点、连线、日志的增删也相对基线判断，双方的改动都保留。
+let canvasSyncBaseJson = '';
+let canvasConflictStreak = 0;
+function canvasSyncSnapshot(source){
+    return JSON.stringify({
+        title:source?.title || '',
+        icon:source?.icon || '',
+        nodes:(source?.nodes || []).map(serializableCanvasNode),
+        connections:source?.connections || [],
+        logs:source?.logs || [],
+    });
+}
+function rememberCanvasSyncBase(source){
+    try { canvasSyncBaseJson = canvasSyncSnapshot(source); } catch(e) { canvasSyncBaseJson = ''; }
+}
+// 合并规则本身在 static/js/canvas-merge.js（纯函数，可单独测试）；这里只负责取基线、写回页面状态。
+function mergeRemoteCanvasIntoLocal(remote){
+    if(!remote || !canvas || remote.id !== canvas.id) return false;
+    let base = null;
+    try { base = canvasSyncBaseJson ? JSON.parse(canvasSyncBaseJson) : null; } catch(e) { base = null; }
+    // 没有基线时把远端当作基线：本地全部胜出，等同旧行为，但不会丢本地修改。
+    const nextBaseJson = canvasSyncSnapshot(remote); // 必须在远端节点变成本地对象之前拍快照
+    if(!base) base = JSON.parse(nextBaseJson);
+    const liveById = new Map(nodes.map(node => [node.id, node]));
+    const serializedById = new Map(nodes.map(node => [node.id, serializableCanvasNode(node)]));
+    const merged = CanvasMerge.mergeClassicCanvas({
+        title:canvas.title,
+        icon:canvas.icon,
+        nodes:nodes.map(node => serializedById.get(node.id)),
+        connections,
+        logs:canvas.logs,
+    }, remote, base);
+    nodes = merged.nodes.map(entry => {
+        if(entry.source === 'remote'){
+            resetTransientRunState([entry.node]);
+            return entry.node;
+        }
+        // 原地写回：正在运行的任务、选中状态等都持有本地节点对象的引用。
+        return CanvasMerge.syncNodeFields(liveById.get(entry.id), serializedById.get(entry.id), entry.node);
+    });
+    connections = merged.connections;
+    canvas.logs = merged.logs;
+    // C7：标题、图标和其他元数据一样以服务器为准（本页只通过 /meta 修改它们，改完本地也已同步）。
+    ['title', 'icon', 'owner', 'color', 'pinned', 'project', 'board_x', 'board_y'].forEach(key => {
+        if(Object.prototype.hasOwnProperty.call(remote, key)) canvas[key] = remote[key];
+    });
+    canvas.updated_at = Number(remote.updated_at || canvas.updated_at || 0);
+    lastCanvasUpdatedAt = canvas.updated_at;
+    canvasSyncBaseJson = nextBaseJson;
+    sanitizeConnections();
+    selected = new Set([...selected].filter(id => nodes.some(node => node.id === id)));
+    if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
+    render();
+    return true;
+}
 function applyRemoteCanvasData(remote){
     if(!remote || !canvas || remote.id !== canvas.id) return;
     if(localCanvasDirty || saveTimer || savingCanvasNow || saveCanvasAgain){
-        clearTimeout(remoteSyncTimer);
-        remoteSyncTimer = setTimeout(syncRemoteCanvasNow, 1000);
+        // 本地还有未保存的修改：不再无限推迟或丢弃，而是三方合并远端版本，再以远端的 updated_at 为基底保存。
+        if(Number(remote.updated_at || 0) <= Number(lastCanvasUpdatedAt || 0)) return;
+        mergeRemoteCanvasIntoLocal(remote);
+        if(savingCanvasNow) saveCanvasAgain = true;
+        else scheduleSave();
         return;
     }
+    rememberCanvasSyncBase(remote);
     applyingRemoteCanvas = true;
     try {
         resetCascadeRuntimeState();
@@ -2142,7 +1801,6 @@ function applyRemoteCanvasData(remote){
         pruneMissingComfyWorkflows();
         refreshMissingCanvasAssets().then(() => render());
         selected = new Set([...localSelectedIds].filter(id => nodes.some(node => node.id === id)));
-        renderCanvasList();
         render();
         resumeCanvasImageTasks();
         if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
@@ -2215,6 +1873,15 @@ async function syncRemoteCanvasNow(){
         setStatus('Sync failed');
     }
 }
+// C7：在列表页改名或改图标不会推进 updated_at，轮询 meta 时顺带把它们同步到本页。
+function applyRemoteCanvasTitleIcon(meta){
+    if(!canvas || !meta || meta.id !== canvas.id) return;
+    let changed = false;
+    if(meta.title && meta.title !== canvas.title){ canvas.title = meta.title; changed = true; }
+    if(meta.icon && meta.icon !== canvas.icon){ canvas.icon = meta.icon; changed = true; }
+    if(!changed) return;
+    if(currentCanvasTitle) currentCanvasTitle.textContent = canvas.title || tr('canvas.untitled');
+}
 async function checkRemoteCanvasVersion(){
     if(!canvas || applyingRemoteCanvas || remoteSyncBusy) return;
     if(document.hidden) return;
@@ -2223,6 +1890,8 @@ async function checkRemoteCanvasVersion(){
         const res = await fetch(`/api/canvases/${canvas.id}/meta`);
         if(!res.ok) throw new Error('meta failed');
         const meta = await res.json();
+        if(StalePage.serverBuildDiffers(meta.client_build)){ enterOutdatedMode(); return; }
+        applyRemoteCanvasTitleIcon(meta);
         const remoteUpdatedAt = Number(meta.updated_at || 0);
         if(remoteUpdatedAt > Number(lastCanvasUpdatedAt || 0)){
             await syncRemoteCanvasNow();
@@ -2249,145 +1918,12 @@ function handleCanvasUpdatedMessage(data){
     if(data.canvas_id !== canvas.id) return;
     const remoteUpdatedAt = Number(data.updated_at || 0);
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(lastCanvasUpdatedAt || 0)) return;
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    localCanvasDirty = false;
+    // 不再清掉本页未保存的修改（C4）：拉取后由 applyRemoteCanvasData 做三方合并。
     clearTimeout(remoteSyncTimer);
     remoteSyncTimer = setTimeout(syncRemoteCanvasNow, savingCanvasNow ? 700 : 120);
     setStatus('Syncing...');
 }
-async function returnToCanvasManager(){
-    if(canvasReferencePicker) cancelCanvasReferencePicker();
-    clearTimeout(saveTimer);
-    if(canvas && localCanvasDirty) await saveCanvas();
-    stopCanvasRemotePolling();
-    canvas = null;
-    nodes = [];
-    connections = [];
-    undoStack = [];
-    redoStack = [];
-    selected.clear();
-    viewport = {x: -1800, y: -1000, scale: 1};
-    setCanvasMode(false);
-    trashMode = false;
-    pendingPurgeCanvasId = null;
-    refreshGateViewControls();
-    await loadCanvasList(false);
-    setCreateMode(false);
-}
-function requestDeleteCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    closeCanvasMetaPopover();
-    pendingPurgeCanvasId = null;
-    pendingDeleteCanvasId = id;
-    renderCanvasList();
-}
-function requestPurgeCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    closeCanvasMetaPopover();
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = id;
-    renderCanvasList();
-}
-function cancelDeleteCanvas(event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    pendingDeleteCanvasId = null;
-    pendingPurgeCanvasId = null;
-    renderCanvasList();
-}
-async function deleteCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Moving to trash...');
-    try {
-        const res = await fetch(`/api/canvases/${id}`, {method:'DELETE'});
-        if(!res.ok) throw new Error(tr('canvas.moveToTrashFailed'));
-        const deletingCurrent = canvas?.id === id;
-        pendingDeleteCanvasId = null;
-        canvases = canvases.filter(item => item.id !== id);
-        if(deletingCurrent){
-            canvas = null;
-            nodes = [];
-            connections = [];
-            selected.clear();
-            viewport = {x: -1800, y: -1000, scale: 1};
-            setCanvasMode(false);
-        }
-        renderCanvasList();
-        setStatus(canvases.length ? tr('canvas.movedToTrash') : tr('canvas.noCanvasCreateFirst'));
-        await loadCanvasList(false);
-    } catch(e) {
-        setStatus(tr('canvas.moveToTrashFailed'));
-        console.error(e);
-    }
-}
-async function restoreCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Restoring...');
-    try {
-        const res = await fetch(`/api/canvases/${id}/restore`, {method:'POST'});
-        if(!res.ok) throw new Error(tr('canvas.restoreFailed'));
-        pendingPurgeCanvasId = null;
-        deletedCanvases = deletedCanvases.filter(item => item.id !== id);
-        await loadCanvasList(false);
-        await loadTrashList();
-        setStatus(tr('canvas.restored'));
-    } catch(e) {
-        setStatus(tr('canvas.restoreFailed'));
-        console.error(e);
-    }
-}
-async function purgeCanvas(id, event){
-    event?.preventDefault();
-    event?.stopPropagation();
-    setStatus('Deleting...');
-    try {
-        const res = await fetch(`/api/canvases/${id}/purge`, {method:'DELETE'});
-        if(!res.ok) throw new Error(tr('canvas.purgeFailed'));
-        pendingPurgeCanvasId = null;
-        deletedCanvases = deletedCanvases.filter(item => item.id !== id);
-        renderCanvasList();
-        setStatus(deletedCanvases.length ? tr('canvas.purged') : tr('canvas.trashEmpty'));
-        await loadTrashList();
-    } catch(e) {
-        setStatus(tr('canvas.purgeFailed'));
-        console.error(e);
-    }
-}
-window.createCanvas = createCanvas;
-window.createSmartCanvas = createSmartCanvas;
-window.loadCanvasList = loadCanvasList;
 window.openCanvas = openCanvas;
-window.deleteCanvas = deleteCanvas;
-window.returnToCanvasManager = returnToCanvasManager;
-// 选画布 gate 已拆分到 canvas-list.html；编辑器页不再含这些元素，用可选链避免空引用报错。
-gateCreateBtn?.addEventListener('click', () => setCreateMode(true));
-gateCreateSmartBtn?.addEventListener('click', createSmartCanvas);
-gateBackBtn?.addEventListener('click', () => setTrashMode(false));
-gateTrashBtn?.addEventListener('click', () => setTrashMode(true));
-gateRefreshBtn?.addEventListener('click', () => trashMode ? loadTrashList() : loadCanvasList(false));
-document.getElementById('gateSortSwitch')?.addEventListener('click', e => {
-    const btn = e.target.closest('[data-sort]');
-    if(btn) setCanvasSortMode(btn.dataset.sort);
-});
-gateConfirmBtn?.addEventListener('click', createCanvas);
-gateCancelBtn?.addEventListener('click', () => setCreateMode(false));
-gateTitleInput?.addEventListener('keydown', e => {
-    if(e.key === 'Enter') createCanvas();
-    if(e.key === 'Escape') setCreateMode(false);
-});
-document.addEventListener('mousedown', e => {
-    if(emojiPickerCanvasId === null) return;
-    if(e.target.closest('.canvas-meta-pop') || e.target.closest('.canvas-preview-mark') || e.target.closest('.canvas-owner-chip')) return;
-    closeCanvasMetaPopover();
-    renderCanvasList();
-});
-gateCanvasList?.addEventListener('scroll', () => requestAnimationFrame(positionCanvasMetaPopover), {passive:true});
-window.addEventListener('resize', () => requestAnimationFrame(positionCanvasMetaPopover));
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
 function cropDragModeFromPointer(event){
     const explicit = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle;
@@ -2570,7 +2106,7 @@ function pickMediaForNode(nodeId){
 }
 function addLLMNode(point){
     const p = point || defaultPoint(80, 0);
-    const providerId = chatApiProviders()[0]?.id || 'comfly';
+    const providerId = chatApiProviders()[0]?.id || '';
     return addNode({
         id:uid('llm'),
         type:'llm',
@@ -2629,7 +2165,7 @@ function addMsGenNode(point){
 }
 function addVideoNode(point){
     const p = point || defaultPoint(160, 0);
-    const providerId = videoApiProviders()[0]?.id || 'comfly';
+    const providerId = videoApiProviders()[0]?.id || '';
     const models = providerVideoModels(providerId);
     return addNode({
         id:uid('vid'),
@@ -2637,7 +2173,7 @@ function addVideoNode(point){
         x:p.x,
         y:p.y,
         apiProvider:providerId,
-        model:models[0] || videoModels[0] || DEFAULT_VIDEO_MODELS[0],
+        model:models[0] || '',
         duration:5,
         aspectRatio:'16:9',
         resolution:'',
@@ -2697,18 +2233,6 @@ function addRhNode(point){
         inputs:[],
         running:false
     });
-}
-function defaultLTXSegment(start=0, length=120){
-    return {
-        id:uid('ltxseg'),
-        type:'text',
-        prompt:'',
-        start,
-        length,
-        color:LTX_SEGMENT_COLORS[0],
-        strength:1,
-        imageRef:null
-    };
 }
 function addLTXDirectorNode(point){
     const p = point || defaultPoint(200, 0);
@@ -3217,7 +2741,7 @@ function addComfyNode(point){
         enhanceUpscaleRes:2048,
         editUpscale:false,
         editUpscaleRes:2048,
-        editModel:allImageModels(imageApiProviders()[0]?.id || 'comfly')[0] || models.gpt,
+        editModel:allImageModels(imageApiProviders()[0]?.id || '')[0] || models.gpt,
         ratio:'square',
         resolution:'1k',
         customRatio:'',
@@ -4226,21 +3750,6 @@ function setImageNodeFromOutput(nodeId, url){
     node.url = url;
     node.name = outputImageName(url);
     node.mediaKind = 'image';
-    render();
-    scheduleSave();
-}
-function clearImageNode(nodeId, event=null){
-    if(event){
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-    }
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || node.type !== 'image') return;
-    pushUndo();
-    node.url = '';
-    node.mediaKind = 'image';
-    node.name = '空白图片';
     render();
     scheduleSave();
 }
@@ -6585,15 +6094,6 @@ function defaultNodeSize(type){
 function loopCount(node){
     return Math.max(1, Math.min(100, Number(node?.count || 1) || 1));
 }
-function splitPromptIntoItems(text){
-    const trimmed = String(text || '').trim();
-    if(!trimmed) return [];
-    const numbered = trimmed.split(/\s*(?:^|\s)\d+\s*[.、)）．]\s+/).map(s => s.trim()).filter(Boolean);
-    if(numbered.length >= 2) return numbered;
-    const lines = trimmed.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
-    if(lines.length >= 2) return lines;
-    return [trimmed];
-}
 const loopPromptVisiting = new Set();
 function loopInputPromptItems(node){
     if(!node?.showPrompt) return [];
@@ -6678,42 +6178,6 @@ function loopInputImageRefs(node, ctx=loopContext){
     if(!allRefs.length) return [];
     const startBase = Math.max(1, Number(node.loopStart) || 1);
     const batchSize = Math.max(1, Math.min(100, Number(node.imageBatchSize) || 1));
-    const currentIndex = Math.max(1, Number(ctx?.index || startBase) || startBase);
-    const start = Math.max(0, currentIndex - 1);
-    return allRefs.slice(start, start + batchSize);
-}
-function videoRefsFromNode(node){
-    if(!node) return [];
-    if(node.type === 'image' && node.url && mediaKindForNode(node) === 'video') return [{url:node.url, name:node.name || 'video', role:node.role || '', kind:'video'}];
-    if(node.type === 'group'){
-        return (node.items || [])
-            .map(id => nodes.find(x => x.id === id))
-            .filter(x => x?.type === 'image' && x?.url && mediaKindForNode(x) === 'video')
-            .map(vid => ({url:vid.url, name:vid.name || 'video', role:vid.role || '', kind:'video'}));
-    }
-    if(node.type === 'output'){
-        return (node.images || [])
-            .map((item, i) => ({item, i}))
-            .filter(({item}) => mediaKindForOutputItem(item) === 'video')
-            .map(({item, i}) => {
-                const url = outputUrlValue(item);
-                if(!url) return null;
-                return {url, name:outputImageName(url) || `output-${i + 1}.mp4`, kind:'video', nodeId:node.id, outputIndex:i};
-            })
-            .filter(Boolean);
-    }
-    if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node).filter(ref => ref.kind === 'video');
-    return [];
-}
-function loopInputVideoRefs(node, ctx=loopContext){
-    if(!node?.videoInput) return [];
-    const allRefs = connections
-        .filter(c => c.to === node.id)
-        .flatMap(c => videoRefsFromNode(nodes.find(n => n.id === c.from)))
-        .filter(ref => ref?.url);
-    if(!allRefs.length) return [];
-    const startBase = Math.max(1, Number(node.loopStart) || 1);
-    const batchSize = Math.max(1, Math.min(100, Number(node.videoBatchSize) || 1));
     const currentIndex = Math.max(1, Number(ctx?.index || startBase) || startBase);
     const start = Math.max(0, currentIndex - 1);
     return allRefs.slice(start, start + batchSize);
@@ -6850,7 +6314,7 @@ function ensureCanvasPromptEditor(){
                 </div>
             </header>
             <div class="prompt-editor-main">
-                <textarea class="prompt-editor-textarea" maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
+                <textarea class="prompt-editor-textarea" data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}" spellcheck="true" wrap="soft" aria-label="Prompt 文本"></textarea>
             </div>
             <footer class="prompt-editor-footer">
                 <span class="prompt-editor-count">0 / ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}</span>
@@ -8188,7 +7652,7 @@ function renderLLMBody(node){
     const wrap = document.createElement('div');
     wrap.className = 'llm-body';
     const mode = node.mode || 'node';
-    node.llmProvider = resolveChatProviderId(node.llmProvider || 'comfly');
+    node.llmProvider = resolveChatProviderId(node.llmProvider || '');
     const llmProv = node.llmProvider;
     if(llmProv === 'modelscope') node.model = node.llmMsModel || node.model;
     if(!providerChatModels(llmProv).includes(node.model)) node.model = providerChatModels(llmProv)[0] || node.model;
@@ -8233,7 +7697,7 @@ function renderLLMBody(node){
     modelSelect.onchange = e => {
         e.stopPropagation();
         node.model = e.target.value;
-        if((node.llmProvider||'comfly') === 'modelscope') node.llmMsModel = e.target.value;
+        if((node.llmProvider||'') === 'modelscope') node.llmMsModel = e.target.value;
         scheduleSave();
     };
     wrap.querySelector('.llm-sys-toggle').onclick = e => { e.stopPropagation(); node.showSystem = !node.showSystem; render(); scheduleSave(); };
@@ -8569,7 +8033,9 @@ function renderGeneratorBody(node){
         const providerModels = providerImageModels(node.apiProvider);
         if(!providerModels.includes(resolveImageModel(node.model))) node.model = providerModels[0] || '';
         node._apiResolutionUserSet = false;
-        node.resolution = defaultApiImageResolution(node.model);
+        node.resolution = isCanvasKieNode(node) ? '1k' : defaultApiImageResolution(node.model);
+        node.aspectRatio = '';
+        node.outputFormat = '';
         modelSelect.innerHTML = imageModelOptions(node.model, node.apiProvider);
         syncSizeControls();
         syncQualityControls();
@@ -8581,7 +8047,9 @@ function renderGeneratorBody(node){
         e.stopPropagation();
         node.model = e.target.value;
         node._apiResolutionUserSet = false;
-        if(node.resolution !== 'custom') node.resolution = defaultApiImageResolution(node.model);
+        if(node.resolution !== 'custom') node.resolution = isCanvasKieNode(node) ? '1k' : defaultApiImageResolution(node.model);
+        node.aspectRatio = '';
+        node.outputFormat = '';
         syncSizeControls();
         syncQualityControls();
         scheduleSave();
@@ -8589,6 +8057,17 @@ function renderGeneratorBody(node){
     const ratioSelect = wrap.querySelector('.ratio');
     const resolutionSelect = wrap.querySelector('.resolution');
     const qualitySelect = wrap.querySelector('.quality-select');
+    const formatSelect = document.createElement('select');
+    formatSelect.className = 'select-lite kie-output-format';
+    formatSelect.title = '输出格式';
+    formatSelect.hidden = true;
+    qualitySelect.before(formatSelect);
+    formatSelect.onchange = e => { e.stopPropagation(); node.outputFormat = e.target.value; scheduleSave(); };
+    const legacyRatioOptions = ratioSelect.innerHTML;
+    const legacyResolutionOptions = resolutionSelect.innerHTML;
+    let loadingKieKey = '';
+    let showingKieControls = false;
+
     const customRatioRow = wrap.querySelector('.custom-ratio-row');
     const customSizeRow = wrap.querySelector('.custom-size-row');
     const customRatioWInput = wrap.querySelector('.custom-ratio-w-input');
@@ -8598,6 +8077,7 @@ function renderGeneratorBody(node){
     const fitSizeBtn = wrap.querySelector('.fit-size-btn');
     const referenceImages = ordered.flatMap(src => src.refs || []);
     const syncQualityControls = () => {
+        qualitySelect.hidden = isCanvasKieNode(node);
         qualitySelect.disabled = false;
         if(!['auto','low','medium','high'].includes(String(node.quality || 'auto'))) node.quality = 'auto';
         qualitySelect.value = node.quality || 'auto';
@@ -8644,6 +8124,38 @@ function renderGeneratorBody(node){
         } catch(_) {}
     };
     const syncSizeControls = () => {
+        if(isCanvasKieNode(node)){
+            showingKieControls = true;
+            customRatioRow.style.display = 'none';
+            customSizeRow.style.display = 'none';
+            syncQualityControls();
+            const model = resolveImageModel(node.model);
+            const schema = KieImageParams.peek(node.apiProvider, model);
+            if(!schema){
+                ratioSelect.disabled = resolutionSelect.disabled = true;
+                const key = `${node.apiProvider}:${model}`;
+                if(loadingKieKey !== key){
+                    loadingKieKey = key;
+                    KieImageParams.load(node.apiProvider, model).then(() => {
+                        if(`${node.apiProvider}:${resolveImageModel(node.model)}` === key) syncSizeControls();
+                    }).catch(() => { ratioSelect.title = 'Kie 参数加载失败，生成时将重试'; })
+                        .finally(() => { if(loadingKieKey === key) loadingKieKey = ''; });
+                }
+                return;
+            }
+            const value = KieImageParams.normalize(schema, canvasKieValues(node));
+            node.aspectRatio = value.aspect_ratio;
+            node.resolution = value.resolution.toLowerCase();
+            node.outputFormat = value.output_format;
+            KieImageParams.syncSelects(schema, value, {aspect_ratio:ratioSelect, resolution:resolutionSelect, output_format:formatSelect});
+            return;
+        }
+        if(showingKieControls){
+            ratioSelect.innerHTML = legacyRatioOptions;
+            resolutionSelect.innerHTML = legacyResolutionOptions;
+            showingKieControls = false;
+        }
+        formatSelect.hidden = true;
         normalizeApiNodeSizeChoice(node);
         const autoOption = resolutionSelect.querySelector('option[value="auto"]');
         if(autoOption) autoOption.disabled = !isGptImageAutoSizeModel(resolveImageModel(node.model));
@@ -8679,6 +8191,10 @@ function renderGeneratorBody(node){
     ratioSelect.onclick = e => e.stopPropagation();
     ratioSelect.onchange = e => {
         e.stopPropagation();
+        if(isCanvasKieNode(node)){
+            node.aspectRatio = e.target.value;
+            syncSizeControls(); scheduleSave(); return;
+        }
         node.ratio = e.target.value;
         normalizeApiNodeSizeChoice(node);
         if(node.ratio !== 'custom' && node.ratio !== 'source') {
@@ -8697,7 +8213,7 @@ function renderGeneratorBody(node){
     resolutionSelect.onclick = e => e.stopPropagation();
     resolutionSelect.onchange = e => {
         e.stopPropagation();
-        node.resolution = e.target.value;
+        node.resolution = isCanvasKieNode(node) ? e.target.value.toLowerCase() : e.target.value;
         node._apiResolutionUserSet = true;
         if(node.resolution === 'custom') {
             node.ratio = '';
@@ -9068,18 +8584,6 @@ function miniMaxUniqueRefs(refs=[]){
         seen.add(key);
         return true;
     });
-}
-function miniMaxRefSummary(refs=[]){
-    const counts = refs.reduce((map, ref) => {
-        const kind = mediaKindForRef(ref);
-        map[kind] = (map[kind] || 0) + 1;
-        return map;
-    }, {});
-    const parts = [];
-    if(counts.image) parts.push(`${counts.image} 图`);
-    if(counts.video) parts.push(`${counts.video} 视频`);
-    if(counts.audio) parts.push(`${counts.audio} 音频`);
-    return parts.join(' · ') || 'No refs';
 }
 function miniMaxEnsureSegment(node){
     node.minimaxEngine = miniMaxEngine(node);
@@ -9695,6 +9199,8 @@ function validComfyWorkflowName(name){
     return hasComfyWorkflow(name) ? name : (comfyWorkflows[0]?.name || '');
 }
 function pruneMissingComfyWorkflows(){
+    // 只有拿到过一次完整的工作流列表，才能判断“工作流已被删除”；否则会把拉取失败当成全部删除（A2）。
+    if(!comfyWorkflowsLoaded) return;
     let changed = false;
     nodes.filter(n => n.type === 'comfy').forEach(node => {
         if(node.comfyWorkflow && !hasComfyWorkflow(node.comfyWorkflow)){
@@ -9723,10 +9229,6 @@ async function ensureComfyWorkflow(name){
 }
 function validRunningHubWorkflowId(workflowId){
     return String(workflowId || '').trim();
-}
-function currentRunningHubWorkflow(node){
-    const workflowId = validRunningHubWorkflowId(node.workflowId || '');
-    return runningHubWorkflowCache[workflowId] || null;
 }
 async function ensureRunningHubWorkflow(workflowId){
     workflowId = validRunningHubWorkflowId(workflowId);
@@ -10757,101 +10259,6 @@ function bindRhParamControls(container, node){
         };
     });
 }
-async function rhFetchAppInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return;
-    if(!String(node.webappId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWebappId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const res = await fetch(`/api/runninghub/app-info?webappId=${encodeURIComponent(node.webappId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        node.rhAppInfo = data.data || {};
-        node.rhParams = node.rhParams || {};
-        (node.rhAppInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhFetchWorkflowInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return false;
-    if(!String(node.workflowId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWorkflowId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const saved = await ensureRunningHubWorkflow(node.workflowId.trim());
-        const res = await fetch(`/api/runninghub/workflow-info?workflowId=${encodeURIComponent(node.workflowId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        const info = data.data || {};
-        const savedFields = Array.isArray(saved?.fields) ? saved.fields : [];
-        const mergedFields = savedFields.length
-            ? savedFields
-            : Array.isArray(info.nodeInfoList) ? info.nodeInfoList : [];
-        node.rhWorkflowInfo = {
-            workflowId:node.workflowId.trim(),
-            nodeInfoList:mergedFields,
-            raw:info.raw || null
-        };
-        node.rhParams = node.rhParams || {};
-        (node.rhWorkflowInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhImportWorkflowJson(nodeId, file){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || !file) return;
-    try {
-        const text = await file.text();
-        const json = JSON.parse(text);
-        const nodeInfoList = rhWorkflowNodeInfoList(json);
-        if(!nodeInfoList.length) throw new Error(tr('canvas.rhWorkflowJsonInvalid'));
-        node.rhMode = 'workflow';
-        node.rhWorkflowInfo = {fileName:file.name || 'api.json', nodeInfoList};
-        node.rhParams = node.rhParams || {};
-        nodeInfoList.forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        render();
-        scheduleSave();
-    } catch(err) {
-        alert(err.message || tr('canvas.rhWorkflowJsonInvalid'));
-    }
-}
 async function rhUploadValueIfNeeded(value, node=null){
     const text = String(value || '').trim();
     if(!text) return '';
@@ -11445,7 +10852,7 @@ function uniqueCanvasReferenceImages(refs=[]){
     });
 }
 async function canvasReferenceLimitForNode(node, {refresh=false}={}){
-    const providerId = resolveImageProviderId(node?.apiProvider || 'comfly');
+    const providerId = resolveImageProviderId(node?.apiProvider || '');
     const model = resolveImageModel(node?.model || '');
     const key = `${providerId}:${model}`;
     if(!refresh && canvasReferenceCapabilityCache.has(key)) return canvasReferenceCapabilityCache.get(key);
@@ -11779,29 +11186,6 @@ async function beginCanvasReferencePicker(targetNodeId){
     canvasReferencePicker.limit = limit;
     updateCanvasReferencePickerBanner();
 }
-function mediaRefsFromNode(node){
-    if(!node) return [];
-    if(node.type === 'image' && node.url){
-        const kind = mediaKindForNode(node);
-        return [{url:node.url, name:node.name || kind, role:node.role || '', kind}];
-    }
-    if(node.type === 'group'){
-        return (node.items || [])
-            .map(id => nodes.find(x => x.id === id))
-            .filter(x => x?.type === 'image' && x?.url)
-            .map(item => ({url:item.url, name:item.name || mediaKindForNode(item), role:item.role || '', kind:mediaKindForNode(item)}));
-    }
-    if(node.type === 'output'){
-        return (node.images || []).map((item, i) => {
-            const url = outputUrlValue(item);
-            if(!url) return null;
-            const kind = mediaKindForOutputItem(item);
-            return {url, name:outputImageName(url) || `output-${i + 1}`, kind, nodeId:node.id, outputIndex:i};
-        }).filter(Boolean);
-    }
-    if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node);
-    return [];
-}
 function generatorSources(gen){
     return connections.filter(c => c.to === gen.id && c.data?.origin !== 'canvas-reference').map(c => nodes.find(n => n.id === c.from)).filter(Boolean).map(n => {
         if(n.type === 'output' && (n.images||[]).length){
@@ -11954,10 +11338,31 @@ function refreshGeneratorInputViews(){
         }
     });
 }
+async function validateCanvasModelPrompt(node, prompt, refs, opts={}){
+    try {
+        const providerProblem = canvasProviderProblem(node.apiProvider, imageApiProviders());
+        if(providerProblem) throw new Error(providerProblem);
+        await ModelPromptLimits.validate({provider_id:resolveImageProviderId(node.apiProvider || ''), model:resolveImageModel(node.model), prompt:prompt || 'Edit the reference images.', reference_images:refs});
+        delete node.runValidation;
+        return true;
+    } catch(error){
+        node.runStatus = 'failed';
+        node.runError = error.message;
+        node.runValidation = ModelPromptLimits.details(error);
+        addGenerationLog({run:runSnapshot(node, '', []), error:error.message});
+        refreshRunNodes(node, null);
+        scheduleSave();
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, '输入校验失败');
+        return false;
+    }
+}
 async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    const preflightSources = orderedSources(gen, generatorSources(gen));
+    if(!await validateCanvasModelPrompt(gen, preflightSources.map(src => src.prompt).filter(Boolean).join('\n\n'), imageRefsOnly(preflightSources.flatMap(src => src.refs || [])), opts)) return;
     let canvasRefs = [];
     try {
         canvasRefs = await materializeCanvasReferenceEdges(gen.id);
@@ -11977,16 +11382,23 @@ async function runGenerator(genId, opts={}){
         showErrorModal(error.message, '参考图超出上限');
         return;
     }
+    let kieFields;
+    try { kieFields = await canvasKieRequestFields(gen, refs.length); }
+    catch(error){
+        if(opts.cascade) throw error;
+        showErrorModal(error.message, 'Kie 参数无效'); return;
+    }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
     const payload = {
         prompt: prompt || 'Edit the reference images.',
-        provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
+        provider_id:resolveImageProviderId(gen.apiProvider || ''),
         model:resolveImageModel(gen.model),
         size:await generatorSizeForRun(gen, refs),
         aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
         resolution:gen.resolution || '',
+        ...kieFields,
         reference_images:refs
     };
     const quality = normalizedImageQuality(gen.quality);
@@ -12216,62 +11628,6 @@ async function runMidjourneyModal(nodeId, maskRef){
         showErrorModal(node.runError, 'Midjourney');
     }
 }
-async function runGeneratorLegacy(genId, opts={}){
-    const gen = nodes.find(n => n.id === genId);
-    if(!gen || (gen.running && !opts.cascade)) return;
-    const sources = orderedSources(gen, generatorSources(gen));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
-    if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
-    const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
-    let out = outputForNode(gen, 460);
-    const pendingIds = Array.from({length:count}, () => uid('p'));
-    const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
-    const requestSize = await generatorSizeForRun(gen, refs);
-    if(out) out._pending = [...(out._pending||[]), ...pendingIds.map(id => makePendingForRun(id, run, gen, {refs, requestSize}))];
-    if(!opts.cascade){
-        gen.running = true;
-        refreshRunNodes(gen, out);
-        setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
-    }
-    else refreshRunNodes(gen, out);
-    try {
-        const payload = {
-            prompt: prompt || 'Edit the reference images.',
-            provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
-            model:resolveImageModel(gen.model),
-            size:requestSize,
-            aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
-            resolution:['1k','2k','4k'].includes(gen.resolution) ? gen.resolution : '',
-            reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
-        };
-        const quality = normalizedImageQuality(gen.quality);
-        if(quality) payload.quality = quality;
-        const results = await Promise.all(Array.from({length:count}, () => fetch('/api/online-image', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(payload)
-        }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('canvas.generationFailed'))); return r.json(); })));
-        const images = results.flatMap(result => result.images || []);
-        const metas = collectRunMetas(out, pendingIds);
-        run.request = results[0] ? requestMetaFromResult(results[0]) : {};
-        if(out) out._pending = (out._pending||[]).filter(p => !pendingIds.includes(p.id));
-        appendOutputImages(out, images, refs[0], metas);
-        mergeGeneratedOutputs(gen, images, Boolean(opts.cascade));
-        addGenerationLog({run, outputs:images, runMs:Math.max(...metas.map(m => m.runMs || 0), 0)});
-        gen.runStatus = 'done'; gen.runError = '';
-        refreshRunNodes(gen, out);
-        scheduleSave();
-    } catch(err) {
-        const metas = collectRunMetas(out, pendingIds);
-        addGenerationLog({run, outputs:[], runMs:Math.max(...metas.map(m => m.runMs || 0), 0), error:err.message || String(err)});
-        if(out) out._pending = (out._pending||[]).filter(p => !pendingIds.includes(p.id));
-        gen.runStatus = 'failed'; gen.runError = err.message || String(err);
-        refreshRunNodes(gen, out);
-        if(opts.cascade) throw err;
-        showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
-    }
-}
 async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
@@ -12286,6 +11642,12 @@ async function runVideoNode(nodeId, opts={}){
     if(node.useFrameRoles && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
     if(node.useFrameRoles && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
+    const providerProblem = canvasProviderProblem(node.apiProvider, videoApiProviders());
+    if(providerProblem){
+        if(opts.cascade) throw new Error(providerProblem);
+        showErrorModal(providerProblem, tr('canvas.providerProblemTitle'));
+        return;
+    }
     let out = outputForNode(node, 460);
     const pendingId = uid('p');
     const run = runSnapshot(node, prompt, refs);
@@ -12298,7 +11660,7 @@ async function runVideoNode(nodeId, opts={}){
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
                 prompt,
-                provider_id:resolveVideoProviderId(node.apiProvider || 'comfly'),
+                provider_id:resolveVideoProviderId(node.apiProvider || ''),
                 model:node.model || 'veo3-fast',
                 duration:Number(node.duration || 5),
                 aspect_ratio:node.aspectRatio || '16:9',
@@ -12483,7 +11845,7 @@ async function runMiniMaxRunningHub(node, media, options={}){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)
     }, {cascadeTargetId}).then(async r => {
-        const data = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+        const data = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
         if(!r.ok || data.success === false) throw miniMaxRunningHubPayloadError('提交', data, 'RunningHub 工作流提交失败', {
             endpoint:'/api/runninghub/workflow-submit',
             workflowId,
@@ -12498,7 +11860,7 @@ async function runMiniMaxRunningHub(node, media, options={}){
         if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
         await sleep(2500);
         const data = await cascadeFetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${rhUseWallet(rhNode) ? '1' : '0'}`, {}, {cascadeTargetId}).then(async r => {
-            const json = await r.clone().json().catch(async () => ({detail:await r.text().catch(() => '')}));
+            const json = await r.clone().json().catch(async () => ({detail:ApiErrors.fromText(await r.text().catch(() => ''), '')}));
             if(!r.ok || json.success === false) throw miniMaxRunningHubPayloadError('查询', json, 'RunningHub 查询失败', {taskId, workflowId});
             return json.data || json;
         });
@@ -13409,8 +12771,11 @@ async function runComfyNode(nodeId, opts={}){
     }
 }
 async function callCanvasLLM(node, message, messages=[], options={}){
-    const llmProv = resolveChatProviderId(node.llmProvider || 'comfly');
+    const providerProblem = canvasProviderProblem(node.llmProvider, chatApiProviders());
+    if(providerProblem) throw new Error(providerProblem);
+    const llmProv = resolveChatProviderId(node.llmProvider || '');
     const model = resolveChatModel(node.model || node.llmMsModel, llmProv);
+    if(!model) throw new Error(tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加');
     const images = llmInputImages(node);
     const videos = llmInputVideos(node);
     const result = await cascadeFetch('/api/canvas-llm', {
@@ -13588,53 +12953,6 @@ async function runLimitedCascadeRounds(rounds, limit, runner){
 }
 function canvasRunTypes(){
     return ['generator','midjourney','msgen','comfy','ltxDirector','llm','video','rh','minimax'];
-}
-function canvasWorkflowEdges(){
-    const runTypes = canvasRunTypes();
-    const direct = [];
-    connections.forEach(c => {
-        const from = nodes.find(n => n.id === c.from);
-        const to = nodes.find(n => n.id === c.to);
-        if(!from || !to || !runTypes.includes(from.type)) return;
-        if(runTypes.includes(to.type)){
-            direct.push([from.id, to.id]);
-            return;
-        }
-        if(to.type === 'output'){
-            connections.filter(cc => cc.from === to.id).forEach(cc => {
-                const next = nodes.find(n => n.id === cc.to);
-                if(next && runTypes.includes(next.type)) direct.push([from.id, next.id]);
-            });
-        }
-    });
-    return direct;
-}
-function computeConnectedWorkflowOrder(anchorId){
-    const anchor = nodes.find(n => n.id === anchorId);
-    const runTypes = canvasRunTypes();
-    if(!anchor || !runTypes.includes(anchor.type)) return [];
-    const edges = canvasWorkflowEdges();
-    const connected = new Set([anchorId]);
-    let changed = true;
-    while(changed){
-        changed = false;
-        edges.forEach(([from, to]) => {
-            if(connected.has(from) && !connected.has(to)){ connected.add(to); changed = true; }
-            if(connected.has(to) && !connected.has(from)){ connected.add(from); changed = true; }
-        });
-    }
-    const order = [];
-    const seen = new Set();
-    const visit = id => {
-        if(seen.has(id)) return;
-        seen.add(id);
-        edges.filter(([, to]) => to === id).forEach(([from]) => {
-            if(connected.has(from)) visit(from);
-        });
-        if(connected.has(id)) order.push(id);
-    };
-    nodes.filter(n => connected.has(n.id) && runTypes.includes(n.type)).forEach(n => visit(n.id));
-    return order;
 }
 async function runCanvasGenerate(nodeId){
     const node = nodes.find(n => n.id === nodeId);
@@ -14035,9 +13353,9 @@ function requestMetaFromResult(result={}){
 }
 function runPlatformLabel(run){
     const node = run?.node || {};
-    if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
+    if(run?.nodeType === 'generator') return providerById(node.apiProvider || '')?.name || node.apiProvider || 'API';
     if(run?.nodeType === 'msgen') return 'Modelscope';
-    if(run?.nodeType === 'video') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
+    if(run?.nodeType === 'video') return providerById(node.apiProvider || '')?.name || node.apiProvider || 'Video';
     if(run?.nodeType === 'comfy') return 'ComfyUI';
     if(run?.nodeType === 'ltxDirector') return 'ComfyUI';
     return run?.nodeType || 'Generate';
@@ -14134,8 +13452,9 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:(outputs || []).filter(Boolean),
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
-        error:error ? String(error) : '',
+        error:ApiErrors.forLog(error),
     };
+    ModelPromptLimits.sanitizeHistory(entry, error);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
 }
 function renderCanvasLog(){
@@ -14170,13 +13489,13 @@ function renderCanvasLog(){
         return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''} ${deleting ? 'is-deleting' : ''}" data-canvas-log-id="${escapeAttr(log.id || '')}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.failureKind === 'validation' ? '输入校验失败' : log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${taskLabel ? `<span class="log-chip">${escapeHtml(taskLabel)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
-                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
+                ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.errorMessage || log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
                 <div class="log-actions">
                     <button type="button" data-log-delete="record" ${deleting ? 'disabled aria-busy="true"' : ''}><i data-lucide="list-x"></i><span>${escapeHtml(deleting ? tr('canvas.logDeleting') : tr('canvas.deleteLogRecordOnly'))}</span></button>
@@ -14313,12 +13632,13 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
+    await ModelPromptLimits.validate(payload);
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
     }, options);
-    if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
+    if(!res.ok) throw await ModelPromptLimits.responseError(res);
     return res.json();
 }
 async function createCanvasComfyTask(payload, options={}){
@@ -14359,7 +13679,7 @@ function providerIdForPending(pending){
         || pending?.run?.request?.provider_id
         || pending?.run?.node?.apiProvider
         || pending?.run?.node?.provider_id
-        || 'comfly';
+        || '';
 }
 function completeRecoverPendingOutput(out, pending, result){
     if(!out || !pending || !result) return;
@@ -14427,6 +13747,13 @@ async function queryRecoverPendingOutput(pendingId){
     }
 }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+// C9：服务重启后，上游已成功但本地结果未保存的任务是 result_recovery_required。
+// 复用实例模式的恢复接口：只查询原任务、不重新提交；仍未完成时交给“查询结果”按钮。
+async function recoverCanvasImageTask(taskId, cascadeTargetId=''){
+    const res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}/refresh`, {method:'POST'}, {cascadeTargetId});
+    if(!res.ok) return {status:'failed', error:await responseErrorMessage(res, tr('canvas.generationFailed'))};
+    return res.json();
+}
 async function pollCanvasImageTask(taskId, options={}){
     if(!taskId) return 'failed';
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
@@ -14443,12 +13770,22 @@ async function pollCanvasImageTask(taskId, options={}){
                 throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
             }
             const data = await res.json();
+            if(data.status === 'result_recovery_required'){
+                const recovered = await recoverCanvasImageTask(taskId, cascadeTargetId);
+                if(recovered.status === 'succeeded'){
+                    completeCanvasImageTask(taskId, recovered.result || {});
+                    return 'succeeded';
+                }
+                failCanvasImageTask(taskId, recovered.error || data.error || tr('canvas.generationFailed'), {...data, ...recovered});
+                return 'failed';
+            }
             if(data.status === 'succeeded'){
                 completeCanvasImageTask(taskId, data.result || {});
                 return 'succeeded';
             }
             if(data.status === 'failed'){
-                failCanvasImageTask(taskId, data.error || tr('canvas.generationFailed'), data);
+                const error = ModelPromptLimits.fromData(data);
+                failCanvasImageTask(taskId, error.message, data);
                 return 'failed';
             }
             await sleep(1800);
@@ -14473,8 +13810,13 @@ async function waitCanvasImageTaskResult(taskId, options={}){
             throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
         }
         const data = await res.json();
+        if(data.status === 'result_recovery_required'){
+            const recovered = await recoverCanvasImageTask(taskId, cascadeTargetId);
+            if(recovered.status === 'succeeded') return recovered.result || {};
+            throw new Error(recovered.error || data.error || tr('canvas.generationFailed'));
+        }
         if(data.status === 'succeeded') return data.result || {};
-        if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
+        if(data.status === 'failed') throw ModelPromptLimits.fromData(data);
         await sleep(1800);
     }
 }
@@ -14850,6 +14192,7 @@ workflowImportDropZone?.addEventListener('drop', event => {
     else setStatus('请拖入 JSON 或 ZIP 工作流文件');
 });
 canvasAssetCloseBtn?.addEventListener('click', () => toggleCanvasAssetLibrary(false));
+canvasAssetManageBtn?.addEventListener('click', openAssetManager);
 canvasAssetLibrarySelect?.addEventListener('change', () => {
     activeCanvasAssetLibraryId = canvasAssetLibrarySelect.value || '';
     activeCanvasAssetCategoryId = '';
@@ -14942,7 +14285,6 @@ canvasAssetDropZone?.addEventListener('drop', async event => {
         showErrorModal(err.message || '保存资产失败', '保存资产失败');
     }
 });
-gateAssetManagerBtn?.addEventListener('click', openAssetManager);
 document.querySelectorAll('[data-manager-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
         assetManagerTab = btn.dataset.managerTab || 'assets';
@@ -15515,43 +14857,6 @@ function finishSelection(event=null){
 function renderSelectionHub(){
     selectionHub.innerHTML = '';
     selectionHub.classList.remove('open');
-}
-function startSelectionLink(e, kind){
-    e.preventDefault();
-    e.stopPropagation();
-    const p = screenToWorld(e.clientX, e.clientY);
-    tempLink = {from:`selection:${kind}`, x1:p.x, y1:p.y, x2:p.x, y2:p.y};
-    window.onmousemove = e2 => { const next = screenToWorld(e2.clientX, e2.clientY); tempLink.x2 = next.x; tempLink.y2 = next.y; renderLinks(); };
-    window.onmouseup = e2 => {
-        const targetPort = nearestPort(e2.clientX, e2.clientY, 'in');
-        const target = targetPort?.closest('.generator-node');
-        if(target) connectSelectionToGenerator(kind, target.dataset.id);
-        tempLink = null;
-        window.onmousemove = null;
-        window.onmouseup = null;
-        render();
-        scheduleSave();
-    };
-}
-function connectSelectionToGenerator(kind, genId){
-    const ids = [...selected];
-    let source = null;
-    if(kind === 'images'){
-        const imgs = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' && n.url);
-        if(!imgs.length) return;
-        const box = nodeBounds(imgs.map(n => n.id));
-        source = {id:uid('grp'), type:'group', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:imgs.map(n => n.id)};
-    } else {
-        const prompts = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'prompt');
-        if(!prompts.length) return;
-        const box = nodeBounds(prompts.map(n => n.id));
-        source = {id:uid('pg'), type:'promptGroup', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:prompts.map(n => n.id)};
-    }
-    nodes.push(source);
-    connections.push({id:uid('c'), from:source.id, to:genId});
-    selected.clear();
-    selected.add(source.id);
-    syncGeneratorInputs();
 }
 
 function pushUndo(){

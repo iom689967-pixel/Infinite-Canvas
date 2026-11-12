@@ -16,7 +16,7 @@ class LLMTextLengthLimitTests(unittest.TestCase):
         self.assertEqual(len(payload.message), length)
 
     def test_canvas_llm_message_accepts_requested_boundaries(self):
-        for length in (19_999, 20_001, 50_000, 99_999, 100_000):
+        for length in (19_999, 20_000, 20_001, 50_000, 99_999, 100_000):
             with self.subTest(length=length):
                 self.assert_canvas_message_accepted(length)
 
@@ -54,7 +54,7 @@ class LLMTextLengthLimitTests(unittest.TestCase):
                 match = re.search(r"const PROMPT_TEXT_MAX_LENGTH = (?P<limit>\d+);", source)
                 self.assertIsNotNone(match)
                 self.assertEqual(match.group("limit"), "100000")
-                self.assertIn('maxlength="${PROMPT_TEXT_MAX_LENGTH}"', source)
+                self.assertIn('data-prompt-maxlength="${PROMPT_TEXT_MAX_LENGTH}"', source)
 
 
 if __name__ == "__main__":

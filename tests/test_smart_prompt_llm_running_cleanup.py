@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SMART = (ROOT / "static/js/smart-canvas.js").read_text(encoding="utf-8")
+# responseErrorMessage 依赖页面先加载的 ApiErrors（static/js/api-errors.js）
+API_ERRORS = (ROOT / "static/js/api-errors.js").read_text(encoding="utf-8")
 COMMON_I18N = (ROOT / "static/js/i18n/common.js").read_text(encoding="utf-8")
 SMART_I18N = (ROOT / "static/js/i18n/smart-canvas.js").read_text(encoding="utf-8")
 
@@ -40,7 +42,7 @@ def function_source(name):
 
 class SmartPromptLLMRunningCleanupTests(unittest.TestCase):
     def run_case(self, case):
-        functions = "\n".join(
+        functions = API_ERRORS + "\n" + "\n".join(
             function_source(name)
             for name in (
                 "apiErrorMessage",

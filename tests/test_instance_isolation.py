@@ -302,7 +302,8 @@ class TwoProcessIsolationTests(unittest.TestCase):
         b_list = self.ok("B", "GET", "/api/canvases")["canvases"]
         self.assertNotIn(canvas["id"], [c["id"] for c in b_list])
         for method in ("GET", "DELETE", "PUT"):
-            kwargs = {"json": {"title": "attack"}} if method == "PUT" else {}
+            # 带上合法的请求体（含基线），确保请求真的走到画布查找这一步，而不是在参数校验处 422
+            kwargs = {"json": {"title": "attack", "nodes": [], "base_updated_at": canvas["updated_at"]}} if method == "PUT" else {}
             self.assertEqual(self.request("B", method, "/api/canvases/"+canvas["id"], **kwargs).status_code, 404)
         self.assertEqual(self.ok("A", "GET", "/api/canvases/"+canvas["id"])["canvas"]["title"], "only-A")
 
@@ -331,15 +332,17 @@ class TwoProcessIsolationTests(unittest.TestCase):
     def test_concurrent_saves_use_separate_files(self):
         canvases = {name: self.canvas(name, name) for name in ("A", "B")}
         def save(name):
+            base = canvases[name]["updated_at"]
             for i in range(5):
-                self.ok(name, "PUT", "/api/canvases/"+canvases[name]["id"],
-                        json={"title": f"{name}-{i}", "nodes": [{"id": name}]})
+                # PUT 必须带基线；标题只能走 /meta，PUT 里的 title 会被忽略
+                base = self.ok(name, "PUT", "/api/canvases/"+canvases[name]["id"],
+                               json={"title": f"{name}-{i}", "nodes": [{"id": name, "i": i}], "base_updated_at": base})["updated_at"]
         with ThreadPoolExecutor(2) as pool:
             list(pool.map(save, ("A", "B")))
         for name in ("A", "B"):
             stored = json.loads((self.roots[name] / f"data/canvases/{canvases[name]['id']}.json").read_text())
-            self.assertEqual(stored["title"], f"{name}-4")
-            self.assertEqual(stored["nodes"], [{"id": name}])
+            self.assertEqual(stored["title"], name)
+            self.assertEqual(stored["nodes"], [{"id": name, "i": 4}])
 
     def test_upload_static_preview_and_download_do_not_cross_instances(self):
         image = BytesIO()
@@ -441,7 +444,7 @@ class TwoProcessIsolationTests(unittest.TestCase):
         before = (self.roots["B"] / "assets/output/log-cleanup.png").read_bytes()
         canvas = self.canvas("A", "log-cleanup")
         self.ok("A", "PUT", "/api/canvases/"+canvas["id"],
-                json={"logs": [{"id": "log-one", "outputs": ["/assets/output/log-cleanup.png"]}]})
+                json={"logs": [{"id": "log-one", "outputs": ["/assets/output/log-cleanup.png"]}], "base_updated_at": canvas["updated_at"]})
         result = self.ok("A", "POST", "/api/canvases/"+canvas["id"]+"/logs/delete",
                          json={"log_id": "log-one", "delete_unreferenced_media": True})
         self.assertIn("log-cleanup.png", result["removed_files"])
@@ -459,6 +462,8 @@ class TwoProcessIsolationTests(unittest.TestCase):
                 if key not in {"PROGRAM_ROOT", "STATIC_DIR", "INSTANCE_ID", "pid"}:
                     self.assertTrue(Path(value).is_relative_to(self.roots[name]), (key, value))
             config = self.ok(name, "GET", "/api/config")
+            self.assertRegex(config.get("config_version", ""), r"^[0-9a-f]{16}$")  # A6：实例模式同样带版本号
+            self.assertEqual(set(config), {"api_providers", "config_version"})  # 第六批：不再附带全局模型列表
             self.assertNotIn("has_api_key", config)
             self.assertNotIn("has_ms_key", config)
             self.assertNotIn("base_url", json.dumps(config))

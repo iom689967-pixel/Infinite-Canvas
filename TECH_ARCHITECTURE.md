@@ -109,7 +109,11 @@ FastAPI main.py（大型单体后端）
 
 - 文件：`data/canvases/<id>.json`。
 - 自动保存：前端 debounce 约 500 ms。
-- 乐观并发：请求携带 `base_updated_at`；Smart 在 409 时尝试按节点 ID 和图片并集合并后重存。
+- 保存接口 `PUT /api/canvases/{id}`：
+  - `base_updated_at` **必填且大于 0**，填的是编辑器上次从服务器拿到的 `updated_at`；缺少或为 0 时返回 422，不再跳过冲突检查直接覆盖。
+  - 只更新请求里实际提供的字段（`nodes`、`connections`、`viewport`、`logs`、`settings`），没提供的保持原值。
+  - **不修改标题和图标**：请求里带了 `title`、`icon` 也会被忽略。改名和改图标只能走 `POST /api/canvases/{id}/meta`，它不推进 `updated_at`，所以不会改变列表排序。
+  - 成功时只返回 `{"updated_at": n}`；基线落后于服务器时返回 409，`detail` 里只有 `message` 和 `updated_at`。编辑器收到 409 后自己 `GET` 最新画布，三方合并后再保存（两种画布都是，合并规则在 `static/js/canvas-merge.js`）。
 - 软删除：进入回收站，默认保留 30 天；purge 才是硬删除。
 - Undo/Redo：浏览器内存快照，不跨刷新持久化。
 - 普通画布 viewport 有本地缓存倾向；智能画布明确把 viewport 写回服务器 payload。

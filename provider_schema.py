@@ -13,7 +13,7 @@ class ApiProviderPayload(BaseModel):
     base_url: str = ""
     protocol: str = "openai"
     image_request_mode: str = "openai"
-    image_edit_route: str = "general"
+    image_request_mode_manual: bool = False
     image_generation_endpoint: str = ""
     image_edit_endpoint: str = ""
     enabled: bool = True
