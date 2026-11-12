@@ -485,7 +485,6 @@ const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
 const LTX_DIRECTOR_WORKFLOW = 'LTXDirectorv2-API.json';
 const LTX_DIRECTOR_WF_NODE = '46';
 const LTX_DIRECTOR_SEED_NODE = '94:28';
-const LTX_SEGMENT_COLORS = ['#e07b3a', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#f59e0b'];
 
 const SIZE_MAP = {
     square: { '1k':'1024x1024', '2k':'2048x2048', '4k':'4096x4096' },
@@ -617,15 +616,6 @@ function providerSelectOptions(selectedId, providers){
         : '';
     if(!providers.length && !stale) return `<option value="" disabled selected>${escapeHtml(tr('canvas.noApiProviders'))}</option>`;
     return stale + providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
-}
-function isRunningHubProvider(provider){
-    const id = String(provider?.id || '').trim().toLowerCase();
-    const protocol = String(provider?.protocol || '').trim().toLowerCase();
-    const name = String(provider?.name || '').trim().toLowerCase();
-    return id === 'runninghub' || protocol === 'runninghub' || name === 'runninghub' || id === 'rh';
-}
-function normalizeProviderId(value){
-    return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40);
 }
 function imageApiProviders(){
     return apiProviders.filter(p => p.id !== 'modelscope' && p.enabled !== false && (p.image_models || []).length);
@@ -790,9 +780,6 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
     errorMessage.textContent = message || title;
     errorModal.classList.add('open');
     refreshIcons();
-}
-function apiErrorMessage(data, fallback='请求失败'){
-    return ApiErrors.message(data, fallback);
 }
 async function responseErrorMessage(response, fallback='请求失败'){
     // 只取 detail；不是 JSON 时截断，不把整段响应文本放进提示和日志
@@ -1666,16 +1653,6 @@ try {
         }
     };
 } catch(e) { /* 不支持 BroadcastChannel 的旧浏览器忽略 */ }
-function msChatModelOptions(selected){
-    // 单一数据源：从 API 设置里 modelscope 平台的 chat_models 取
-    const msProvider = apiProviders.find(p => p.id === 'modelscope');
-    const list = uniqueModels(msProvider?.chat_models || []);
-    if(!list.length){
-        return `<option value="" disabled selected>${tr('canvas.noModelsHint') || '暂无模型，请到 API 设置添加'}</option>`;
-    }
-    const sel = selected && list.includes(selected) ? selected : list[0];
-    return list.map(m => `<option value="${escapeHtml(m)}" ${m === sel ? 'selected' : ''}>${escapeHtml(m.split('/').pop().split(':')[0])}</option>`).join('');
-}
 async function touchCanvasOpened(id){
     if(!id) return null;
     try {
@@ -2255,18 +2232,6 @@ function addRhNode(point){
         inputs:[],
         running:false
     });
-}
-function defaultLTXSegment(start=0, length=120){
-    return {
-        id:uid('ltxseg'),
-        type:'text',
-        prompt:'',
-        start,
-        length,
-        color:LTX_SEGMENT_COLORS[0],
-        strength:1,
-        imageRef:null
-    };
 }
 function addLTXDirectorNode(point){
     const p = point || defaultPoint(200, 0);
@@ -3784,21 +3749,6 @@ function setImageNodeFromOutput(nodeId, url){
     node.url = url;
     node.name = outputImageName(url);
     node.mediaKind = 'image';
-    render();
-    scheduleSave();
-}
-function clearImageNode(nodeId, event=null){
-    if(event){
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-    }
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || node.type !== 'image') return;
-    pushUndo();
-    node.url = '';
-    node.mediaKind = 'image';
-    node.name = '空白图片';
     render();
     scheduleSave();
 }
@@ -6143,15 +6093,6 @@ function defaultNodeSize(type){
 function loopCount(node){
     return Math.max(1, Math.min(100, Number(node?.count || 1) || 1));
 }
-function splitPromptIntoItems(text){
-    const trimmed = String(text || '').trim();
-    if(!trimmed) return [];
-    const numbered = trimmed.split(/\s*(?:^|\s)\d+\s*[.、)）．]\s+/).map(s => s.trim()).filter(Boolean);
-    if(numbered.length >= 2) return numbered;
-    const lines = trimmed.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
-    if(lines.length >= 2) return lines;
-    return [trimmed];
-}
 const loopPromptVisiting = new Set();
 function loopInputPromptItems(node){
     if(!node?.showPrompt) return [];
@@ -6236,42 +6177,6 @@ function loopInputImageRefs(node, ctx=loopContext){
     if(!allRefs.length) return [];
     const startBase = Math.max(1, Number(node.loopStart) || 1);
     const batchSize = Math.max(1, Math.min(100, Number(node.imageBatchSize) || 1));
-    const currentIndex = Math.max(1, Number(ctx?.index || startBase) || startBase);
-    const start = Math.max(0, currentIndex - 1);
-    return allRefs.slice(start, start + batchSize);
-}
-function videoRefsFromNode(node){
-    if(!node) return [];
-    if(node.type === 'image' && node.url && mediaKindForNode(node) === 'video') return [{url:node.url, name:node.name || 'video', role:node.role || '', kind:'video'}];
-    if(node.type === 'group'){
-        return (node.items || [])
-            .map(id => nodes.find(x => x.id === id))
-            .filter(x => x?.type === 'image' && x?.url && mediaKindForNode(x) === 'video')
-            .map(vid => ({url:vid.url, name:vid.name || 'video', role:vid.role || '', kind:'video'}));
-    }
-    if(node.type === 'output'){
-        return (node.images || [])
-            .map((item, i) => ({item, i}))
-            .filter(({item}) => mediaKindForOutputItem(item) === 'video')
-            .map(({item, i}) => {
-                const url = outputUrlValue(item);
-                if(!url) return null;
-                return {url, name:outputImageName(url) || `output-${i + 1}.mp4`, kind:'video', nodeId:node.id, outputIndex:i};
-            })
-            .filter(Boolean);
-    }
-    if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node).filter(ref => ref.kind === 'video');
-    return [];
-}
-function loopInputVideoRefs(node, ctx=loopContext){
-    if(!node?.videoInput) return [];
-    const allRefs = connections
-        .filter(c => c.to === node.id)
-        .flatMap(c => videoRefsFromNode(nodes.find(n => n.id === c.from)))
-        .filter(ref => ref?.url);
-    if(!allRefs.length) return [];
-    const startBase = Math.max(1, Number(node.loopStart) || 1);
-    const batchSize = Math.max(1, Math.min(100, Number(node.videoBatchSize) || 1));
     const currentIndex = Math.max(1, Number(ctx?.index || startBase) || startBase);
     const start = Math.max(0, currentIndex - 1);
     return allRefs.slice(start, start + batchSize);
@@ -8679,18 +8584,6 @@ function miniMaxUniqueRefs(refs=[]){
         return true;
     });
 }
-function miniMaxRefSummary(refs=[]){
-    const counts = refs.reduce((map, ref) => {
-        const kind = mediaKindForRef(ref);
-        map[kind] = (map[kind] || 0) + 1;
-        return map;
-    }, {});
-    const parts = [];
-    if(counts.image) parts.push(`${counts.image} 图`);
-    if(counts.video) parts.push(`${counts.video} 视频`);
-    if(counts.audio) parts.push(`${counts.audio} 音频`);
-    return parts.join(' · ') || 'No refs';
-}
 function miniMaxEnsureSegment(node){
     node.minimaxEngine = miniMaxEngine(node);
     node.workflow = node.workflow || 'MiniMax_H3.json';
@@ -9335,10 +9228,6 @@ async function ensureComfyWorkflow(name){
 }
 function validRunningHubWorkflowId(workflowId){
     return String(workflowId || '').trim();
-}
-function currentRunningHubWorkflow(node){
-    const workflowId = validRunningHubWorkflowId(node.workflowId || '');
-    return runningHubWorkflowCache[workflowId] || null;
 }
 async function ensureRunningHubWorkflow(workflowId){
     workflowId = validRunningHubWorkflowId(workflowId);
@@ -10369,101 +10258,6 @@ function bindRhParamControls(container, node){
         };
     });
 }
-async function rhFetchAppInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return;
-    if(!String(node.webappId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWebappId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const res = await fetch(`/api/runninghub/app-info?webappId=${encodeURIComponent(node.webappId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        node.rhAppInfo = data.data || {};
-        node.rhParams = node.rhParams || {};
-        (node.rhAppInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhFetchWorkflowInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return false;
-    if(!String(node.workflowId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWorkflowId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const saved = await ensureRunningHubWorkflow(node.workflowId.trim());
-        const res = await fetch(`/api/runninghub/workflow-info?workflowId=${encodeURIComponent(node.workflowId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        const info = data.data || {};
-        const savedFields = Array.isArray(saved?.fields) ? saved.fields : [];
-        const mergedFields = savedFields.length
-            ? savedFields
-            : Array.isArray(info.nodeInfoList) ? info.nodeInfoList : [];
-        node.rhWorkflowInfo = {
-            workflowId:node.workflowId.trim(),
-            nodeInfoList:mergedFields,
-            raw:info.raw || null
-        };
-        node.rhParams = node.rhParams || {};
-        (node.rhWorkflowInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhImportWorkflowJson(nodeId, file){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || !file) return;
-    try {
-        const text = await file.text();
-        const json = JSON.parse(text);
-        const nodeInfoList = rhWorkflowNodeInfoList(json);
-        if(!nodeInfoList.length) throw new Error(tr('canvas.rhWorkflowJsonInvalid'));
-        node.rhMode = 'workflow';
-        node.rhWorkflowInfo = {fileName:file.name || 'api.json', nodeInfoList};
-        node.rhParams = node.rhParams || {};
-        nodeInfoList.forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        render();
-        scheduleSave();
-    } catch(err) {
-        alert(err.message || tr('canvas.rhWorkflowJsonInvalid'));
-    }
-}
 async function rhUploadValueIfNeeded(value, node=null){
     const text = String(value || '').trim();
     if(!text) return '';
@@ -11391,29 +11185,6 @@ async function beginCanvasReferencePicker(targetNodeId){
     canvasReferencePicker.limit = limit;
     updateCanvasReferencePickerBanner();
 }
-function mediaRefsFromNode(node){
-    if(!node) return [];
-    if(node.type === 'image' && node.url){
-        const kind = mediaKindForNode(node);
-        return [{url:node.url, name:node.name || kind, role:node.role || '', kind}];
-    }
-    if(node.type === 'group'){
-        return (node.items || [])
-            .map(id => nodes.find(x => x.id === id))
-            .filter(x => x?.type === 'image' && x?.url)
-            .map(item => ({url:item.url, name:item.name || mediaKindForNode(item), role:item.role || '', kind:mediaKindForNode(item)}));
-    }
-    if(node.type === 'output'){
-        return (node.images || []).map((item, i) => {
-            const url = outputUrlValue(item);
-            if(!url) return null;
-            const kind = mediaKindForOutputItem(item);
-            return {url, name:outputImageName(url) || `output-${i + 1}`, kind, nodeId:node.id, outputIndex:i};
-        }).filter(Boolean);
-    }
-    if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node);
-    return [];
-}
 function generatorSources(gen){
     return connections.filter(c => c.to === gen.id && c.data?.origin !== 'canvas-reference').map(c => nodes.find(n => n.id === c.from)).filter(Boolean).map(n => {
         if(n.type === 'output' && (n.images||[]).length){
@@ -11854,71 +11625,6 @@ async function runMidjourneyModal(nodeId, maskRef){
         refreshRunNodes(node, out);
         scheduleSave();
         showErrorModal(node.runError, 'Midjourney');
-    }
-}
-async function runGeneratorLegacy(genId, opts={}){
-    const gen = nodes.find(n => n.id === genId);
-    if(!gen || (gen.running && !opts.cascade)) return;
-    const sources = orderedSources(gen, generatorSources(gen));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
-    if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
-    if(!await validateCanvasModelPrompt(gen, prompt, refs, opts)) return;
-    let kieFields;
-    try { kieFields = await canvasKieRequestFields(gen, refs.length); }
-    catch(error){
-        if(opts.cascade) throw error;
-        showErrorModal(error.message, 'Kie 参数无效'); return;
-    }
-    const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
-    let out = outputForNode(gen, 460);
-    const pendingIds = Array.from({length:count}, () => uid('p'));
-    const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
-    const requestSize = await generatorSizeForRun(gen, refs);
-    if(out) out._pending = [...(out._pending||[]), ...pendingIds.map(id => makePendingForRun(id, run, gen, {refs, requestSize}))];
-    if(!opts.cascade){
-        gen.running = true;
-        refreshRunNodes(gen, out);
-        setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
-    }
-    else refreshRunNodes(gen, out);
-    try {
-        const payload = {
-            prompt: prompt || 'Edit the reference images.',
-            provider_id:resolveImageProviderId(gen.apiProvider || ''),
-            model:resolveImageModel(gen.model),
-            size:requestSize,
-            aspect_ratio:API_RATIO_VALUES[gen.ratio] || (gen.ratio === 'custom' ? String(gen.customRatio || '').trim() : ''),
-            resolution:['1k','2k','4k'].includes(gen.resolution) ? gen.resolution : '',
-            ...kieFields,
-            reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
-        };
-        const quality = normalizedImageQuality(gen.quality);
-        if(quality) payload.quality = quality;
-        await ModelPromptLimits.validate(payload);
-        const results = await Promise.all(Array.from({length:count}, () => fetch('/api/online-image', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(payload)
-        }).then(async r => { if(!r.ok) throw await ModelPromptLimits.responseError(r); return r.json(); })));
-        const images = results.flatMap(result => result.images || []);
-        const metas = collectRunMetas(out, pendingIds);
-        run.request = results[0] ? requestMetaFromResult(results[0]) : {};
-        if(out) out._pending = (out._pending||[]).filter(p => !pendingIds.includes(p.id));
-        appendOutputImages(out, images, refs[0], metas);
-        mergeGeneratedOutputs(gen, images, Boolean(opts.cascade));
-        addGenerationLog({run, outputs:images, runMs:Math.max(...metas.map(m => m.runMs || 0), 0)});
-        gen.runStatus = 'done'; gen.runError = '';
-        refreshRunNodes(gen, out);
-        scheduleSave();
-    } catch(err) {
-        const metas = collectRunMetas(out, pendingIds);
-        addGenerationLog({run, outputs:[], runMs:Math.max(...metas.map(m => m.runMs || 0), 0), error:err.message || String(err)});
-        if(out) out._pending = (out._pending||[]).filter(p => !pendingIds.includes(p.id));
-        gen.runStatus = 'failed'; gen.runError = err.message || String(err);
-        refreshRunNodes(gen, out);
-        if(opts.cascade) throw err;
-        showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
     }
 }
 async function runVideoNode(nodeId, opts={}){
@@ -13246,53 +12952,6 @@ async function runLimitedCascadeRounds(rounds, limit, runner){
 }
 function canvasRunTypes(){
     return ['generator','midjourney','msgen','comfy','ltxDirector','llm','video','rh','minimax'];
-}
-function canvasWorkflowEdges(){
-    const runTypes = canvasRunTypes();
-    const direct = [];
-    connections.forEach(c => {
-        const from = nodes.find(n => n.id === c.from);
-        const to = nodes.find(n => n.id === c.to);
-        if(!from || !to || !runTypes.includes(from.type)) return;
-        if(runTypes.includes(to.type)){
-            direct.push([from.id, to.id]);
-            return;
-        }
-        if(to.type === 'output'){
-            connections.filter(cc => cc.from === to.id).forEach(cc => {
-                const next = nodes.find(n => n.id === cc.to);
-                if(next && runTypes.includes(next.type)) direct.push([from.id, next.id]);
-            });
-        }
-    });
-    return direct;
-}
-function computeConnectedWorkflowOrder(anchorId){
-    const anchor = nodes.find(n => n.id === anchorId);
-    const runTypes = canvasRunTypes();
-    if(!anchor || !runTypes.includes(anchor.type)) return [];
-    const edges = canvasWorkflowEdges();
-    const connected = new Set([anchorId]);
-    let changed = true;
-    while(changed){
-        changed = false;
-        edges.forEach(([from, to]) => {
-            if(connected.has(from) && !connected.has(to)){ connected.add(to); changed = true; }
-            if(connected.has(to) && !connected.has(from)){ connected.add(from); changed = true; }
-        });
-    }
-    const order = [];
-    const seen = new Set();
-    const visit = id => {
-        if(seen.has(id)) return;
-        seen.add(id);
-        edges.filter(([, to]) => to === id).forEach(([from]) => {
-            if(connected.has(from)) visit(from);
-        });
-        if(connected.has(id)) order.push(id);
-    };
-    nodes.filter(n => connected.has(n.id) && runTypes.includes(n.type)).forEach(n => visit(n.id));
-    return order;
 }
 async function runCanvasGenerate(nodeId){
     const node = nodes.find(n => n.id === nodeId);
@@ -15196,43 +14855,6 @@ function finishSelection(event=null){
 function renderSelectionHub(){
     selectionHub.innerHTML = '';
     selectionHub.classList.remove('open');
-}
-function startSelectionLink(e, kind){
-    e.preventDefault();
-    e.stopPropagation();
-    const p = screenToWorld(e.clientX, e.clientY);
-    tempLink = {from:`selection:${kind}`, x1:p.x, y1:p.y, x2:p.x, y2:p.y};
-    window.onmousemove = e2 => { const next = screenToWorld(e2.clientX, e2.clientY); tempLink.x2 = next.x; tempLink.y2 = next.y; renderLinks(); };
-    window.onmouseup = e2 => {
-        const targetPort = nearestPort(e2.clientX, e2.clientY, 'in');
-        const target = targetPort?.closest('.generator-node');
-        if(target) connectSelectionToGenerator(kind, target.dataset.id);
-        tempLink = null;
-        window.onmousemove = null;
-        window.onmouseup = null;
-        render();
-        scheduleSave();
-    };
-}
-function connectSelectionToGenerator(kind, genId){
-    const ids = [...selected];
-    let source = null;
-    if(kind === 'images'){
-        const imgs = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' && n.url);
-        if(!imgs.length) return;
-        const box = nodeBounds(imgs.map(n => n.id));
-        source = {id:uid('grp'), type:'group', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:imgs.map(n => n.id)};
-    } else {
-        const prompts = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'prompt');
-        if(!prompts.length) return;
-        const box = nodeBounds(prompts.map(n => n.id));
-        source = {id:uid('pg'), type:'promptGroup', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:prompts.map(n => n.id)};
-    }
-    nodes.push(source);
-    connections.push({id:uid('c'), from:source.id, to:genId});
-    selected.clear();
-    selected.add(source.id);
-    syncGeneratorInputs();
 }
 
 function pushUndo(){
