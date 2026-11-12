@@ -167,8 +167,8 @@ console.log(JSON.stringify({normal, continuing}));
         self.assertIn("使用当前显式参考图重新生成，不引用当前结果", SMART_HTML)
         self.assertIn("将当前采用结果作为参考图继续生成", SMART_HTML)
         self.assertIn("当前结果 / 继续编辑输入", SMART_I18N)
-        self.assertIn("2026.09.01.run-intent.1", SMART_I18N_LOADER)
-        self.assertIn("/static/js/i18n.js?v=2026.09.01.run-intent.1", SMART_HTML)
+        loader_version = re.search(r"const VERSION = '([^']+)'", SMART_I18N_LOADER).group(1)
+        self.assertIn("/static/js/i18n.js?v=" + loader_version, SMART_HTML)
         self.assertIn(".run-intent-menu", SMART_CSS)
 
     def test_09_intent_is_transient_and_does_not_change_canvas_serialization(self):

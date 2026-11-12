@@ -302,6 +302,7 @@ const promptTemplateBody = document.getElementById('promptTemplateBody');
 const canvasAssetToggle = document.getElementById('canvasAssetToggle');
 const canvasAssetPanel = document.getElementById('canvasAssetPanel');
 const canvasAssetCloseBtn = document.getElementById('canvasAssetCloseBtn');
+const canvasAssetManageBtn = document.getElementById('canvasAssetManageBtn');
 const canvasAssetLibrarySelect = document.getElementById('canvasAssetLibrarySelect');
 const canvasAssetCategorySelect = document.getElementById('canvasAssetCategorySelect');
 const canvasAssetAddCategoryBtn = document.getElementById('canvasAssetAddCategoryBtn');
@@ -14191,6 +14192,7 @@ workflowImportDropZone?.addEventListener('drop', event => {
     else setStatus('请拖入 JSON 或 ZIP 工作流文件');
 });
 canvasAssetCloseBtn?.addEventListener('click', () => toggleCanvasAssetLibrary(false));
+canvasAssetManageBtn?.addEventListener('click', openAssetManager);
 canvasAssetLibrarySelect?.addEventListener('change', () => {
     activeCanvasAssetLibraryId = canvasAssetLibrarySelect.value || '';
     activeCanvasAssetCategoryId = '';

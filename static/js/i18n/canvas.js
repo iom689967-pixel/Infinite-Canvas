@@ -12,6 +12,7 @@
         "canvas.noModelsHint": { zh: "暂无模型，请到 API 设置添加", en: "No models. Add some in API Settings." },
         "canvas.title": { zh: "无限画布", en: "Infinite Canvas" },
         "canvas.backToManager": { zh: "返回画布管理", en: "Back to canvas manager" },
+        "canvas.assetManager": { zh: "资产库管理", en: "Manage asset library" },
         "canvas.untitled": { zh: "未命名画布", en: "Untitled Canvas" },
         "canvas.chooseFirst": { zh: "请选择或新建画布", en: "Choose or create a canvas" },
         "canvas.image": { zh: "上传", en: "Upload" },

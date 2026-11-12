@@ -946,6 +946,42 @@ async function c10ClassicEditorWithoutGateCode(browser) {
   record('C10_classic_editor_saves_without_list_refetch', pass, { saved: Boolean(saved), errors, listRequests, shownTitle });
 }
 
+// ---------------- C10：普通画布编辑器的资产面板里能打开"资产库管理"弹窗 ----------------
+// 修复前弹窗和管理代码都在，但唯一的入口按钮在早已拆走的"选画布"页面上，编辑器里没有任何办法打开它。
+async function c10ClassicAssetManagerEntry(browser) {
+  const id = await createTestCanvas('classic', [{ id: 'audit-am', type: 'text', x: 100, y: 100, text: 'am' }]);
+  const p = await browser.newPage();
+  await p.setViewport({ width: 1400, height: 900 });
+  const errors = [], badApi = [];
+  p.on('pageerror', e => errors.push(String(e.message || e).slice(0, 200)));
+  p.on('response', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/') && r.status() >= 400) badApi.push(r.status() + ' ' + u.pathname); });
+  await p.goto(`${B}/static/canvas.html?id=${id}`, { waitUntil: 'domcontentloaded' });
+  await p.waitForFunction(`typeof canvas!=='undefined' && canvas && canvas.id===${JSON.stringify(id)} && nodes.length===1`, { timeout: 20000 });
+  await sleep(800);
+  const hasButton = await p.evaluate(`Boolean(document.getElementById('canvasAssetManageBtn'))`);
+  const res = { hasButton, opened: false, visible: false, tabs: {}, closed: false };
+  if (hasButton) {
+    await p.click('#canvasAssetToggle');
+    await p.waitForFunction(`document.getElementById('canvasAssetPanel').classList.contains('open')`, { timeout: 5000 });
+    await sleep(300);
+    await p.click('#canvasAssetManageBtn');
+    try { await p.waitForFunction(`document.getElementById('assetManagerModal').classList.contains('open') && document.getElementById('assetManagerBody').children.length > 0`, { timeout: 8000 }); res.opened = true; } catch (e) {}
+    // 弹窗真的在最上层：面板中心点命中弹窗自身
+    res.visible = await p.evaluate(`(() => { const panel = document.querySelector('#assetManagerModal .asset-manager-panel'); const b = panel.getBoundingClientRect();
+      if (b.width < 100 || b.height < 100) return false; const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return Boolean(hit && panel.contains(hit)); })()`);
+    for (const tab of ['workflows', 'prompts', 'assets']) {
+      await p.click(`[data-manager-tab="${tab}"]`); await sleep(400);
+      res.tabs[tab] = await p.evaluate(`document.querySelector('[data-manager-tab="${tab}"]').classList.contains('active') && document.getElementById('assetManagerBody').children.length > 0`);
+    }
+    await p.click('#assetManagerModal .asset-manager-head .preview-icon-btn');
+    await sleep(300);
+    res.closed = await p.evaluate(`!document.getElementById('assetManagerModal').classList.contains('open')`);
+  }
+  await p.close();
+  const pass = hasButton && res.opened && res.visible && Object.values(res.tabs).every(Boolean) && Object.keys(res.tabs).length === 3 && res.closed && !errors.length && !badApi.length;
+  record('C10_classic_asset_manager_opens_from_panel', pass, { ...res, errors, badApi });
+}
+
 // ---------------- C10：外壳页（index.html）的 WebSocket 断线后自动重连，重连后照常收到画布更新通知 ----------------
 // 修复前断开一次就再也不连，之后打开的画布只能靠轮询发现别处的修改。
 async function wsShellReconnects(browser) {
@@ -1048,6 +1084,7 @@ async function listMetaFailureRollsBack(browser) {
     ['C10', () => c10ClassicEditorWithoutGateCode(browser)],
     ['WS', () => wsShellReconnects(browser)],
     ['C10', () => listMetaFailureRollsBack(browser)],
+    ['C10', () => c10ClassicAssetManagerEntry(browser)],
     ['C6', () => apiSemantics()],
   ];
   try {
